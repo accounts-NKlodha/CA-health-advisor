@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Both spike windows may call the report command only.",
+  "windows": ["pet", "control"],
+  "permissions": ["core:default"]
+}

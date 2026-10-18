@@ -1,0 +1,9 @@
+src-tauri/target/
+src-tauri/gen/
+src-tauri/webview2-fixed/
+ui/vendor/
+package/
+*.tgz
+wv2tmp/
+wv2.cab
+BUILD-INFO.txt

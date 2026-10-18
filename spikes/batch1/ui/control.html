@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font: 14px "Segoe UI", sans-serif; margin: 16px; background: #fff; color: #1e283c; }
+  button { font: inherit; padding: 8px 16px; margin-right: 8px; }
+  #status { margin-top: 12px; font-weight: 600; }
+  #stats { margin-top: 6px; color: #555; }
+  video { width: 160px; margin-top: 10px; background: #eee; }
+</style>
+</head>
+<body>
+<div>HealthierYou feasibility batch 1. Disposable test app; no data leaves this PC.</div>
+<p>
+  <button id="start">Start camera test</button>
+  <button id="stop" disabled>Stop</button>
+</p>
+<div id="status">Camera off. The pet is running in its own small window.</div>
+<div id="stats"></div>
+<video id="video" playsinline muted></video>
+<script type="module" src="control.js"></script>
+</body>
+</html>
