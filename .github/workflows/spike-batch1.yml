@@ -25,6 +25,14 @@ jobs:
         with:
           node-version: 22
 
+      - name: Parse-check the test script in Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $errs = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path Run-Batch1-Test.ps1), [ref]$null, [ref]$errs)
+          if ($errs) { $errs | ForEach-Object { Write-Host "$($_.Extent.StartLineNumber): $($_.Message)" }; exit 1 }
+          Write-Host 'Run-Batch1-Test.ps1 parses cleanly'
+
       - name: Vendor MediaPipe pose lite (Apache-2.0)
         run: |
           npm pack @mediapipe/tasks-vision@1.1.1 --silent
@@ -73,7 +81,7 @@ jobs:
           $exe = Get-ChildItem src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
           "installer=$($exe.Name) size_mb=$([math]::Round($exe.Length / 1MB, 1))" | Out-File -Append BUILD-INFO.txt
           "installer_sha256=$((Get-FileHash $exe.FullName -Algorithm SHA256).Hash)" | Out-File -Append BUILD-INFO.txt
-          Copy-Item README.md, BUILD-INFO.txt src-tauri/target/release/bundle/nsis/
+          Copy-Item README.md, BUILD-INFO.txt, Run-Batch1-Test.ps1, Run-Batch1-Test.cmd src-tauri/target/release/bundle/nsis/
           Get-Content BUILD-INFO.txt
 
       - uses: actions/upload-artifact@v4
@@ -83,4 +91,6 @@ jobs:
             spikes/batch1/src-tauri/target/release/bundle/nsis/*.exe
             spikes/batch1/src-tauri/target/release/bundle/nsis/README.md
             spikes/batch1/src-tauri/target/release/bundle/nsis/BUILD-INFO.txt
+            spikes/batch1/src-tauri/target/release/bundle/nsis/Run-Batch1-Test.ps1
+            spikes/batch1/src-tauri/target/release/bundle/nsis/Run-Batch1-Test.cmd
           retention-days: 30

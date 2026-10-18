@@ -37,6 +37,15 @@ fn report(kind: String, data: serde_json::Value, log: State<'_, Log>) {
     }
 }
 
+// Unattended test mode for the scripted run: HY_AUTOTEST=camera or camera_denied.
+#[tauri::command]
+fn autotest_mode() -> serde_json::Value {
+    serde_json::json!({
+        "mode": std::env::var("HY_AUTOTEST").unwrap_or_default(),
+        "camera_minutes": std::env::var("HY_CAMERA_MINUTES").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(10.0),
+    })
+}
+
 fn main() {
     let start = Instant::now();
     let dir = log_dir();
@@ -48,7 +57,7 @@ fn main() {
 
     tauri::Builder::default()
         .manage(Log { events: Mutex::new(events), start })
-        .invoke_handler(tauri::generate_handler![report])
+        .invoke_handler(tauri::generate_handler![report, autotest_mode])
         .setup(move |app| {
             let mut info = open_append(&info_path);
             let _ = writeln!(info, "app_version=0.1.0 batch1 spike");

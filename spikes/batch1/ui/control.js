@@ -41,7 +41,7 @@ setInterval(() => {
   n = 0; detected = 0; inferSum = 0; inferMax = 0;
 }, 5000);
 
-$('start').onclick = async () => {
+async function startCamera() {
   $('start').disabled = true;
   $('status').textContent = 'Starting camera...';
   invoke('camera_start_pressed', {});
@@ -49,10 +49,13 @@ $('start').onclick = async () => {
     stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
   } catch (e) {
     stream = null;
-    $('status').textContent = `Camera unavailable (${e.name}). The pet keeps working.`;
+    const busy = e.name === 'NotReadableError' || e.name === 'AbortError';
+    $('status').textContent = busy
+      ? `Camera unavailable (${e.name}): another app may be using it. The pet keeps working.`
+      : `Camera unavailable (${e.name}). The pet keeps working.`;
     invoke('camera_error', { name: e.name, message: String(e.message || '') });
     $('start').disabled = false;
-    return;
+    return false;
   }
   video.srcObject = stream;
   await video.play().catch(() => {});
@@ -66,9 +69,11 @@ $('start').onclick = async () => {
   $('status').textContent = 'Camera test running. Sit normally; press Stop when done.';
   $('stop').disabled = false;
   if (landmarker) step();
-};
+  return true;
+}
+$('start').onclick = startCamera;
 
-$('stop').onclick = () => {
+function stopCamera() {
   clearTimeout(timer);
   if (stream) stream.getTracks().forEach((t) => t.stop());
   stream = null;
@@ -77,6 +82,33 @@ $('stop').onclick = () => {
   $('status').textContent = 'Camera stopped. Count the seconds until the camera light goes off.';
   $('stop').disabled = true;
   $('start').disabled = false;
-};
+}
+$('stop').onclick = stopCamera;
 
 invoke('control_ready', { userAgent: navigator.userAgent });
+
+// Scripted run: camera for N minutes, then 5 short start/stop cycles.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+(async () => {
+  const cfg = await window.__TAURI__.core.invoke('autotest_mode').catch(() => ({ mode: '' }));
+  if (!cfg.mode) return;
+  invoke('autotest_begin', cfg);
+  await sleep(3000);
+  if (cfg.mode === 'camera_denied') {
+    await startCamera();
+    if (stream) stopCamera();
+    await sleep(6000);
+  } else if (cfg.mode === 'camera') {
+    if (await startCamera()) {
+      await sleep(cfg.camera_minutes * 60000);
+      stopCamera();
+      for (let i = 0; i < 5; i++) {
+        await sleep(10000);
+        if (!(await startCamera())) break;
+        await sleep(20000);
+        stopCamera();
+      }
+    }
+  }
+  invoke('autotest_done', { mode: cfg.mode });
+})();
