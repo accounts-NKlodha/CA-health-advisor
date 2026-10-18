@@ -15,5 +15,9 @@
 | DEC09 | Individual summaries; admin service status only | Planner proposal | Default audience while manager analytics not requested |
 | DEC10 | Use public accounts-NKlodha/CA-health-advisor | User supplied repository; visibility verified | Planning/source shared there; no private transcript or employee data upload |
 | DEC11 | Three-person pilot | User confirmed 18 October | Server and total rollout sizing still unknown |
+| DEC12 | PRD 0.3 package is the baseline; this repository's PRD.md (0.1) is superseded until replaced | Owner approval 18 October | Repository PRD to be refreshed by a later docs PR |
+| DEC13 | Technology choices (Tauri 2, Rust server, MediaPipe, Health Connect, TestFlight) are provisional until the feasibility review | Owner instruction 18 October | Confirmed or replaced at the 22 October review |
+| DEC14 | Public repository holds only project documents and synthetic test evidence | Owner instruction 18 October | No billing screenshots, device identifiers, health records or signing credentials |
+| DEC15 | Routine decisions recorded here through pull requests; only blockers, decisions and gates go to the owner | Packet revision 2 | Codex reviews on GitHub |
 
 PRD.md is the consolidated proposal. Research notes may discuss alternatives; they do not override the approved requirement baseline.

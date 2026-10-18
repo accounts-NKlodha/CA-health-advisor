@@ -1,6 +1,16 @@
 # Project status
 
-Updated 18 October 2026.
+Updated 18 October 2026 (revision 2 of the delivery plan).
+
+- Baseline: PRD 0.3 package approved by the owner on 18 October; the repository PRD.md (0.1) is superseded until refreshed.
+- Phase: feasibility. Batch 1 (desktop pet on a 4 GB PC, offline install, webcam resources) approved and being built on branch spike/batch1. Batch 2 (wearables, meeting detection) not yet requested.
+- Gates in order: feasibility review (22 Oct) -> architecture -> wireframes and clickable prototype -> owner's prototype approval -> product development. Architecture, wireframes and product code are blocked.
+- Delivery plan and feasibility packet: docs/Feasibility_Packet.md. Pilot readiness for 1 November is not yet supported by evidence; blockers and options are in section 2.
+- Coordination: this repository is the shared record; automatic agent wake-ups are unproven until HY-COORD-TEST-1 passes (docs/Coordination_Test.md).
+- No product code, installer for staff, hosted deployment or prototype approval exists.
+
+## Earlier status (17 October)
+
 
 - Phase: Discovery & PRD draft.
 - User PRD approval: pending review of the written artifact.

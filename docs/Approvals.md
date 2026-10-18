@@ -8,6 +8,10 @@
 | Written PRD revision 0.1 | Pending | No user approval yet |
 | Executable feasibility spike before prototype | Not authorised | Research/design only under current hold |
 | Claude wireframe/prototype revision | Pending | Not produced |
+| Feasibility batch 1 (pet, offline install, webcam resources) | Approved 18 Oct 2026 by owner, cap $20 | Disposable spike on branch spike/batch1, never merged |
+| Coordination test HY-COORD-TEST-1 | Approved 18 Oct 2026 by owner, cap $1 | This documentation-only PR |
+| Batch 2, Apple membership purchase, hosting setup | Not approved | Owner decision required |
+| Architecture, wireframes | Blocked | Wait for the feasibility review gate |
 | Product implementation | Blocked | Requires PRD and explicit prototype gate approval |
 | Pilot acceptance / go live | Pending | No release exists |
 
