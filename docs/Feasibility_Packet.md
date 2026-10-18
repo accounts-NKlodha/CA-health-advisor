@@ -391,11 +391,13 @@ The three risks most likely to stop pilot readiness on 1 Nov are the Apple insta
 
 ## 10. Budget: $175 planned plus $25 reserve
 
+> Superseded on 18 Oct 2026: the owner decided planning is recorded as its own line, not inside batch 1. Current allocations, estimated spend and the unchanged $200 ceiling are in docs/Budget.md. Session cost meters are estimates, not balance readings.
+
 The project ceiling is $200: $175 of planned caps and a $25 reserve that is touched only with your decision. The caps are envelopes, not forecasts; actual spend is recorded only from the balance you see.
 
 | Phase | Estimate | Cap | Checkpoint |
 | --- | --- | --- | --- |
-| Planning and this revision | Not separately measurable | Included in batch 1 | Balance noted before batch 1 |
+| Planning and this revision | About $21.91, estimated from session meters | Separate line (superseded the earlier "included in batch 1") | See docs/Budget.md |
 | Feasibility batch 1 (pet, offline install, webcam) | $11 to $19 | $20 | Stop at $20; report actual spend |
 | Feasibility batch 2 (three wearable routes, meeting detection) | $9 to $18 | $15 | Requested separately |
 | Architecture | $5 to $10 | $8 | Codex review |
@@ -451,6 +453,8 @@ The top search result for open-posture, github.com/valuable-familygerreidae648/o
 ## 12. Questions, routine decisions and the approval request
 
 ### Questions for you
+
+> Historical: Q1 and the approval request below were answered on 18 Oct 2026; batch 1 and the coordination test are approved (docs/Approvals.md).
 
 | # | Question | Answer format | Needed by |
 | --- | --- | --- | --- |
