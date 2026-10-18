@@ -38,6 +38,8 @@ jobs:
       - name: Fetch the official fixed-version WebView2 runtime (x64 cab)
         run: |
           $page = (Invoke-WebRequest -UseBasicParsing https://developer.microsoft.com/en-us/microsoft-edge/webview2/).Content
+          # Links sit in the page's embedded JSON with escaped slashes
+          $page = $page -replace '\\u002F', '/'
           $urls = [regex]::Matches($page, 'https://[^"''\s<>]+?FixedVersionRuntime\.[0-9.]+\.x64\.cab') | ForEach-Object Value | Select-Object -Unique
           if (-not $urls) {
             Write-Host "No fixed runtime link found. Page excerpt:"
