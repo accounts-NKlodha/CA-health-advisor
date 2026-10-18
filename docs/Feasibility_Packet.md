@@ -249,10 +249,10 @@ Batch 2 covers the three wearable routes and meeting detection, estimated $9 to 
 ### Common wearable test method (applies to M1, M2, M3)
 
 1. Record exact watch and phone models and OS versions first (section 6); nothing is assumed from a product name.
-2. Note the watch's own step count, leave the phone on the desk, walk about 200 steps, note the watch count again, then sync. The phone did not move, so new steps in the phone's store can only have come from the watch; that is the physical evidence. An app's name in a source list is not.
+2. Note the watch's own step count, leave the phone on the desk, walk about 200 steps, note the watch count again, then sync. A stationary phone is supporting evidence of watch origin, not proof: phones can still log steps, and an app's name in a source list proves nothing.
 3. Compare records for the same 15-minute window only: watch display, phone health store, and our throwaway reader's output.
 4. Record freshness (minutes from walk end to the record appearing), duplicates (raw records summed versus the platform's de-duplicated total, and any overlap with phone-origin records), and provenance (source app, device type, manufacturer and model as written by the source app, labelled "reported by" because Health Connect does not validate it).
-5. Pass: watch-window steps within 5% of the watch display (2% for Apple, where the Fitness app shows the same store), no unexplained duplicates, freshness recorded. Fail: no new records in the window, or only phone-origin records.
+5. Pass (revised 18 Oct on the owner's instruction, replacing the earlier 2% and 5% display comparisons): the watch-origin source records exist for the walk's time window and match the watch's own record for that window when compared record by record from the same source; freshness is measured; duplicates are explained by the platform's de-duplication rules; and provenance (source app, device type, manufacturer and model as reported) is recorded and labelled "reported by". Fail: no new watch-source records in the window, only phone-origin records, or unexplained duplicates.
 
 | ID | Question | Experiment | Needs | Est. credits | Pass leads to | Fail leads to |
 | --- | --- | --- | --- | --- | --- | --- |
