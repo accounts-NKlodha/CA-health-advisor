@@ -349,7 +349,7 @@ function Start-App([string]$Mode, [int]$CamMin) {
 }
 
 function Get-PetWindow {
-    $h = [HYNative]::FindWindow($null, 'HY Pet')
+    $h = [HYNative]::FindWindow([NullString]::Value, 'HY Pet')
     if ($h -ne [IntPtr]::Zero -and [HYNative]::IsWindowVisible($h)) { return $h }
     return [IntPtr]::Zero
 }
@@ -550,6 +550,12 @@ try {
         $s['PowerShell'] = $PSVersionTable.PSVersion.ToString()
         $s['Started'] = (Get-Date).ToString('s')
         foreach ($k in $s.Keys) { Log ("  {0,-15}: {1}" -f $k, $s[$k]) }
+        # Scanners also register as 'Image' devices; only count things that look like cameras.
+        $realCams = @($cams | Where-Object { $_.Class -eq 'Camera' -or $_.PNPClass -eq 'Camera' -or $_.FriendlyName -match 'cam' })
+        if ($realCams.Count -eq 0 -and -not $SkipCamera) {
+            Write-Host '  No webcam detected. Plug the webcam in, check it works in the Windows Camera app, close that app, then press Enter.' -ForegroundColor Yellow
+            Wait-Enter '  Press Enter when the webcam is connected (or just Enter to continue without it)'
+        }
         if ($isAdmin) { Log 'WARNING: script is running elevated; the test is meant to run as a standard user.' 'Yellow' }
 
         # network check
@@ -732,7 +738,7 @@ try {
             $np = Get-Process -Name notepad -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
             if ($np) { $hNp = $np.MainWindowHandle }
         }
-        if ($hNp -eq [IntPtr]::Zero) { $hNp = [HYNative]::FindWindow('Notepad', $null) }
+        if ($hNp -eq [IntPtr]::Zero) { $hNp = [HYNative]::FindWindow('Notepad', [NullString]::Value) }
         if ($hNp -eq [IntPtr]::Zero) { Set-Result 'P3' 'Not run' '' 'Notepad window not found'; Set-Result 'P4' 'Not run' '' 'Notepad window not found'; return }
         $focused = $false
         for ($i = 0; $i -lt 5 -and -not $focused; $i++) { Set-Foreground $hNp; Start-Sleep -Milliseconds 400; $focused = Test-NotepadForeground $hNp }
@@ -745,7 +751,7 @@ try {
         [Windows.Forms.SendKeys]::SendWait('abc')
         $trials = @(); $stay = 0
         for ($n = 1; $n -le 10; $n++) {
-            $hp = [HYNative]::FindWindow($null, 'HY Pet')
+            $hp = [HYNative]::FindWindow([NullString]::Value, 'HY Pet')
             if ($hp -eq [IntPtr]::Zero) { $trials += [pscustomobject]@{ Trial = $n; StayedInNotepad = $false; ForegroundTitle = 'HY Pet window not found' }; continue }
             $r = New-Object HYNative+RECT
             [void][HYNative]::GetWindowRect($hp, [ref]$r)

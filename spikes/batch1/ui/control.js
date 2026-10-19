@@ -46,7 +46,17 @@ async function startCamera() {
   $('status').textContent = 'Starting camera...';
   invoke('camera_start_pressed', {});
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+    const devs = await navigator.mediaDevices.enumerateDevices();
+    invoke('camera_devices', { video_inputs: devs.filter((d) => d.kind === 'videoinput').length });
+  } catch (e) { invoke('camera_devices', { error: String(e) }); }
+  try {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+    } catch (first) {
+      // Some USB webcams refuse a fixed size; retry once with the camera's default mode.
+      invoke('camera_retry', { first_error: first.name, message: String(first.message || '') });
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    }
   } catch (e) {
     stream = null;
     const busy = e.name === 'NotReadableError' || e.name === 'AbortError';
