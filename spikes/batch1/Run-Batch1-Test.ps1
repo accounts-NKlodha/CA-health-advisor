@@ -199,7 +199,8 @@ function Get-ProcSample {
         foreach ($k in $idmap.Keys) {
             if (($ids -contains $idmap[$k]) -and $privmap.ContainsKey($k)) { $sum += $privmap[$k]; $found++ }
         }
-        if ($found -gt 0) { $privMB = $sum / 1MB; $method = 'Get-Counter' }
+        # only trust the counter sum when every process of the tree was matched (otherwise it under-reports)
+        if ($found -eq $ids.Count) { $privMB = $sum / 1MB; $method = 'Get-Counter' }
     } catch {}
     if ($null -eq $privMB) {
         try {
@@ -273,7 +274,8 @@ function Get-RunMetrics($run) {
     foreach ($l in (Read-SharedLines $p)) {
         $f = $l -split ','
         if ($f.Count -ge 8 -and $f[0] -match '^\d+$') {
-            $out += [pscustomobject]@{ Ms = [int64]$f[0]; ElapsedS = (Num $f[1]); Procs = (Num $f[2]); WorkingMB = (Num $f[3]); PrivateMB = (Num $f[4]); AppCpu = (Num $f[5]); MachineCpu = (Num $f[6]); AvailMB = (Num $f[7]) }
+            $pws = $null; if ($f.Count -ge 9) { $pws = Num $f[8] }
+            $out += [pscustomobject]@{ Ms = [int64]$f[0]; ElapsedS = (Num $f[1]); Procs = (Num $f[2]); WorkingMB = (Num $f[3]); PrivateMB = (Num $f[4]); AppCpu = (Num $f[5]); MachineCpu = (Num $f[6]); AvailMB = (Num $f[7]); PrivateWsMB = $pws }
         }
     }
     return $out
@@ -503,7 +505,7 @@ function Show-Countdown([string]$label, [double]$remainS) {
 Add-Test 'I1' 'Offline silent install' 'exit 0, exe present, < 120 s'
 Add-Test 'P5' 'Start-up time to pet visible' '<= 10 s'
 Add-Test 'I2' 'Bundled WebView2 runtime' 'runtime under install folder'
-Add-Test 'P1' 'Idle memory (private WS, last 2/3 of idle)' '<= 150 MB'
+Add-Test 'P1' 'Idle memory (private WS, app log, last 2/3 of idle)' '<= 150 MB'
 Add-Test 'P2' 'Idle CPU (mean, rolling 60 s max)' 'mean <= 2%, no 60 s avg > 5%'
 Add-Test 'P3' 'Focus stays in Notepad after pet click' '10/10'
 Add-Test 'P4' 'Click response latency' '10 clicks, all <= 500 ms'
@@ -692,16 +694,17 @@ try {
         $mt = @(Get-RunMetrics $script:IdleRun | Where-Object { $_.Ms -ge $fromMs -and $_.Ms -le $script:IdleEndMs })
         $crashNote = ''; if ($script:IdleCrashed) { $crashNote = ' APP EXITED DURING IDLE.' }
 
-        # P1
-        $avgPriv = $null; $method = ''
-        if ($ss.Count -gt 0) { $avgPriv = ($ss | Measure-Object -Property PrivateMB -Average).Average; $method = $ss[0].Method }
-        $appPriv = $null; $appWs = $null
+        # P1: scored on app-log private_ws_mb only (never on the Get-Counter sampler)
+        $avgPws = $null; $appPriv = $null; $appWs = $null
+        $pwsRows = @($mt | Where-Object { $null -ne $_.PrivateWsMB })
+        if ($pwsRows.Count -gt 0) { $avgPws = ($pwsRows | Measure-Object -Property PrivateWsMB -Average).Average }
         if ($mt.Count -gt 0) { $appPriv = ($mt | Measure-Object -Property PrivateMB -Average).Average; $appWs = ($mt | Measure-Object -Property WorkingMB -Average).Average }
-        $basis = $avgPriv; if ($null -eq $basis) { $basis = $appPriv }
-        if ($null -eq $basis) { Set-Result 'P1' 'Not run' '' ('No samples or metrics in window.' + $crashNote) }
+        $smpPriv = $null; $method = ''
+        if ($ss.Count -gt 0) { $smpPriv = ($ss | Measure-Object -Property PrivateMB -Average).Average; $method = $ss[0].Method }
+        if ($null -eq $avgPws) { Set-Result 'P1' 'Not run' '' ('private working set not logged by this build.' + $crashNote) }
         else {
-            $st = 'Fail'; if ($basis -le 150 -and -not $script:IdleCrashed) { $st = 'Pass' }
-            Set-Result 'P1' $st ("{0} MB sampled private WS; app log private {1} MB, working set {2} MB" -f (F1 $avgPriv), (F1 $appPriv), (F1 $appWs)) ("Window {0}; {1} samples ({2}), {3} app-log rows.{4}" -f $win, $ss.Count, $method, $mt.Count, $crashNote)
+            $st = 'Fail'; if ($avgPws -le 150 -and -not $script:IdleCrashed) { $st = 'Pass' }
+            Set-Result 'P1' $st ("{0} MB private working set (mean, app log); info: private bytes {1} MB, working set {2} MB" -f (F1 $avgPws), (F1 $appPriv), (F1 $appWs)) ("Window {0}; {1} app-log rows ({2} with private_ws_mb). Sampler (info only, not scored): {3} MB over {4} samples ({5}).{6}" -f $win, $mt.Count, $pwsRows.Count, (F1 $smpPriv), $ss.Count, $method, $crashNote)
         }
 
         # P2
@@ -799,6 +802,7 @@ try {
         Write-Host ("  The camera will run for about {0} minutes, then switch on and off 5 times." -f $CameraMinutes) -ForegroundColor Yellow
         Write-Host '  Please watch the camera light during the 5 short on/off cycles at the end:' -ForegroundColor Yellow
         Write-Host '  count if it went off within about 2 seconds each time.' -ForegroundColor Yellow
+        Write-Host '  Do not click or type in the HY app window during the camera test; it can press Stop.' -ForegroundColor Yellow
         Wait-Enter '  Press Enter to start the camera test'
 
         $run = Start-App 'camera' $CameraMinutes
@@ -856,42 +860,64 @@ try {
         $ss = @($script:Samples | Where-Object { $_.Phase -eq 'camera' -and $_.EpochMs -ge $wStart -and $_.EpochMs -le $wEnd })
         $durMin = [math]::Round(($wEnd - $wStart) / 60000, 1)
 
+        # pair each camera_started after the first with the first camera_stopped that is later than it
+        $closers = @{}
+        $cycles = @()
+        for ($k = 0; $k -lt $started.Count; $k++) {
+            $cl = $null
+            foreach ($e in $stopped) { if ($e.Ms -gt $started[$k].Ms) { $cl = $e; break } }
+            if ($cl) { $closers[[string]$cl.Ms] = $true }
+            if ($k -ge 1 -and $cycles.Count -lt 5 -and $cl) {
+                $on = $started[$k].Ms; $off = $cl.Ms
+                $cycles += [pscustomobject]@{ Cycle = $cycles.Count + 1; OnTime = (From-EpochMs $on).ToString('HH:mm:ss.fff'); OffTime = (From-EpochMs $off).ToString('HH:mm:ss.fff'); OnSeconds = [math]::Round(($off - $on) / 1000, 1); OnMs = $on; OffMs = $off }
+            }
+        }
+        $extraStops = @($stopped | Where-Object { -not $closers.ContainsKey([string]$_.Ms) })
+        $extraTxt = ''
+        if ($extraStops.Count -gt 0) {
+            $extraTxt = ' Unexpected/duplicate camera_stopped events (not closing a start): ' + (($extraStops | ForEach-Object { "{0} (+{1:0.0}s after launch)" -f (From-EpochMs $_.Ms).ToString('HH:mm:ss.fff'), (($_.Ms - $run.LaunchMs) / 1000) }) -join ', ') + '.'
+        }
+
         # C1
         if ($mt.Count -eq 0) { Set-Result 'C1' 'Not run' '' 'No app metrics rows during first camera run' }
         else {
             $cpu = ($mt | Measure-Object -Property AppCpu -Average).Average
             $st = 'Fail'; if ($cpu -le 10) { $st = 'Pass' }
-            Set-Result 'C1' $st ((F1 $cpu) + '% of machine (mean)') ("First camera run {0} min, {1} app-log rows. Machine CPU mean {2}%." -f $durMin, $mt.Count, (F1 ($mt | Measure-Object -Property MachineCpu -Average).Average))
+            $c1note = "First camera run {0} min, {1} app-log rows. Machine CPU mean {2}%." -f $durMin, $mt.Count, (F1 ($mt | Measure-Object -Property MachineCpu -Average).Average)
+            if ((($wEnd - $wStart) / 60000) -lt (0.9 * $CameraMinutes)) {
+                $c1note += " first run cut short at $durMin min (Stop pressed or app interrupted)."
+                $shortRows = @(Get-RunMetrics $run | Where-Object { $m = $_; @($cycles | Where-Object { $m.Ms -ge $_.OnMs -and $m.Ms -le $_.OffMs }).Count -gt 0 })
+                if ($shortRows.Count -gt 0) { $c1note += " Mean app CPU across the {0} short cycles: {1}% of machine ({2} rows)." -f $cycles.Count, (F1 ($shortRows | Measure-Object -Property AppCpu -Average).Average), $shortRows.Count }
+                else { $c1note += " Mean app CPU across the short cycles: n/a (no rows)." }
+            }
+            Set-Result 'C1' $st ((F1 $cpu) + '% of machine (mean)') $c1note
         }
-        # C2
-        $pkS = $null; if ($ss.Count -gt 0) { $pkS = ($ss | Measure-Object -Property PrivateMB -Maximum).Maximum }
+        # C2: scored on app-log private_ws_mb only (never on the Get-Counter sampler)
+        $pwsRows = @($mt | Where-Object { $null -ne $_.PrivateWsMB })
         $pkP = $null; $pkW = $null
         if ($mt.Count -gt 0) { $pkP = ($mt | Measure-Object -Property PrivateMB -Maximum).Maximum; $pkW = ($mt | Measure-Object -Property WorkingMB -Maximum).Maximum }
-        $basis = $pkS; if ($null -eq $basis) { $basis = $pkP }
-        if ($null -eq $basis) { Set-Result 'C2' 'Not run' '' 'No memory samples during camera run' }
+        if ($pwsRows.Count -eq 0) { Set-Result 'C2' 'Not run' '' 'private working set not logged by this build' }
         else {
-            $st = 'Fail'; if ($basis -le 350) { $st = 'Pass' }
-            $meth = ''; if ($ss.Count -gt 0) { $meth = $ss[0].Method }
-            Set-Result 'C2' $st ("{0} MB sampled private WS peak; app log peak private {1} MB, working set {2} MB" -f (F1 $pkS), (F1 $pkP), (F1 $pkW)) ("{0} samples every 15 s ({1})" -f $ss.Count, $meth)
+            $pkPws = ($pwsRows | Measure-Object -Property PrivateWsMB -Maximum).Maximum
+            $st = 'Fail'; if ($pkPws -le 350) { $st = 'Pass' }
+            $pkS = $null; $meth = ''
+            if ($ss.Count -gt 0) { $pkS = ($ss | Measure-Object -Property PrivateMB -Maximum).Maximum; $meth = $ss[0].Method }
+            Set-Result 'C2' $st ("{0} MB private working set (peak, app log); info: private bytes peak {1} MB, working set peak {2} MB" -f (F1 $pkPws), (F1 $pkP), (F1 $pkW)) ("{0} app-log rows with private_ws_mb. Sampler (info only, not scored): peak {1} MB over {2} samples ({3})." -f $pwsRows.Count, (F1 $pkS), $ss.Count, $meth)
         }
         # C3: software stop timestamps
-        $cycles = @()
-        for ($i = 1; $i -le 5; $i++) {
-            if ($started.Count -gt $i -and $stopped.Count -gt $i) {
-                $on = $started[$i].Ms; $off = $stopped[$i].Ms
-                $cycles += [pscustomobject]@{ Cycle = $i; OnTime = (From-EpochMs $on).ToString('HH:mm:ss.fff'); OffTime = (From-EpochMs $off).ToString('HH:mm:ss.fff'); OnSeconds = [math]::Round(($off - $on) / 1000, 1) }
-            }
-        }
-        $cycles | Export-Csv -Path (Join-Path $ResultsDir 'camera-cycles.csv') -NoTypeInformation -Encoding UTF8
+        $cycles | Select-Object Cycle, OnTime, OffTime, OnSeconds | Export-Csv -Path (Join-Path $ResultsDir 'camera-cycles.csv') -NoTypeInformation -Encoding UTF8
         $cycTxt = ($cycles | ForEach-Object { "#{0} on {1} off {2} ({3}s)" -f $_.Cycle, $_.OnTime, $_.OffTime, $_.OnSeconds }) -join '; '
         if (-not $done) { Log 'autotest_done not seen before the timeout.' 'Yellow' }
         Write-Host ''
         $ans = Read-Host '  Did the light go off within 2 s every time? (y/n)'
         $ans = "$ans".Trim().ToLower()
-        $note = "Software stop times: $cycTxt. autotest_done seen: $done. Owner answer: '$ans'."
+        $lightSec = Read-Host '  Roughly how many seconds did the light stay on after each stop? (number, or Enter to skip)'
+        $lightSec = "$lightSec".Trim()
+        $lightTxt = 'not given'; if ($lightSec -ne '') { $lightTxt = "$lightSec s" }
+        $note = "Software stop times: $cycTxt.$extraTxt autotest_done seen: $done. Owner answer: '$ans'. Owner light-on-after-stop estimate: $lightTxt."
         if ($cycles.Count -lt 5) { Set-Result 'C3' 'Fail' ("only {0}/5 cycles logged" -f $cycles.Count) $note }
-        elseif ($ans -eq 'y' -or $ans -eq 'yes') { Set-Result 'C3' 'Pass' 'owner: light off within 2 s, 5/5' $note }
-        elseif ($ans -eq 'n' -or $ans -eq 'no') { Set-Result 'C3' 'Fail' 'owner: light did NOT go off within 2 s every time' $note }
+        elseif ($ans -eq 'y' -or $ans -eq 'yes') { Set-Result 'C3' 'Pass' ("owner: light off within 2 s, 5/5; light stayed on after stop: $lightTxt") $note }
+        elseif ($ans -eq 'n' -or $ans -eq 'no') { Set-Result 'C3' 'Fail' ("owner: light did NOT go off within 2 s every time; light stayed on after stop: $lightTxt") $note }
         else { Set-Result 'C3' 'Not run' 'no clear owner answer' $note }
     }
 
@@ -905,23 +931,34 @@ try {
         Write-Host '  NOTE: the Windows camera privacy setting will be switched OFF briefly for this test' -ForegroundColor Yellow
         Write-Host '  and then restored automatically.' -ForegroundColor Yellow
 
-        $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam'
-        $keyExisted = Test-Path $key
-        $origVal = $null; $valExisted = $false
-        if ($keyExisted) {
-            $pr = Get-ItemProperty -Path $key -Name 'Value' -ErrorAction SilentlyContinue
-            if ($pr -and ($pr.PSObject.Properties.Name -contains 'Value')) { $valExisted = $true; $origVal = $pr.Value }
+        $keyParent = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam'
+        $keyNP = $keyParent + '\NonPackaged'
+        # snapshot both keys (parent first); restore in reverse order
+        $states = @()
+        foreach ($k in @($keyParent, $keyNP)) {
+            $existed = Test-Path $k
+            $origVal = $null; $valExisted = $false
+            if ($existed) {
+                $pr = Get-ItemProperty -Path $k -Name 'Value' -ErrorAction SilentlyContinue
+                if ($pr -and ($pr.PSObject.Properties.Name -contains 'Value')) { $valExisted = $true; $origVal = $pr.Value }
+            }
+            # remember which keys do not exist yet, so we can remove them again
+            $missing = @(); $probe = $k
+            while ($probe -and -not (Test-Path $probe)) { $missing += $probe; $probe = Split-Path $probe -Parent }
+            $states += [pscustomobject]@{ Key = $k; Existed = $existed; ValExisted = $valExisted; Orig = $origVal; Missing = $missing }
         }
-        # remember which parent keys do not exist yet, so we can remove them again
-        $missing = @(); $probe = $key
-        while ($probe -and -not (Test-Path $probe)) { $missing += $probe; $probe = Split-Path $probe -Parent }
         $backupTxt = Join-Path $ResultsDir 'camera-consent-backup.txt'
-        Set-Content -Path $backupTxt -Value ("key={0}`r`nkeyExisted={1}`r`nvalueExisted={2}`r`noriginal={3}" -f $key, $keyExisted, $valExisted, $origVal) -Encoding ASCII
+        $bk = @()
+        foreach ($stt in $states) { $bk += ("key={0}`r`nkeyExisted={1}`r`nvalueExisted={2}`r`noriginal={3}" -f $stt.Key, $stt.Existed, $stt.ValExisted, $stt.Orig) }
+        Set-Content -Path $backupTxt -Value ($bk -join "`r`n") -Encoding ASCII
         $res = $null
         try {
-            if (-not $keyExisted) { New-Item -Path $key -Force | Out-Null }
-            Set-ItemProperty -Path $key -Name 'Value' -Value 'Deny' -Type String
-            Log 'Camera privacy set to Deny.' 'Yellow'
+            foreach ($stt in $states) {
+                if (-not $stt.Existed) { New-Item -Path $stt.Key -Force | Out-Null }
+                Set-ItemProperty -Path $stt.Key -Name 'Value' -Value 'Deny' -Type String
+            }
+            Log 'Camera privacy set to Deny (webcam and webcam\NonPackaged).' 'Yellow'
+            Start-Sleep -Seconds 2
             $run = Start-App 'camera_denied' 0
             $sw = [Diagnostics.Stopwatch]::StartNew()
             $done = $false; $petAfter = $false; $err = $null; $started = $null
@@ -942,20 +979,27 @@ try {
             $res = [pscustomobject]@{ Err = $err; Started = $started; Done = $done; PetAfter = $petAfter; Alive = $alive; Name = $nm }
         }
         finally {
-            # ALWAYS restore the original camera privacy setting
-            try {
-                if ($valExisted) { Set-ItemProperty -Path $key -Name 'Value' -Value $origVal -Type String }
-                elseif ($keyExisted) { Remove-ItemProperty -Path $key -Name 'Value' -ErrorAction SilentlyContinue }
-                elseif ($missing.Count -gt 0) { Remove-Item -Path $missing[$missing.Count - 1] -Recurse -Force -ErrorAction SilentlyContinue }
+            # ALWAYS restore the original camera privacy settings (NonPackaged child first, then parent)
+            $restoreOk = $true
+            for ($ri = $states.Count - 1; $ri -ge 0; $ri--) {
+                $stt = $states[$ri]
+                try {
+                    if ($stt.ValExisted) { Set-ItemProperty -Path $stt.Key -Name 'Value' -Value $stt.Orig -Type String }
+                    elseif ($stt.Existed) { Remove-ItemProperty -Path $stt.Key -Name 'Value' -ErrorAction SilentlyContinue }
+                    elseif ($stt.Missing.Count -gt 0) { Remove-Item -Path $stt.Missing[$stt.Missing.Count - 1] -Recurse -Force -ErrorAction SilentlyContinue }
+                } catch {
+                    $restoreOk = $false
+                    Log ("COULD NOT RESTORE camera privacy key {0}: {1}. Original value was '{2}'. Windows Settings > Privacy > Camera." -f $stt.Key, $_.Exception.Message, $stt.Orig) 'Red'
+                }
+            }
+            if ($restoreOk) {
                 Log 'Camera privacy setting restored.' 'Green'
                 Write-Host '  The camera privacy setting was switched off briefly and has been restored.' -ForegroundColor Green
-            } catch {
-                Log ("COULD NOT RESTORE camera privacy: {0}. Original value was '{1}'. Windows Settings > Privacy > Camera." -f $_.Exception.Message, $origVal) 'Red'
             }
         }
         if (-not $res) { Set-Result 'C4' 'Not run' '' 'Test did not complete'; return }
         $note = "camera_error name '{0}'; autotest_done {1}; pet_frames after error {2}; app running at end {3}" -f $res.Name, $res.Done, $res.PetAfter, $res.Alive
-        if ($res.Started -and -not $res.Err) { Set-Result 'C4' 'Fail' 'camera started despite Deny' $note }
+        if ($res.Started -and -not $res.Err) { Set-Result 'C4' 'Fail' 'camera started despite Deny on webcam and NonPackaged' $note }
         elseif ($res.Err -and $res.Alive -and $res.PetAfter) { Set-Result 'C4' 'Pass' 'camera_error logged, pet still running' $note }
         else { Set-Result 'C4' 'Fail' $(if ($res.Err) { 'camera_error logged but pet/app not confirmed' } else { 'no camera_error logged' }) $note }
     }
