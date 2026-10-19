@@ -85,7 +85,7 @@ mod win {
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
     };
-    use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
+    use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX2};
     use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, GlobalMemoryStatusEx, MEMORYSTATUSEX, SYSTEM_INFO};
     use windows_sys::Win32::System::Threading::{
         GetProcessTimes, GetSystemTimes, OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -154,6 +154,7 @@ mod win {
         cpu_100ns: u64,
         working_set: u64,
         private_bytes: u64,
+        private_ws: u64,
         path: String,
     }
 
@@ -166,8 +167,9 @@ mod win {
             let z = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
             let (mut c, mut x, mut k, mut u) = (z, z, z, z);
             let cpu = if GetProcessTimes(h, &mut c, &mut x, &mut k, &mut u) != 0 { ft(k) + ft(u) } else { 0 };
-            let mut m: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
-            m.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+            // EX2 adds PrivateWorkingSetSize (Windows 10 1809+), the figure Task Manager shows as "Memory"
+            let mut m: PROCESS_MEMORY_COUNTERS_EX2 = std::mem::zeroed();
+            m.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32;
             GetProcessMemoryInfo(h, &mut m as *mut _ as *mut PROCESS_MEMORY_COUNTERS, m.cb);
             let mut buf = [0u16; 1024];
             let mut len = buf.len() as u32;
@@ -177,7 +179,7 @@ mod win {
                 String::new()
             };
             CloseHandle(h);
-            Some(Sample { cpu_100ns: cpu, working_set: m.WorkingSetSize as u64, private_bytes: m.PrivateUsage as u64, path })
+            Some(Sample { cpu_100ns: cpu, working_set: m.WorkingSetSize as u64, private_bytes: m.PrivateUsage as u64, private_ws: m.PrivateWorkingSetSize as u64, path })
         }
     }
 
@@ -204,7 +206,7 @@ mod win {
         let mut metrics = open_append(&metrics_path);
         let _ = writeln!(
             metrics,
-            "epoch_ms,elapsed_s,process_count,working_set_mb,private_mb,app_cpu_pct_of_machine,machine_cpu_pct,avail_ram_mb"
+            "epoch_ms,elapsed_s,process_count,working_set_mb,private_mb,app_cpu_pct_of_machine,machine_cpu_pct,avail_ram_mb,private_ws_mb"
         );
         let mut prev_cpu: HashMap<u32, u64> = HashMap::new();
         let mut prev_sys = system_times();
@@ -214,12 +216,13 @@ mod win {
             std::thread::sleep(Duration::from_secs(5));
             let procs = snapshot();
             let pids = descendants(root, &procs);
-            let (mut ws, mut pb, mut cpu_delta) = (0u64, 0u64, 0u64);
+            let (mut ws, mut pb, mut pws, mut cpu_delta) = (0u64, 0u64, 0u64, 0u64);
             let mut cur_cpu = HashMap::new();
             for pid in &pids {
                 if let Some(s) = sample(*pid) {
                     ws += s.working_set;
                     pb += s.private_bytes;
+                    pws += s.private_ws;
                     cpu_delta += s.cpu_100ns.saturating_sub(*prev_cpu.get(pid).unwrap_or(&s.cpu_100ns));
                     cur_cpu.insert(*pid, s.cpu_100ns);
                     if seen_paths.insert(s.path.clone()) {
@@ -245,7 +248,7 @@ mod win {
             };
             let _ = writeln!(
                 metrics,
-                "{},{},{},{:.1},{:.1},{:.2},{:.1},{}",
+                "{},{},{},{:.1},{:.1},{:.2},{:.1},{},{:.1}",
                 epoch_ms(),
                 start.elapsed().as_secs(),
                 pids.len(),
@@ -253,7 +256,8 @@ mod win {
                 pb as f64 / 1_048_576.0,
                 app_pct,
                 machine_pct,
-                avail
+                avail,
+                pws as f64 / 1_048_576.0
             );
             let _ = metrics.flush();
         }
