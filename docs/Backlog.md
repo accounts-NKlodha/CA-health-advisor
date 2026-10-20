@@ -18,3 +18,17 @@ Draft 18 October 2026. This is a gate/work register, not an authorised coding pl
 
 No build task is active. V1, V2 and V3 remain required. Failed feasibility produces an explicit decision, not silent removal from scope.
 
+
+## Update 20 October 2026
+
+Sequence is V1 and V2 first, then wearable feasibility. V3 is deferred, not removed.
+
+| ID | Work | State |
+|---|---|---|
+| D06 | V1/V2 architecture proposal (flag unverified assumptions; estimate V1/V2 dates) | Authorised 20 Oct; next |
+| D12 | Codex architecture review | After D06 |
+| D07, D08, D09 | Wireframes/clickable prototype, design review, Rohit's explicit prototype approval | Not approved; after D12 |
+| D10 | Product development in slices | Not approved; after D09 |
+| D13 | Batch 1 open items (Blockers.md B06 to B10) | Tracked; soak test and second webcam before UAT/pilot |
+| D14 | Wearable feasibility (Apple, Fossil, Samsung; formerly batch 2 and Wearable_Feasibility.md follow-ups) | Deferred until after V1/V2; no research now; batch 2 not authorised |
+| D15 | V3: hosted deployment, wearables, rankings, groups | Deferred, not removed |

@@ -3,6 +3,9 @@
 > Public repository copy of the HealthierYou delivery plan and feasibility packet, revision 2 (18 Oct 2026). Personal billing details are kept out of this copy; budget figures are project allocations only.
 
 
+> **Revision note, 20 Oct 2026.** The sequence has changed (owner, 20 Oct): V1 and V2 are built first, then wearable feasibility; V3 is deferred, not removed, and wearable feasibility no longer blocks V1/V2 architecture. The original target of V1+V2+V3 by 5 Nov 2026 and the 1 Nov / 2 to 4 Nov pilot timing below are no longer committed; V1/V2 dates will be estimated in the architecture proposal. Batch 1 is provisionally accepted by Codex on the 8 GB Windows 11 laptop only (not independently verified, not 4 GB validated); the minimum PC target is now 8 GB, Windows 10 camera operation is unproven, and Media Foundation capture is retained. Open items are in docs/Blockers.md; evidence is in docs/evidence/batch1/. The body below is unchanged and reflects revision 2 (18 Oct).
+
+
 Oct 18, 2026 · @Rohit Lodha
 
 **Revision 2, 18 Oct, after Codex's feasibility gate review.** What changed and what is needed from you:

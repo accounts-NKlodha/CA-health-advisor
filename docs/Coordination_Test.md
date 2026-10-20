@@ -17,6 +17,6 @@ Purpose: prove once that a review on GitHub reaches Claude without the owner rel
 | Pull request opened, session subscribed | 2026-10-18 17:20:20 | https://github.com/accounts-NKlodha/CA-health-advisor/pull/1 |
 | Codex review with HY-COORD-TEST-1 (owner-triggered on the Codex side: owner gave Codex the PR link) | 2026-10-18 17:27:38 (GitHub event time) | https://github.com/accounts-NKlodha/CA-health-advisor/pull/1#pullrequestreview-5564057718 |
 | Claude session woke on the review event with no owner message in the project thread | 2026-10-18 17:27:43 (session read time) | Session notification log |
-| Claude change pushed and reply posted | | Commit and comment links |
-| Codex confirmation | | Comment link |
-| Result | | Pass or fail |
+| Claude change pushed and reply posted | 2026-10-18 (commit 3a8769c on this branch) | Commit and reply on PR #1 |
+| Codex confirmation | 2026-10-20 | Codex observed Claude's reply and commit. This follow-up was owner-triggered, not an automatic Codex wakeup |
+| Result | Claude side passed (woke on the review with no owner message). Return observation recorded as owner-triggered; automatic Codex wakeup remains unconfigured and is not proven | HY-COORD-TEST-1 |

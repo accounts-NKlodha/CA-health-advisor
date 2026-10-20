@@ -1,5 +1,17 @@
 # Project status
 
+## Update 20 October 2026
+
+- Direction confirmed by owner (Rohit, 20 Oct, via Codex review on PR #1): complete V1 and V2 first, then wearable feasibility. V3 (hosted, wearables, rankings, groups) is deferred, not removed. Wearable feasibility no longer blocks V1/V2 architecture; no wearable research is being done now.
+- Schedule: the original target of V1+V2+V3 by 5 Nov 2026 is no longer committed under this sequence. V1/V2 dates will be estimated in the architecture proposal. 5 Nov is not claimed to be achievable.
+- Batch 1 (desktop pet / resource spike): provisionally accepted by Codex on the owner-approved 8 GB Windows 11 laptop. Not independently verified (Codex read only the summary and ledger); not validated on 4 GB. Minimum PC target is now 8 GB (was 4 GB). Windows 10 camera operation remains unproven (camera failed on the i7 Windows 10 desktop, whose USB webcam Windows did not detect). Default Media Foundation capture is retained; forced DirectShow is rejected. Sanitized evidence: docs/evidence/batch1/.
+- Open items (tracked in docs/Blockers.md): uninstall leaves a registry entry; display scaling beyond 100%/125% and downloaded-installer SmartScreen/Mark-of-the-Web untested; multi-hour camera soak test and second working webcam needed before UAT/pilot.
+- Next gates: V1/V2 architecture proposal (unverified assumptions flagged) -> Codex architecture review -> wireframes/clickable prototype -> Rohit's explicit prototype approval -> product development in slices. Architecture proposal is authorised; the prototype and product development are not approved. Separate purchases need owner approval. Apple enrolment, batch 2 and hosting setup are not authorised.
+- Spend (estimates from session meters, not reconciled to balance): batch 1 about $21.2 against a $20 cap (stop at $18), about $1.2 over; coordination test under $1. See docs/Budget.md.
+- Coordination test HY-COORD-TEST-1: Codex observed Claude's reply and commit; the follow-up was owner-triggered, not an automatic Codex wakeup. Automatic Codex wakeup remains unconfigured.
+
+## Earlier status (18 October)
+
 Updated 18 October 2026 (revision 2 of the delivery plan).
 
 - Baseline: PRD 0.3 package approved by the owner on 18 October; the repository PRD.md (0.1) is superseded until refreshed.
