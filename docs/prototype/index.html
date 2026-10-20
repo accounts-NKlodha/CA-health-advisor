@@ -1,0 +1,1181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HealthierYou prototype (simulated)</title>
+<!--
+  HealthierYou V1/V2 SIMULATED clickable prototype for design review.
+  Not product code. No network calls, no storage, no camera access.
+  Structure: CSS -> static desktop markup -> JS (state S, pet art, render helpers, actions A, flows F).
+  Spec: docs/Wireframes_V1_V2.md
+-->
+<style>
+:root{
+  --ink:#1f2a30;--muted:#55646c;--line:#d3dbdf;--card:#fff;--soft:#f4f7f8;
+  --acc:#2d6a6e;--acc-ink:#fff;--acc-soft:#e3f0f0;
+  /* Okabe-Ito colour-blind-safe status palette, always paired with an icon or text */
+  --blue:#0072B2;--orange:#E69F00;--verm:#D55E00;--green:#009E73;--sky:#56B4E9;
+  --fs:14px;
+}
+.hc{--ink:#000;--muted:#222;--line:#000;--acc:#003f5c;--soft:#fff}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#2b3236;font-family:"Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif;color:var(--ink)}
+button{font:inherit;cursor:pointer}
+button:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-visible{outline:3px solid #1a73e8;outline-offset:2px}
+#stage{position:absolute;left:0;top:0;width:1366px;height:768px;overflow:hidden;transform-origin:0 0;background:#000}
+#banner{position:absolute;top:0;left:0;right:0;height:26px;z-index:100;background:#fff4cc;color:#4a3b00;border-bottom:1px solid #c9ad3c;font:600 13px/26px "Segoe UI",system-ui,sans-serif;text-align:center;letter-spacing:.2px}
+#desk{position:absolute;top:26px;left:0;right:0;bottom:40px;overflow:hidden;background:linear-gradient(160deg,#5f7f8b 0%,#8fa9a3 60%,#b7c6b8 100%)}
+#taskbar{position:absolute;left:0;right:0;bottom:0;height:40px;background:#1c2226;color:#e8eef0;display:flex;align-items:center;gap:6px;padding:0 10px;font-size:13px;z-index:60}
+#taskbar .tb{background:none;border:0;color:inherit;padding:6px 10px;border-radius:4px}
+#taskbar .tb:hover,#taskbar .tb.on{background:#ffffff22}
+#tray{margin-left:auto;display:flex;align-items:center;gap:10px}
+#trayHY{display:flex;align-items:center;gap:4px}
+#trayMenu{position:absolute;right:90px;bottom:44px;background:#fff;color:var(--ink);border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 24px #0004;padding:6px;z-index:70;min-width:220px}
+#trayMenu button{display:block;width:100%;text-align:left;background:none;border:0;padding:8px 10px;border-radius:6px}
+#trayMenu button:hover{background:var(--soft)}
+/* windows */
+.win{position:absolute;background:#fff;border:1px solid #9aa7ad;border-radius:8px;box-shadow:0 12px 36px #0003;overflow:hidden;display:flex;flex-direction:column}
+.titlebar{height:32px;display:flex;align-items:center;padding:0 6px 0 12px;font-size:12.5px;background:#f3f5f6;border-bottom:1px solid #dde3e6;gap:8px;flex:none}
+.titlebar .t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.titlebar .x{border:0;background:none;width:34px;height:26px;border-radius:4px}
+.titlebar .x:hover{background:#e81123;color:#fff}
+.inactive .titlebar{color:#8a979d;background:#fafbfb}
+#ledger{left:250px;top:14px;width:1010px;height:640px}
+#ledger .ribbon{height:34px;border-bottom:1px solid #e3e8ea;display:flex;gap:16px;align-items:center;padding:0 12px;font-size:12px;color:#55646c}
+#ledger .fx{height:26px;border-bottom:1px solid #e3e8ea;display:flex;align-items:center;font:12px Consolas,monospace;padding:0 8px;gap:10px}
+#ledger table{border-collapse:collapse;font-size:12px;width:100%}
+#ledger td,#ledger th{border:1px solid #e3e8ea;padding:3px 6px;height:22px;white-space:nowrap}
+#ledger th{background:#f5f7f8;color:#6b7a81;font-weight:500}
+#ledger td.n{text-align:right;font-family:Consolas,monospace}
+#ledger td.sel{outline:2px solid #217346;outline-offset:-2px}
+#hyWin{left:300px;top:22px;width:860px;height:610px;z-index:20}
+#hyWin .body{flex:1;display:flex;min-height:0;font-size:var(--fs)}
+#hyWin nav{width:190px;background:var(--soft);border-right:1px solid var(--line);padding:10px 6px;overflow:auto;flex:none}
+#hyWin nav button{display:block;width:100%;text-align:left;border:0;background:none;padding:7px 10px;border-radius:6px;color:var(--ink);font-size:13px}
+#hyWin nav button.on{background:var(--acc-soft);font-weight:600;box-shadow:inset 3px 0 var(--acc)}
+#hyWin nav button[disabled]{color:#9aa5aa;cursor:not-allowed}
+#hyWin .content{flex:1;overflow:auto;padding:18px 22px}
+#adminWin{left:270px;top:18px;width:900px;height:620px;z-index:22;font-size:var(--fs)}
+#adminWin .content{flex:1;overflow:auto;padding:16px 20px}
+h2{font-size:1.35em;margin:0 0 6px}h3{font-size:1.05em;margin:16px 0 6px}
+p{margin:6px 0;line-height:1.45}
+.muted{color:var(--muted)}.small{font-size:.86em}
+.draft{display:inline-block;background:#fdecc8;color:#5a4100;border:1px dashed #b8892a;border-radius:4px;padding:1px 6px;font-size:11.5px;font-weight:600;vertical-align:middle}
+.v2tag,.v3tag{display:inline-block;border-radius:4px;padding:0 5px;font-size:11px;font-weight:700;vertical-align:middle;border:1px solid}
+.v2tag{color:#3b4cb0;border-color:#8c99e0;background:#eef0fd}
+.v3tag{color:#666;border-color:#bbb;background:#f2f2f2}
+.btn{border:1px solid #b9c4c9;background:#fff;color:var(--ink);padding:6px 12px;border-radius:6px;font-size:.95em;margin:3px 4px 3px 0}
+.btn:hover{background:var(--soft)}
+.btn.primary{background:var(--acc);border-color:var(--acc);color:var(--acc-ink)}
+.btn.primary:hover{filter:brightness(1.08)}
+.btn.link{border:0;background:none;color:var(--acc);text-decoration:underline;padding:4px 6px}
+.btn.danger{color:#9b2c00;border-color:#d9a58f}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.card{border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:8px 0;background:#fff}
+.note{background:#f1f6fb;border-left:4px solid var(--blue);padding:8px 12px;border-radius:4px;margin:8px 0;font-size:.92em}
+.warn{background:#fff6e5;border-left:4px solid var(--orange);padding:8px 12px;border-radius:4px;margin:8px 0;font-size:.92em}
+.err{background:#fdeee8;border-left:4px solid var(--verm);padding:8px 12px;border-radius:4px;margin:8px 0;font-size:.92em}
+.ok{background:#e7f6f0;border-left:4px solid var(--green);padding:8px 12px;border-radius:4px;margin:8px 0;font-size:.92em}
+.chip{display:inline-flex;align-items:center;gap:4px;border:1px solid #b9c4c9;border-radius:999px;padding:4px 10px;margin:3px;background:#fff;font-size:.9em}
+.chip.on{background:var(--acc);color:#fff;border-color:var(--acc)}
+.chip[disabled]{opacity:.5}
+label.fld{display:block;margin:10px 0 4px;font-weight:600;font-size:.92em}
+input[type=text],input[type=number],input[type=password],input[type=time],select{font:inherit;padding:5px 8px;border:1px solid #aab6bb;border-radius:5px;background:#fff}
+input.slip{width:100%;font-family:Consolas,monospace;font-size:12px}
+.toggle{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #edf1f2}
+.sw{width:42px;height:22px;border-radius:11px;border:2px solid #6c7a80;background:#fff;position:relative;flex:none;padding:0}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#6c7a80;transition:left .15s}
+.sw[aria-checked=true]{background:var(--acc);border-color:var(--acc)}
+.sw[aria-checked=true]::after{left:22px;background:#fff}
+.sw .lbl{position:absolute;left:50px;top:1px;font-size:11px;color:var(--muted);white-space:nowrap}
+.steps{display:flex;gap:4px;margin:0 0 14px}
+.steps span{flex:1;height:5px;border-radius:3px;background:#dbe3e6}
+.steps span.done{background:var(--acc)}
+.grid5{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.petcard{border:2px solid var(--line);border-radius:10px;padding:6px;text-align:center;background:#fff;font-size:12px;min-height:118px}
+.petcard.on{border-color:var(--acc);box-shadow:0 0 0 2px var(--acc-soft)}
+.petcard svg{width:64px;height:64px}
+.petcard .ph{width:64px;height:64px;margin:0 auto;border:2px dashed #a9b5ba;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;color:#8a979d}
+table.t{border-collapse:collapse;width:100%;font-size:.92em}
+table.t th,table.t td{border-bottom:1px solid #e6ebed;padding:6px 8px;text-align:left;vertical-align:top}
+table.t th{background:var(--soft);font-weight:600}
+code,.mono{font-family:Consolas,monospace;font-size:.9em}
+/* pet */
+#pet{position:absolute;width:128px;height:128px;z-index:40;touch-action:none;cursor:grab;user-select:none}
+#pet.drag{cursor:grabbing}
+#pet .art{width:100%;height:100%;transform-origin:50% 100%}
+#pet svg{width:100%;height:100%;overflow:visible}
+#pet .eye{transform-box:fill-box;transform-origin:center;transition:transform .2s}
+#petBadge{position:absolute;right:2px;top:18%;min-width:26px;height:26px;border-radius:13px;background:#fff;border:2px solid var(--ink);display:none;align-items:center;justify-content:center;font:700 12px/1 "Segoe UI",sans-serif;padding:0 4px}
+#petBadge svg{width:16px;height:16px}
+#petTag{position:absolute;left:50%;bottom:-6px;transform:translateX(-50%);white-space:nowrap;background:#1f2a30e6;color:#fff;font:600 11.5px/1 "Segoe UI",sans-serif;padding:4px 8px;border-radius:10px;display:none}
+#petCam{position:absolute;left:2px;top:22%;display:none;align-items:center;gap:3px;background:#fff;border:2px solid #1f2a30;border-radius:10px;padding:1px 6px;font:700 10.5px/16px "Segoe UI",sans-serif}
+#petCam i{width:8px;height:8px;border-radius:50%;background:var(--verm);display:inline-block}
+.st-idle .art{animation:bob 4s ease-in-out infinite}
+.st-cue .art{animation:wiggle 1.2s ease-in-out 3}
+.st-celebrate .art{animation:hop .6s ease-out 2}
+.st-exercise .art{animation:stretch 1.6s ease-in-out infinite}
+.st-focus .eye,.st-quiet .eye,.st-snoozed .eye,.st-paused .eye{transform:scaleY(.15)}
+.st-meeting .art,.st-paused .art,.st-quiet .art{opacity:.55}
+.st-offline .art{filter:grayscale(.7)}
+.st-hidden{display:none}
+@keyframes bob{50%{transform:translateY(-3px)}}
+@keyframes wiggle{25%{transform:rotate(-5deg)}75%{transform:rotate(5deg)}}
+@keyframes hop{40%{transform:translateY(-14px)}}
+@keyframes stretch{50%{transform:scaleY(1.07) scaleX(.97)}}
+.rm *,.rm *::before,.rm *::after{animation:none!important;transition:none!important}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* bubble */
+#bubble{position:absolute;z-index:45;width:300px;background:#fff;border:1px solid #9aa7ad;border-radius:12px;box-shadow:0 10px 28px #0003;padding:12px 14px;font-size:var(--fs);display:none}
+#bubble.wide{width:380px}
+#bubble.show{display:block}
+#bubble .bx{position:absolute;right:6px;top:6px;border:0;background:none;width:26px;height:26px;border-radius:5px;color:var(--muted)}
+#bubble .bx:hover{background:var(--soft)}
+#bubble .reason{font-size:.88em;color:var(--muted);margin:2px 0 6px;padding-left:0;list-style:none}
+#bubble .reason li::before{content:"\2022\00a0";color:var(--acc)}
+#bubble .reason li.doneLine{text-decoration:line-through;color:#8a979d}
+#bubble h4{margin:0 26px 4px 0;font-size:1.02em}
+.illus{display:flex;gap:12px;align-items:center;background:var(--soft);border-radius:8px;padding:8px;margin:6px 0}
+.illus svg{width:84px;height:84px;flex:none}
+.progress{height:10px;border-radius:5px;background:#e3e9ec;overflow:hidden;margin:6px 0}
+.progress i{display:block;height:100%;background:var(--blue)}
+/* modal */
+#modalWrap{position:absolute;inset:0;background:#0006;z-index:50;display:none;align-items:center;justify-content:center}
+#modalWrap.show{display:flex}
+#modal{background:#fff;border-radius:10px;width:560px;max-height:600px;overflow:auto;padding:18px 22px;box-shadow:0 18px 48px #0005;font-size:var(--fs)}
+/* reviewer panel */
+#rev{position:absolute;left:0;top:26px;bottom:40px;width:240px;background:#262b48;color:#eef0ff;z-index:90;display:flex;flex-direction:column;font-size:12.5px;border-right:3px dashed #8f97ff}
+#rev.min{width:34px}
+#rev.min .rb,#rev.min #revFoot{display:none}
+#revFoot{padding:4px 8px 8px;border-top:1px solid #ffffff22;flex:none}
+#rev header{padding:8px 10px;display:flex;align-items:center;gap:6px;border-bottom:1px solid #ffffff22}
+#rev header b{flex:1}
+#rev .rb{overflow:auto;padding:6px 8px;flex:1}
+#rev .grp{margin:8px 2px 4px;font-weight:700;color:#bfc5ff;font-size:11.5px;letter-spacing:.4px;text-transform:uppercase}
+#rev button.f{display:block;width:100%;text-align:left;background:#ffffff10;border:1px solid #ffffff1a;color:#eef0ff;padding:4px 8px;border-radius:5px;margin:2px 0;font-size:12px}
+#rev button.f:hover{background:#ffffff26}
+#rev button.f.on{background:#8f97ff;color:#14173a;font-weight:700}
+#rev button.f[disabled]{opacity:.45;cursor:not-allowed}
+#rev .cap{background:#11142c;border-radius:6px;padding:8px;margin:6px 0;line-height:1.4;min-height:96px;max-height:190px;overflow:auto}
+#rev .cap b{color:#fff}
+#rev .sim button{background:#ffffff14;border:1px solid #ffffff2a;color:#eef0ff;border-radius:4px;padding:3px 6px;margin:2px 2px 2px 0;font-size:11.5px}
+#rev .tgl{background:none;border:1px solid #ffffff44;color:#fff;border-radius:4px;padding:2px 6px}
+/* gallery */
+#gallery{position:absolute;inset:20px 20px 20px 260px;background:#fff;border-radius:10px;z-index:55;padding:16px 20px;overflow:auto;display:none;box-shadow:0 18px 48px #0005;font-size:13px}
+#gallery.show{display:block}
+.gal{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
+.gcell{border:1px solid var(--line);border-radius:10px;padding:8px;text-align:center;position:relative;background:linear-gradient(#eef3f2,#dde7e4)}
+.gcell .gp{position:relative;width:96px;height:96px;margin:0 auto}
+.gcell .gp svg{width:96px;height:96px}
+.gcell .gt{display:inline-block;margin-top:4px;background:#1f2a30;color:#fff;border-radius:9px;padding:2px 8px;font-size:11px;font-weight:600}
+.gcell .gb{position:absolute;right:0;top:0;background:#fff;border:2px solid #1f2a30;border-radius:12px;min-width:22px;height:22px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px}
+.gcell .gb svg{width:14px;height:14px}
+/* charts */
+.chart{display:flex;align-items:flex-end;gap:18px;height:190px;padding:10px 10px 0;border-bottom:2px solid #6c7a80;position:relative;margin-top:8px}
+.bar{width:64px;position:relative;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%}
+.bar .v{width:100%;background:var(--blue);border-radius:4px 4px 0 0}
+.bar .v.zero{background:none;border:2px solid var(--blue);height:3px!important}
+.bar .v.none{background:repeating-linear-gradient(45deg,#c9d2d6 0 6px,#fff 6px 12px);border:1px dashed #8a979d}
+.bar .v.part{background:repeating-linear-gradient(90deg,var(--blue) 0 10px,#5aa0cc 10px 12px);outline:2px dashed var(--blue)}
+.bar .lab{position:absolute;bottom:-38px;font-size:11.5px;text-align:center;width:90px;color:var(--muted)}
+.bar .num{font-size:12px;font-weight:700;margin-bottom:3px}
+.baseline{position:absolute;left:0;right:0;border-top:2px dashed var(--orange)}
+.baseline span{position:absolute;right:4px;top:-18px;font-size:11px;color:#8a5a00;background:#fff;padding:0 3px}
+.days{display:grid;grid-template-columns:repeat(16,1fr);gap:4px;margin-top:8px}
+.day{height:34px;border-radius:5px;font-size:10.5px;display:flex;flex-direction:column;align-items:center;justify-content:center;border:1px solid #c6d0d4;line-height:1.1}
+.day.met{background:var(--blue);color:#fff;border-color:var(--blue)}
+.day.part{background:#fff;border:2px dashed var(--blue);color:#1f2a30}
+.day.zero{background:#fff;border:2px solid var(--blue)}
+.day.none{background:repeating-linear-gradient(45deg,#dfe5e8 0 4px,#fff 4px 8px);color:#55646c}
+.day.off{background:#eef1f2;color:#8a979d}
+.day.fut{background:#fff;color:#c0c8cc;border-style:dotted}
+.legend{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;margin:6px 0}
+.legend span{display:inline-flex;align-items:center;gap:4px}
+.legend i{width:16px;height:14px;border-radius:3px;display:inline-block}
+.cam{background:#2a3136;border-radius:8px;width:320px;height:220px;position:relative;display:flex;align-items:center;justify-content:center;color:#cfd8dc;flex:none}
+.cam .camlbl{position:absolute;left:8px;top:6px;font-size:11px;display:flex;align-items:center;gap:5px}
+.cam .camlbl i{width:9px;height:9px;border-radius:50%;background:var(--verm)}
+.cam .camnote{position:absolute;bottom:6px;left:0;right:0;text-align:center;font-size:11px;color:#9fb0b7}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="banner" role="note">Simulated prototype for design review. Not the product. No data is saved or sent.</div>
+  <div id="desk">
+    <div class="win" id="ledger" aria-label="Simulated spreadsheet application">
+      <div class="titlebar"><span class="t">Ledger_Q3.xlsx &mdash; Spreadsheet app (simulated, fictional data)</span><button class="x" tabindex="-1" aria-hidden="true">&#x2715;</button></div>
+      <div class="ribbon"><b>Home</b><span>Insert</span><span>Formulas</span><span>Data</span><span>Review</span><span>View</span></div>
+      <div class="fx"><b>F7</b><span>=F6+D7-E7</span></div>
+      <div style="overflow:hidden;flex:1"><table id="sheet"></table></div>
+    </div>
+    <div class="win" id="hyWin" style="display:none" role="dialog" aria-label="HealthierYou">
+      <div class="titlebar"><span class="t" id="hyTitle">HealthierYou</span><button class="x" data-a="closeWin" aria-label="Close window">&#x2715;</button></div>
+      <div class="body" id="hyBody"></div>
+    </div>
+    <div class="win" id="adminWin" style="display:none" role="dialog" aria-label="Server admin page">
+      <div class="titlebar"><span class="t">HealthierYou Server &mdash; admin page (opened on the server PC only, localhost)</span><button class="x" data-a="closeAdmin" aria-label="Close admin page">&#x2715;</button></div>
+      <div class="content" id="adminBody"></div>
+    </div>
+    <div id="pet" class="st-idle" role="button" tabindex="-1" aria-label="HealthierYou pet. Click for actions. Keyboard: Ctrl+Alt+H opens the pet panel.">
+      <div class="art" id="petArt"></div>
+      <div id="petBadge" aria-hidden="true"></div>
+      <div id="petCam" aria-hidden="true"><i></i>CAM</div>
+      <div id="petTag"></div>
+    </div>
+    <div id="bubble" role="dialog" aria-live="polite"></div>
+    <div id="modalWrap"><div id="modal" role="dialog" aria-modal="true"></div></div>
+    <div id="gallery" role="dialog" aria-label="Pet state gallery"></div>
+  </div>
+  <div id="taskbar">
+    <button class="tb" tabindex="-1">&#x229E; Start</button>
+    <button class="tb on" tabindex="-1">Spreadsheet</button>
+    <button class="tb" tabindex="-1">PDF viewer</button>
+    <button class="tb" tabindex="-1">Tax portal (browser)</button>
+    <div id="tray">
+      <button class="tb" id="trayHY" data-a="tray" aria-label="HealthierYou tray icon"><svg width="16" height="16" viewBox="0 0 24 24"><path d="M12 21s-7-4.6-9.3-9A5.2 5.2 0 0 1 12 6a5.2 5.2 0 0 1 9.3 6C19 16.4 12 21 12 21z" fill="#7fd1c7"/></svg><span id="trayTxt">HealthierYou</span></button>
+      <span id="clock">Tue 11:15</span>
+    </div>
+  </div>
+  <aside id="rev" aria-label="Reviewer panel (not part of the product)">
+    <header><b>Reviewer panel</b><button class="tgl" data-a="revMin" aria-label="Collapse reviewer panel">&#x2039;</button></header>
+    <div class="rb" id="revBody"></div><div id="revFoot"></div>
+  </aside>
+</div>
+
+<script>
+'use strict';
+/* ---------- helpers ---------- */
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const btn = (label, a, v = '', cls = '') => `<button class="btn ${cls}" data-a="${a}" data-v="${esc(v)}">${label}</button>`;
+const sw = (on, a, v, label) => `<button class="sw" role="switch" aria-checked="${!!on}" aria-label="${esc(label)}" data-a="${a}" data-v="${esc(v)}"></button>`;
+const DRAFT = '<span class="draft">Draft pending contract</span>';
+const V2 = '<span class="v2tag">V2</span>';
+const DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+
+/* ---------- simulated state (memory only, nothing persisted) ---------- */
+const S0 = () => ({
+  setupDone: true, pet: 'turtle', petName: 'Shelly', colour: 0, scale: 100, tone: 'Gentle', edge: 'right', motion: true,
+  version: 'V2', clock: 'Tue 11:15', fs: 14, rm: false, hc: false,
+  workDays: [1,1,1,1,1,1,0], hours: ['09:30','18:30'], reviewAt: 'Sat 17:00',
+  waterGoal: 2000, servings: [150, 250, 500], water: [{id:1,t:'09:50',ml:250},{id:2,t:'10:40',ml:250}], wid: 3, waterOn: true,
+  intensity: 'Balanced', cats: {movement:true, eye:true, hydration:true}, autoPresent: true, camHint: false,
+  server: 'paired', lastSync: '11:40', sharing: {hydration:false, outcomes:false, sessions:false, phone:false, camera:false}, pending: {},
+  dismissals: 0, mode: 'idle', focusLeft: 0, paused: false, meeting: false,
+  pomo: null, pomoAuto: false, phone: [], recovery: null,
+  camera: 'off', medTime: null, setupStep: 0, connChoice: 'local', slipOutcome: 'ok', reviewVariant: 'strong', monthVariant: 'normal', monthMetric: 'water', monthTable: false, monthBase: true,
+  mv: null, flow: null,
+});
+let S = S0();
+let timers = [];
+const later = (fn, ms) => timers.push(setTimeout(fn, ms));
+function clearTimers(){ timers.forEach(clearTimeout); timers = []; }
+
+/* ---------- pet art (original placeholder SVG, no external assets) ---------- */
+const PETS = [
+  {id:'turtle', name:'Walking turtle', def:'Shelly', colours:[['#5f9e6e','#d9b36c','Leaf'],['#4f8fa8','#c9d6a3','Lagoon'],['#8a7bb5','#e2c38c','Dusk']]},
+  {id:'cat', name:'Stretching cat', def:'Miso', colours:[['#e0a15a','#fff1dc','Ginger'],['#7d7f86','#f1f1f1','Grey'],['#3d3f45','#e9e2d0','Ink']]},
+  {id:'drop', name:'Water-drop buddy', def:'Drip', colours:[['#58a6d6','#dff1fb','Sky'],['#4bb3a7','#ddf5f1','Mint'],['#7c95e0','#e6ebfb','Iris']]},
+  {id:'owl', name:'Helpful owl', def:'Hoot', colours:[['#9a7653','#f3e3c8','Bark'],['#6d7f99','#e7edf5','Slate'],['#a0685f','#f6dfd8','Clay']]},
+  {id:'panda', name:'Calm panda'}, {id:'dog', name:'Cheerful dog'}, {id:'rabbit', name:'Active rabbit'},
+  {id:'elephant', name:'Steady elephant'}, {id:'koala', name:'Resting koala'}, {id:'flamingo', name:'Balanced flamingo'},
+];
+const petById = id => PETS.find(p => p.id === id);
+function petSVG(id, ci = 0){
+  const p = petById(id);
+  if (!p.colours) return `<div class="ph">${p.name[0]}</div>`;
+  const [a, b] = p.colours[ci] || p.colours[0];
+  const eye = (x, y, r = 3.2) => `<ellipse class="eye" cx="${x}" cy="${y}" rx="${r * .85}" ry="${r}" fill="#1f2a30"/>`;
+  const shadow = '<ellipse cx="64" cy="118" rx="38" ry="5" fill="#0000002a"/>';
+  const smile = (x, y) => `<path d="M${x} ${y} q5 4 10 0" stroke="#1f2a30" fill="none" stroke-width="2.2" stroke-linecap="round"/>`;
+  switch (id){
+    case 'turtle': return `<svg viewBox="0 0 128 128" aria-hidden="true">${shadow}
+      <ellipse cx="36" cy="106" rx="9" ry="7" fill="${a}"/><ellipse cx="86" cy="106" rx="9" ry="7" fill="${a}"/>
+      <circle cx="104" cy="78" r="15" fill="${a}"/><path d="M14 104 l10 -6 l2 8z" fill="${a}"/>
+      <path d="M20 102 Q22 54 62 52 Q100 54 104 102 Z" fill="${b}" stroke="${a}" stroke-width="5" stroke-linejoin="round"/>
+      <path d="M44 76 L62 66 L80 76 L76 94 L48 94Z M62 66 L62 54 M44 76 L28 80 M80 76 L96 80" fill="none" stroke="${a}" stroke-width="3" opacity=".7"/>
+      ${eye(108, 74)}${smile(101, 84)}</svg>`;
+    case 'cat': return `<svg viewBox="0 0 128 128" aria-hidden="true">${shadow}
+      <path d="M96 100 q22 -6 14 -30" stroke="${a}" stroke-width="8" fill="none" stroke-linecap="round"/>
+      <ellipse cx="62" cy="96" rx="34" ry="21" fill="${a}"/><ellipse cx="62" cy="102" rx="20" ry="12" fill="${b}"/>
+      <path d="M40 46 l4 -24 l16 14z M84 46 l-4 -24 l-16 14z" fill="${a}"/>
+      <circle cx="62" cy="58" r="25" fill="${a}"/><ellipse cx="62" cy="66" rx="13" ry="9" fill="${b}"/>
+      ${eye(52, 55)}${eye(72, 55)}<path d="M59 63 h6 l-3 3z" fill="#c0605a"/>${smile(57, 68)}</svg>`;
+    case 'drop': return `<svg viewBox="0 0 128 128" aria-hidden="true">${shadow}
+      <path d="M64 10 C64 10 26 58 26 82 a38 38 0 0 0 76 0 C102 58 64 10 64 10Z" fill="${a}"/>
+      <ellipse cx="48" cy="64" rx="7" ry="13" fill="${b}" opacity=".85" transform="rotate(20 48 64)"/>
+      ${eye(53, 82, 3.6)}${eye(75, 82, 3.6)}<circle cx="45" cy="93" r="4" fill="#f4a3a3" opacity=".7"/><circle cx="83" cy="93" r="4" fill="#f4a3a3" opacity=".7"/>${smile(59, 92)}</svg>`;
+    case 'owl': return `<svg viewBox="0 0 128 128" aria-hidden="true">${shadow}
+      <path d="M36 34 l6 -18 l10 14z M92 34 l-6 -18 l-10 14z" fill="${a}"/>
+      <ellipse cx="64" cy="72" rx="37" ry="42" fill="${a}"/><ellipse cx="64" cy="88" rx="22" ry="24" fill="${b}"/>
+      <path d="M28 70 q-6 20 8 34 M100 70 q6 20 -8 34" stroke="${a}" stroke-width="9" fill="none" stroke-linecap="round" opacity=".8"/>
+      <circle cx="50" cy="58" r="13" fill="#fff"/><circle cx="78" cy="58" r="13" fill="#fff"/>${eye(50, 58, 5)}${eye(78, 58, 5)}
+      <path d="M60 68 h8 l-4 7z" fill="#e69f00"/><path d="M52 112 v5 M58 112 v5 M70 112 v5 M76 112 v5" stroke="#e69f00" stroke-width="3" stroke-linecap="round"/></svg>`;
+  }
+}
+
+/* small icons (24px viewBox), used with text so status is never colour-only */
+const ICON = {
+  bell:'<path d="M12 3a6 6 0 0 0-6 6v4l-2 3h16l-2-3V9a6 6 0 0 0-6-6zm-2 15a2 2 0 0 0 4 0z" fill="currentColor"/>',
+  moon:'<path d="M14 3a8 8 0 1 0 7 11A7 7 0 0 1 14 3z" fill="currentColor"/>',
+  zz:'<text x="3" y="18" font-size="15" font-weight="700" fill="currentColor">z</text><text x="12" y="12" font-size="10" font-weight="700" fill="currentColor">z</text>',
+  plug:'<path d="M4 4l16 16M9 7v4m6-4v4M7 11h10v2a5 5 0 0 1-10 0z" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round"/>',
+  pause:'<rect x="6" y="5" width="4" height="14" fill="currentColor"/><rect x="14" y="5" width="4" height="14" fill="currentColor"/>',
+  focus:'<circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="2.4" fill="none"/><circle cx="12" cy="12" r="3" fill="currentColor"/>',
+  timer:'<circle cx="12" cy="13" r="8" stroke="currentColor" stroke-width="2.2" fill="none"/><path d="M12 13V8M9 2h6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>',
+  mute:'<path d="M3 9h4l5-4v14l-5-4H3zM16 9l5 6m0-6l-5 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linejoin="round"/>',
+  star:'<path d="M12 3l2.6 5.8 6.4.6-4.8 4.3 1.4 6.3L12 16.8 6.4 20l1.4-6.3L3 9.4l6.4-.6z" fill="currentColor"/>',
+  dot:'<circle cx="12" cy="12" r="5" fill="currentColor"/>',
+  move:'<circle cx="12" cy="4" r="2.5" fill="currentColor"/><path d="M12 7v7m0 0l-4 7m4-7l4 7M6 10h12" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>',
+};
+const icon = (n, size = 16) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true">${ICON[n]}</svg>`;
+
+/* state -> class, badge, tag (text). Single source for pet visuals and the gallery */
+const PET_STATES = {
+  idle:{label:'Idle'}, cue:{label:'Nudge', badge:'!'}, reminder:{cls:'cue', label:'Reminder card open', badge:'bell'},
+  exercise:{label:'Exercise', badge:'move', tag:'Moving'}, waiting:{label:'Waiting (no response)', badge:'1', tag:'1 reminder waiting'},
+  celebrate:{label:'Celebration', badge:'star'}, snoozed:{label:'Snoozed', badge:'zz', tag:'Snoozed 10 min'},
+  focus:{label:'Focus mode', badge:'focus', tag:'Focus 60 min'}, pomodoro:{cls:'focus', label:'Pomodoro', badge:'timer', tag:'Work 24:59'},
+  quiet:{label:'Off-hours / quiet', badge:'moon', tag:'Off hours'}, meeting:{label:'Meeting / suppressed', badge:'mute', tag:'Meeting - paused'},
+  paused:{label:'Coaching paused', badge:'pause', tag:'Paused'}, offline:{label:'Disconnected (server)', badge:'plug', tag:'Offline - still works'},
+  camera:{cls:'idle', label:'Camera on (V2)', cam:true, tag:'Camera on'}, camNo:{cls:'idle', label:'Camera: no reading (V2)', cam:true, tag:'Cam: no reading'},
+};
+function setPet(state, tag){
+  const d = PET_STATES[state] || PET_STATES.idle;
+  const pet = $('#pet');
+  pet.className = 'st-' + (d.cls || state);
+  const b = $('#petBadge');
+  if (d.badge){ b.style.display = 'flex'; b.innerHTML = ICON[d.badge] ? icon(d.badge) : d.badge; } else b.style.display = 'none';
+  const t = tag !== undefined ? tag : d.tag;
+  $('#petTag').style.display = t ? 'block' : 'none'; $('#petTag').textContent = t || '';
+  const camOn = S.camera === 'on' || S.camera === 'noread' || S.camera === 'suspect' || d.cam;
+  $('#petCam').style.display = camOn ? 'flex' : 'none';
+  pet.setAttribute('aria-label', `${S.petName} the pet, ${d.label}${t ? ', ' + t : ''}. Click for actions. Ctrl+Alt+H opens the pet panel.`);
+  S.mode = state;
+}
+function drawPet(){
+  $('#petArt').innerHTML = petSVG(S.pet, S.colour);
+  const px = Math.round(128 * S.scale / 100);
+  const pet = $('#pet'); pet.style.width = pet.style.height = px + 'px';
+  placePet();
+}
+let petPos = null;
+function placePet(){
+  const desk = $('#desk'), pet = $('#pet'), w = pet.offsetWidth, dh = desk.clientHeight, dw = desk.clientWidth;
+  if (!petPos) petPos = {x: dw - w - 16, y: dh - w - 18};
+  if (S.edge === 'left') petPos.x = 256; else if (S.edge === 'right') petPos.x = dw - w - 16;
+  petPos.y = Math.max(8, Math.min(dh - w - 18, petPos.y));
+  pet.style.left = petPos.x + 'px'; pet.style.top = petPos.y + 'px';
+  placeBubble();
+}
+
+/* ---------- bubble (pet-led UI) ---------- */
+let bubbleExpanded = false;
+function say(html, {wide = false, expanded = false, close = true} = {}){
+  const b = $('#bubble');
+  b.className = 'show' + (wide ? ' wide' : '');
+  b.innerHTML = (close ? `<button class="bx" data-a="closeBubble" aria-label="Close (Escape)">&#x2715;</button>` : '') + html;
+  bubbleExpanded = expanded;
+  placeBubble();
+}
+function closeBubble(){ delete $('#bubble').dataset.panel; $('#bubble').className = ''; $('#bubble').innerHTML = ''; bubbleExpanded = false; }
+function placeBubble(){
+  const b = $('#bubble'); if (!b.classList.contains('show')) return;
+  const pet = $('#pet'), desk = $('#desk');
+  const px = pet.offsetLeft, py = pet.offsetTop, pw = pet.offsetWidth, bw = b.offsetWidth, bh = b.offsetHeight;
+  let x = px > desk.clientWidth / 2 ? px - bw - 10 : px + pw + 10;
+  let y = py + pw - bh;
+  y = Math.max(8, Math.min(desk.clientHeight - bh - 8, y));
+  x = Math.max(250, Math.min(desk.clientWidth - bw - 8, x));
+  b.style.left = x + 'px'; b.style.top = y + 'px';
+}
+
+/* ---------- windows, modal, caption ---------- */
+function openWin(title, html){
+  const w = $('#hyWin'); w.style.display = 'flex'; $('#hyTitle').textContent = title; $('#hyBody').innerHTML = html;
+  $('#ledger').classList.add('inactive');
+}
+function closeWin(){ $('#hyWin').style.display = 'none'; $('#ledger').classList.remove('inactive'); }
+function modal(html){ $('#modal').innerHTML = html; $('#modalWrap').classList.add('show'); const f = $('#modal button'); if (f) f.focus(); }
+function closeModal(){ $('#modalWrap').classList.remove('show'); }
+function setClock(t){ S.clock = t; $('#clock').textContent = t; }
+let capState = {title:'', step:'', ids:''};
+function cap(step, ids){ if (ids !== undefined) capState.ids = ids; capState.step = step; renderCap(); }
+function renderCap(){
+  const c = document.getElementById('capBox'); if (!c) return;
+  c.innerHTML = `<b>${esc(capState.title || 'Free play')}</b><br>${capState.step || ''}${capState.ids ? `<br><span style="color:#bfc5ff">PRD: ${capState.ids}</span>` : ''}`;
+}
+function toastPet(text, ms = 2600){ say(`<p style="margin:0 24px 0 0">${text}</p>`); later(() => { if ($('#bubble').innerText.includes(text.replace(/<[^>]+>/g, '').slice(0, 12))) closeBubble(); }, ms); }
+
+/* ---------- fake spreadsheet ---------- */
+(function buildSheet(){
+  const rows = [['Date','Voucher','Particulars','Debit','Credit','Balance']];
+  const items = ['Opening balance','Office rent','Professional fees received','Stationery','Audit fee - client A','Electricity','GST payment','Travel - client visit','Bank charges','Fees received - client B','Software subscription','Courier','TDS deposited','Fees received - client C','Staff welfare','Internet','Printing','Fees received - client D','Repairs','Closing check'];
+  let bal = 250000;
+  items.forEach((p, i) => { const dr = i % 3 === 2 ? 0 : (1200 + i * 370) % 9000; const cr = i % 3 === 2 ? 15000 + i * 900 : 0; bal = bal - dr + cr;
+    rows.push([`${String(i + 1).padStart(2, '0')}-09-2026`, `JV-${100 + i}`, p, dr ? dr.toLocaleString('en-IN') : '', cr ? cr.toLocaleString('en-IN') : '', bal.toLocaleString('en-IN')]); });
+  let h = '<tr><th></th>' + 'ABCDEFGH'.split('').map(c => `<th>${c}</th>`).join('') + '</tr>';
+  rows.forEach((r, i) => { h += `<tr><th>${i + 1}</th>` + r.map((c, j) => `<td class="${j >= 3 ? 'n' : ''}${i === 6 && j === 5 ? ' sel' : ''}">${i === 0 ? '<b>' + c + '</b>' : c}</td>`).join('') + '<td></td><td></td></tr>'; });
+  $('#sheet').innerHTML = h;
+})();
+
+/* ---------- reviewer panel ---------- */
+const FLOWS = [
+  ['V1 Workday pet', null],
+  ['setup', '1. First-run setup + optional pairing'],
+  ['desktop', '2. Pet on desktop: menu, drag, edit'],
+  ['states', '3. Pet state gallery'],
+  ['reminder', '4. Combined reminder'],
+  ['water', '5. Hydration log, undo, correct'],
+  ['movement', '6. Movement session (six-day)'],
+  ['focus', '7. Focus, pause, meeting, quiet hours'],
+  ['recovery', '8. Deadline day + recovery plan'],
+  ['pomodoro', '9. User-started Pomodoro'],
+  ['phone', '10. Phone interruption self-report'],
+  ['weekly', '11. Weekly review (4 variants)'],
+  ['monthly', '12. Monthly progress'],
+  ['sharing', '13. Sharing preview, stop, delete'],
+  ['backup', '14. Export / import, update from file'],
+  ['offline', '15. Server unreachable / offline'],
+  ['keyboard', '16. Keyboard path + accessibility'],
+  ['admin', '17. Admin status page (server PC)'],
+  ['V2 Webcam pet', null],
+  ['camera', '18. Camera consent > calibrate > cue > off'],
+  ['meditation', '19. Meditation pause'],
+  ['V3 (deferred)', null],
+  ['v3', '20. Watches, hosted, community - coming later'],
+];
+function renderRev(){
+  let h = `<p style="margin:4px 2px 8px;color:#c9cdf5">Not part of the product. Jump to a flow; each restarts from a known state. All data below is fictional.</p>`;
+  FLOWS.forEach(([id, label]) => {
+    if (!label){ h += `<div class="grp">${id}</div>`; return; }
+    const dis = id === 'v3' || (S.version === 'V1' && (id === 'camera' || id === 'meditation'));
+    h += `<button class="f${S.flow === id ? ' on' : ''}" data-a="flow" data-v="${id}" ${dis ? 'disabled' : ''}>${label}</button>`;
+  });
+  $('#revBody').innerHTML = h;
+  h = `<div class="grp" style="margin-top:2px">What you are seeing</div><div class="cap" id="capBox" aria-live="polite"></div>
+    <div class="sim">
+    <button data-a="version" data-v="${S.version === 'V2' ? 'V1' : 'V2'}">Show ${S.version === 'V2' ? 'V1 only' : 'V1 + V2'}</button>
+    <button data-a="setServer" data-v="${S.server === 'offline' ? 'paired' : 'offline'}">Server ${S.server === 'offline' ? 'back online' : 'unreachable'}</button>
+    <button data-a="flow" data-v="reset">Reset all</button></div>`;
+  $('#revFoot').innerHTML = h; renderCap();
+}
+
+/* ---------- pet menu (expanded bubble) ---------- */
+function waterTotal(){ return S.water.reduce((s, w) => s + w.ml, 0); }
+function petMenu(){
+  if (S.mode === 'pomodoro' && S.pomo) return pomoControls();
+  if (S.server === 'offline' && S.mode === 'offline') return offlineBubble();
+  const cam = S.version === 'V2';
+  say(`<h4>Hi, I'm ${esc(S.petName)}</h4>
+    <p class="small muted" style="margin:0 0 6px">Water today: ${waterTotal()} / ${S.waterGoal} ml${S.mode === 'focus' ? ' &middot; focus on' : ''}${S.paused ? ' &middot; coaching paused' : ''}</p>
+    <div class="row" style="gap:0">${S.servings.map(ml => btn(`+${ml} ml`, 'logW', ml)).join('')}${btn('Water...', 'waterPanel')}</div>
+    <div class="row" style="gap:0">${btn("Today's movement", 'moveIntro', '', 'primary')}${btn('Focus...', 'focusMenu')}${btn('Pomodoro...', 'pomoMenu')}</div>
+    <div class="row" style="gap:0">${btn('Phone interruption', 'phoneLog')}${btn(S.meeting ? 'Meeting over' : "I'm in a meeting", 'meeting')}${btn(S.paused ? 'Resume coaching' : 'Pause...', S.paused ? 'pauseEnd' : 'pauseMenu')}</div>
+    <div class="row" style="gap:0">${btn('Deadline day', 'recAsk')}${cam ? btn(S.camera === 'off' ? 'Posture check ' + V2 : 'Camera off', S.camera === 'off' ? 'camConsent' : 'camOff') : ''}${btn('Reviews', 'openReview')}${btn('Settings', 'settings', 'pet')}</div>
+    <p class="small muted" style="margin:6px 0 0">Drag me to move. I never take keyboard focus from your work app.</p>`, {wide: true, expanded: true});
+}
+
+/* ---------- settings window ---------- */
+const TABS = [['pet','Pet'],['reminders','Reminders'],['goals','Water & workweek'],['movement','Movement programme'],['focus','Focus & Pomodoro'],['sharing','Sharing & server'],['backup','Backup & update'],['camera','Posture check (V2)'],['meditation','Meditation (V2)'],['a11y','Accessibility'],['v3','Watches & community (V3)']];
+function settings(tab = 'pet'){
+  S.tab = tab;
+  const nav = TABS.filter(([id]) => S.version === 'V2' || !['camera','meditation'].includes(id))
+    .map(([id, l]) => `<button class="${id === tab ? 'on' : ''}" data-a="settings" data-v="${id}" ${id === 'v3' ? 'disabled title="Coming later (V3 deferred)"' : ''}>${l}${id === 'v3' ? ' - later' : ''}</button>`).join('');
+  openWin('HealthierYou - Settings', `<nav aria-label="Settings sections">${nav}<hr style="border:0;border-top:1px solid var(--line)"><button data-a="openReview">Weekly review</button><button data-a="openMonth">Monthly progress</button></nav><div class="content">${TAB[tab]()}</div>`);
+}
+const TAB = {};
+TAB.pet = () => `<h2>Pet</h2><p class="muted">Ten pets share one set of actions. Four are drawn as placeholders here; six show where art is pending the visual-direction decision.</p>
+  <div class="grid5">${PETS.map(p => `<button class="petcard ${S.pet === p.id ? 'on' : ''}" data-a="pickPet" data-v="${p.id}" aria-pressed="${S.pet === p.id}">${petSVG(p.id, p.id === S.pet ? S.colour : 0)}<br>${p.name}${p.colours ? '' : '<br><span class="muted small">art pending</span>'}</button>`).join('')}</div>
+  <div class="row" style="align-items:flex-start;margin-top:10px">
+   <div style="flex:1"><label class="fld" for="petName">Name</label><input type="text" id="petName" data-in="petName" value="${esc(S.petName)}" maxlength="20">
+   <label class="fld">Colour</label>${petById(S.pet).colours.map((c, i) => `<button class="chip ${S.colour === i ? 'on' : ''}" data-a="colour" data-v="${i}"><i style="width:12px;height:12px;border-radius:50%;background:${c[0]};display:inline-block;border:1px solid #0003"></i>${c[2]}</button>`).join('')}
+   <label class="fld" for="petScale">Size: <span id="scaleLbl">${S.scale}%</span></label><input type="range" id="petScale" min="75" max="150" step="25" value="${S.scale}" data-in="scale" style="width:220px"></div>
+   <div style="flex:1"><label class="fld">Screen edge</label>${['left','right','free'].map(e => `<button class="chip ${S.edge === e ? 'on' : ''}" data-a="edge" data-v="${e}">${e === 'free' ? 'Where I drop it' : e[0].toUpperCase() + e.slice(1)}</button>`).join('')}
+   <label class="fld">Tone of messages</label>${['Gentle','Plain','Cheerful'].map(t => `<button class="chip ${S.tone === t ? 'on' : ''}" data-a="tone" data-v="${t}">${t}</button>`).join('')}
+   <label class="fld">Motion</label><div class="toggle">${sw(S.motion, 'motion', '', 'Pet animation')}<span>Animate the pet (off = still poses only)</span></div>
+   <p>${btn('Reset to defaults', 'resetPet', '', 'link')}</p></div></div>
+  <p class="small muted">Edits apply instantly and are kept after restart (in the product).</p>`;
+TAB.reminders = () => `<h2>Reminders</h2>
+  <label class="fld">Intensity</label>${['Light','Balanced','More often'].map(t => `<button class="chip ${S.intensity === t ? 'on' : ''}" data-a="intensity" data-v="${t}">${t}</button>`).join('')}
+  <div class="note">Balanced: movement after 45 min of active work, optional eye rest folded in at 20 min, 5-min gap between reminders, snooze 10 min. These are starting values to test, not medical advice.</div>
+  <h3>What I remind you about</h3>
+  ${[['movement','Movement breaks'],['eye','Eye rest (look away)'],['hydration','Water pacing']].map(([k, l]) => `<div class="toggle">${sw(S.cats[k], 'cat', k, l)}<span>${l}</span></div>`).join('')}
+  <h3>When I stay quiet</h3>
+  <div class="toggle">${sw(true, 'flip', '', 'Outside work hours')}<span>Outside work hours (${S.hours[0]}-${S.hours[1]}) and on non-workdays</span></div>
+  <div class="toggle">${sw(S.autoPresent, 'autoPresent', '', 'Presentations and full screen')}<span>During presentations and full-screen apps <span class="muted small">(automatic; may not detect every meeting)</span></span></div>
+  <div class="toggle">${sw(S.camHint, 'camHint', '', 'Camera or mic in use')}<span>When the camera or microphone is in use <span class="muted small">(experimental hint, off by default)</span></span></div>
+  <p class="small muted">You can always use "I'm in a meeting" on the pet. Reminders missed while quiet are not replayed.</p>`;
+TAB.goals = () => `<h2>Water & workweek</h2>
+  <label class="fld" for="goal">Daily water goal (ml)</label><input type="number" id="goal" data-in="goal" value="${S.waterGoal}" step="100" min="500" max="5000">
+  <p class="small muted">Your own choice. HealthierYou never suggests or raises it, even on busy or hot days.</p>
+  <label class="fld">Serving buttons</label>${S.servings.map(s => `<span class="chip">${s} ml</span>`).join('')}<button class="chip" data-a="noop">+ Add</button>
+  <div class="toggle">${sw(S.waterOn, 'waterOn', '', 'Water pacing reminders')}<span>Water pacing reminders within work hours</span></div>
+  <h3>Workweek</h3>${DAYS.map((d, i) => `<button class="chip ${S.workDays[i] ? 'on' : ''}" data-a="day" data-v="${i}" aria-pressed="${!!S.workDays[i]}">${d}${i === 6 ? ' (optional)' : ''}</button>`).join('')}
+  <div class="row"><label class="fld">Hours <input type="time" value="${S.hours[0]}"> to <input type="time" value="${S.hours[1]}"></label><label class="fld">Weekly review <select><option>${S.reviewAt}</option><option>Fri 18:00</option></select></label><label class="fld">Time zone <select><option>Asia/Kolkata (IST)</option></select></label></div>
+  <p class="small muted">Goal changes apply from today; past weeks are judged against the goal you had then.</p>`;
+const PROGRAMME = [
+  ['Mon','Neck, shoulders, upper back',['Slow, comfortable neck turns','Shoulder rolls, backwards','Chest opening: hands behind head, elbows wide']],
+  ['Tue','Hips and thighs',['Seated marching','Straighten one knee, then the other','Standing: rise from the chair and sit back slowly']],
+  ['Wed','Ankles, lower legs, short walk',['Ankle circles, each foot','Heel and toe raises','Optional: a 2-minute walk']],
+  ['Thu','Chest and trunk',['Gentle chest opening','Comfortable upper-body turn, each side','Side reach, each side']],
+  ['Fri','Hands, wrists, forearms',['Open and close your fingers','Supported wrist bends (forearm on desk)','Shake out your hands loosely']],
+  ['Sat','Whole-body change of position',['Stand and reach up comfortably','March on the spot or seated','Repeat a movement you liked this week']],
+];
+TAB.movement = () => `<h2>Movement programme</h2><div class="warn">Placeholder content for layout only. Final routines, sources and illustrations follow the separate content review. Not a treatment or exercise prescription.</div>
+  <table class="t"><tr><th>Day</th><th>Focus</th><th>Steps (about 2 min)</th></tr>${PROGRAMME.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2].join('; ')}</td></tr>`).join('')}<tr><td>Sun</td><td colspan="2" class="muted">Optional / recovery. No catch-up for missed days.</td></tr></table>
+  <label class="fld">Default version</label><button class="chip on">Ask each time</button><button class="chip">Seated</button><button class="chip">Standing</button>
+  <p class="small muted">Every step has Skip and Stop. Completion is self-reported.</p>`;
+TAB.focus = () => `<h2>Focus & Pomodoro</h2><h3>Quiet focus</h3><p>Presets 30, 60, 90 min or custom. Pauses reminders; nothing is replayed afterwards.</p>
+  <h3>Pomodoro</h3><p>Off until you press Start on the pet. Presets 25/5, 50/10 or custom.</p>
+  <div class="toggle">${sw(S.pomoAuto, 'pomoAuto', '', 'Auto-start next round')}<span>Automatically start the next round <b>(off)</b></span></div>
+  <p class="small muted">Locking the PC pauses the timer until you resume. Meetings and presentations pause it too.</p>`;
+const SHARE_CATS = [
+  ['hydration','Hydration summary','{date, ml logged, your goal, number of entries}', '2026-10-20 · 750 ml · goal 2000 ml · 3 entries'],
+  ['outcomes','Reminder & exercise outcomes','{date, reminders offered/done/snoozed, routine done/partial/skipped}', '2026-10-20 · offered 4 · done 2 · snoozed 1 · routine: partial'],
+  ['sessions','Work-session summary','{date, active minutes, 15-min activity slots, focus & Pomodoro counts}', '2026-10-20 · 212 active min · 96 slots · focus 1 · Pomodoro 0'],
+  ['phone','Phone self-report counts','{date, count by label: work/personal/unsure}', '2026-10-20 · work 1 · personal 0 · unsure 1'],
+  ['camera','Posture check summary (V2)','{date, camera-on minutes, usable coverage, episode count}', '2026-10-20 · camera on 95 min · coverage 78% · 2 episodes'],
+];
+const AUDIENCE = 'Who can see this: you, in HealthierYou. The app has no manager charts, but someone with admin access to the server PC could technically open the unencrypted shared summaries.';
+TAB.sharing = () => {
+  const paired = S.server !== 'none';
+  const status = S.server === 'paired' ? `${icon('dot')} Connected to <b>office server (simulated)</b> &middot; last sync ${S.lastSync}` : S.server === 'offline' ? `${icon('plug')} <b>Can't reach the office server</b> since 10:05 &middot; retrying every few minutes` : 'Not paired. Everything works on this PC; nothing is sent.';
+  const pend = Object.values(S.pending).reduce((a, b) => a + b, 0);
+  return `<h2>Sharing & server ${DRAFT}</h2>
+  <div class="${S.server === 'offline' ? 'warn' : 'note'}">${status}${paired && pend ? ` &middot; ${pend} summar${pend > 1 ? 'ies' : 'y'} waiting` : ''}</div>
+  ${paired ? '' : btn('Pair with office server...', 'pairStart', '', 'primary')}
+  <h3>Optional sharing (all off unless you switch them on)</h3>
+  ${SHARE_CATS.filter(c => S.version === 'V2' || c[0] !== 'camera').map(([k, l]) => `<div class="toggle">${sw(S.sharing[k], 'shToggle', k, l)}<span style="flex:1">${l}${S.pending[k] ? ` <span class="small muted">(${S.pending[k]} waiting)</span>` : ''}</span>${btn('Preview', 'shPreview', k, 'link')}${btn('Delete what I shared...', 'shDelete', k, 'link')}</div>`).join('')}
+  <p class="small muted">Details (meditation, recovery plans, reflections, individual events, camera images) are never sent.</p>
+  <h3>Always sent while paired (not health data)</h3><p class="small">Device ID, display alias, app version, Windows build, last seen, pairing state, sharing-settings version. Needed to keep the connection working.</p>
+  <div class="row">${paired ? btn('Sync now', 'shSync') + btn('Unpair this PC...', 'unpair', '', 'danger') : ''}${btn('Show conflict example', 'shStale', '', 'link')}</div>`;
+};
+TAB.backup = () => `<h2>Backup & update ${DRAFT}</h2>
+  <div class="card"><b>Export my data</b><p class="small">One encrypted file with your settings, goals, pet edits, sharing choices, 90 days of events and 24 months of summaries. Pairing is not included; you would pair again.</p>${btn('Export...', 'exportStart', '', 'primary')}</div>
+  <div class="card"><b>Import a backup</b><p class="small">Replaces all HealthierYou data on this PC (never merges, to avoid double counting).</p>${btn('Import...', 'importStart')}</div>
+  <div class="card"><b>Install update from file</b><p class="small">Works without the server: choose the installer and its signature file (USB or shared folder). Unsigned or altered files are refused.</p>${btn('Choose update file...', 'updStart')} ${btn('Install previous version...', 'rollback', '', 'link')}</div>
+  <p class="small muted">Version 0.0.0-prototype (simulated). Uninstall keeps your data unless you tick "Delete my local data".</p>`;
+TAB.camera = () => `<h2>Posture check ${V2}</h2><p>Status: <b>${({off:'Off', on:'On', noread:'On - no reading', suspect:'Paused - camera moved?', denied:'Blocked by Windows', busy:'Camera in use by another app'})[S.camera] || 'Off'}</b></p>
+  ${S.camera === 'off' ? btn('Set up posture check...', 'camConsent', '', 'primary') : btn('Turn camera off', 'camOff', '', 'primary') + btn('Recalibrate', 'calibrate')}
+  <div class="note">Uses your own comfortable position as the reference. Not a medical or posture-quality score. Frames stay in memory and are never saved or sent. Cues at most every 30 min.</div>`;
+TAB.meditation = () => `<h2>Meditation pause ${V2}</h2><p>One optional daily invitation. Off until you pick a time.</p>
+  <div class="row"><label class="fld">Invite me at <select data-in="medTime"><option value="">Off</option>${['11:00','15:30','17:00'].map(t => `<option ${S.medTime === t ? 'selected' : ''}>${t}</option>`).join('')}</select></label></div>
+  <p class="small muted">Text guidance only (2, 5 or 10 min), with eyes-open and non-breath options. No sound. Missed invitations are skipped, never stacked. Kept on this PC only.</p>`;
+TAB.a11y = () => `<h2>Accessibility</h2>
+  <label class="fld">Text size in bubbles and screens</label>${[100,125,150].map(v => `<button class="chip ${S.fs === Math.round(14 * v / 100) ? 'on' : ''}" data-a="fs" data-v="${v}">${v}%</button>`).join('')}
+  <div class="toggle">${sw(S.rm, 'rm', '', 'Reduced motion')}<span>Reduced motion (still poses; also follows Windows setting)</span></div>
+  <div class="toggle">${sw(S.hc, 'hc', '', 'High contrast')}<span>Higher contrast text and borders</span></div>
+  <h3>Keyboard</h3><table class="t"><tr><td><kbd>Ctrl+Alt+H</kbd></td><td>Open the pet panel (takes focus on purpose)</td></tr><tr><td><kbd>Tab</kbd> / <kbd>Shift+Tab</kbd></td><td>Move between actions</td></tr><tr><td><kbd>Enter</kbd> / <kbd>Space</kbd></td><td>Choose</td></tr><tr><td><kbd>Esc</kbd></td><td>Close the bubble or panel and return focus to your previous app</td></tr></table>
+  <p class="small muted">Status always uses an icon or words, never colour alone. Charts have a table view.</p>`;
+TAB.v3 = () => '';
+
+/* ---------- flows ---------- */
+const F = {};
+function startFlow(id, title, ids){
+  closeBubble(); closeWin(); closeModal(); clearTimers(); $('#adminWin').style.display = 'none'; $('#gallery').classList.remove('show'); $('#trayMenu')?.remove();
+  S.flow = id; capState = {title, step:'', ids: ids || ''}; renderRev();
+  if (S.server === 'offline' && id !== 'offline') S.server = 'paired';
+  S.paused = false; S.meeting = false; S.pomo = null; S.mv = null; setClock('Tue 11:15');
+  if (S.camera !== 'off' && id !== 'camera') S.camera = 'off';
+  setPet(S.server === 'offline' ? 'offline' : 'idle'); $('#pet').style.display = '';
+}
+
+F.reset = () => { S = S0(); petPos = null; applyA11y(); drawPet(); startFlow(null, 'Free play'); cap('Prototype reset. Click the pet or pick a flow.'); };
+
+/* 1. setup */
+F.setup = () => { startFlow('setup', 'First-run setup + optional pairing', 'First use journey; LAN-01; PET-01/02; WAT-01; RHY-03; SHR-01'); S.setupStep = 0; S.setupDone = false; S.server = 'none'; S.connChoice = 'local'; Object.keys(S.sharing).forEach(k => S.sharing[k] = false); $('#pet').style.display = 'none'; setupStep(); };
+const SETUP_STEPS = ['Welcome','Connect (optional)','Pet','Workweek','Water','Reminders','Sharing','Try a reminder'];
+function setupStep(){
+  const i = S.setupStep, n = SETUP_STEPS.length;
+  const bar = `<div class="steps" aria-label="Step ${i + 1} of ${n}">${SETUP_STEPS.map((_, k) => `<span class="${k <= i ? 'done' : ''}"></span>`).join('')}</div><p class="small muted">Step ${i + 1} of ${n}: ${SETUP_STEPS[i]}</p>`;
+  const nav = (next = 'Next', back = i > 0) => `<div class="row" style="margin-top:16px">${back ? btn('Back', 'suBack') : ''}${btn(next, 'suNext', '', 'primary')}</div>`;
+  let body = '';
+  switch (i){
+    case 0: body = `<h2>Welcome to HealthierYou</h2><p>A small desk pet that helps you take short breaks, log water against your own goal and do 2-minute movement routines.</p>
+      <ul><li>It does not measure your health or your productivity.</li><li>Everything works on this PC, with or without the office server.</li><li>No sound by default. It never blocks your keyboard or mouse.</li></ul>${nav('Start setup', false)}`; break;
+    case 1: body = connectStep(); break;
+    case 2: body = `<h2>Choose your pet</h2>${TAB.pet().replace('<h2>Pet</h2>', '')}${nav()}`; break;
+    case 3: body = `<h2>Your workweek</h2><p class="muted">Reminders only run on workdays within your hours. Sunday is optional (rest or recovery).</p>${TAB.goals().split('<h3>Workweek</h3>')[1]}${nav()}`; break;
+    case 4: body = `<h2>Water</h2>${TAB.goals().split('<h3>Workweek</h3>')[0].replace('<h2>Water & workweek</h2>', '')}${nav()}`; break;
+    case 5: body = `${TAB.reminders()}${nav()}`; break;
+    case 6: body = S.server === 'paired' ? `<h2>Sharing ${DRAFT}</h2><p>Choose what, if anything, your PC sends to the office server. All are off; you can change this any time.</p>
+        ${SHARE_CATS.filter(c => S.version === 'V2' || c[0] !== 'camera').map(([k, l]) => `<div class="toggle">${sw(S.sharing[k], 'shToggle', k, l)}<span style="flex:1">${l}</span>${btn('Preview', 'shPreview', k, 'link')}</div>`).join('')}
+        <p class="small">${AUDIENCE}</p>${nav()}` : `<h2>Sharing</h2><div class="note">This PC is not paired, so nothing is shared. Pair later in Settings &gt; Sharing & server.</div>${nav()}`; break;
+    case 7: body = `<h2>Try a reminder</h2><p>This is how ${esc(S.petName)} will ask. One small bubble beside the pet; you choose Done, Snooze or Not now.</p>
+      <div class="row" style="align-items:flex-end"><div style="width:110px">${petSVG(S.pet, S.colour)}</div><div class="card" style="width:300px"><b>Short break?</b><br><span class="small muted">47 min of work since your last break</span><div>${'<button class="btn primary" tabindex="-1">Start 2 min</button><button class="btn" tabindex="-1">Snooze</button>'}</div></div></div>
+      <div class="row" style="margin-top:16px">${btn('Back', 'suBack')}${btn('Finish and go to my desktop', 'suFinish', '', 'primary')}</div>`; break;
+  }
+  openWin('HealthierYou - Setup', `<div class="content">${bar}${body}</div>`);
+  cap(`Setup step ${i + 1}: ${SETUP_STEPS[i]}`);
+}
+function connectStep(){
+  const c = S.connChoice;
+  const opt = (v, l, d, dis) => `<label class="card" style="display:flex;gap:10px;align-items:flex-start;${dis ? 'opacity:.5' : ''}"><input type="radio" name="conn" data-a="suConn" data-v="${v}" ${c === v ? 'checked' : ''} ${dis ? 'disabled' : ''}><span><b>${l}</b><br><span class="small muted">${d}</span></span></label>`;
+  let pair = '';
+  if (c === 'lan' && S.server === 'paired') pair = `<div class="ok"><b>Paired with officepc (simulated).</b> While paired, this PC sends only connection details (device ID, alias, app version, Windows build, last seen). Health summaries are sent only for categories you choose in the Sharing step.</div>`;
+  else if (c === 'lan') pair = `<label class="fld" for="slip">Pairing slip from your administrator ${DRAFT}</label>
+    <input class="slip" id="slip" type="text" value="hy1-officepc-8443-SAMPLEFINGERPRINTBASE32XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX-SAMPLESECRET0000">
+    <p class="small muted">Paste it, or type it from the printed slip. Single use, valid 24 hours. It holds the server's full certificate fingerprint, so a fake server is refused before anything is sent.</p>
+    <div class="sim" style="background:#262b48;color:#eef0ff;border-radius:6px;padding:6px 8px;font-size:12px">Reviewer: simulate result ${['ok','mismatch','used','unreachable','malformed'].map(o => `<button class="chip ${S.slipOutcome === o ? 'on' : ''}" data-a="slipOutcome" data-v="${o}">${o}</button>`).join('')}</div>
+    <div id="slipResult"></div>${btn('Check slip', 'suCheck', '', 'primary')}`;
+  return `<h2>Connect (optional)</h2><p class="muted">You can skip this. The pet, reminders, logging and reviews all work on this PC alone.</p>
+    ${opt('local', 'Use on this PC only', 'Nothing is sent anywhere. You can pair later.')}
+    ${opt('lan', 'Pair with the office server', 'Lets you keep a copy of chosen daily summaries on the office server.')}
+    ${opt('hosted', 'Hosted account <span class="v3tag">V3</span>', 'Coming later. Not part of this release.', true)}
+    ${pair}<div class="row" style="margin-top:16px">${btn('Back', 'suBack')}${btn(c === 'lan' && S.server !== 'paired' ? 'Skip pairing for now' : 'Next', 'suNext', '', c === 'lan' && S.server !== 'paired' ? '' : 'primary')}</div>`;
+}
+const SLIP = {
+  ok: `<div class="ok"><b>Server found: officepc (simulated).</b> Check these 6 words match the ones on your slip or the admin screen:<br><b class="mono">amber &middot; cedar &middot; lotus &middot; river &middot; maple &middot; quartz</b><br>${btn('They match - pair', 'suPaired', '', 'primary')}${btn("They don't match", 'suNoMatch')}</div>`,
+  mismatch: `<div class="err"><b>Stopped: the server's certificate doesn't match your slip.</b> Nothing was sent. This can mean the wrong server or someone in between. Ask your administrator for a new slip.</div>`,
+  used: `<div class="err"><b>This slip has already been used or has expired.</b> Slips work once and only for 24 hours. Ask your administrator for a new one.</div>`,
+  unreachable: `<div class="warn"><b>Can't reach officepc:8443.</b> The slip looks valid. Check you're on the office network, or finish setup now and pair later in Settings. ${btn('Retry', 'suCheck')}</div>`,
+  malformed: `<div class="err"><b>That doesn't look like a pairing slip.</b> It starts with <code>hy1-</code> and has five parts separated by dashes.</div>`,
+};
+
+/* 2. desktop */
+F.desktop = () => { startFlow('desktop', 'Pet on the desktop', 'PET-02, PET-03, PET-04; Ordinary workday'); petMenu(); cap('Pet menu (expanded bubble). Drag the pet: it snaps to the nearest side. Settings > Pet edits name, size, colour, edge, tone, motion. The spreadsheet keeps keyboard focus throughout.'); };
+
+/* 3. states gallery */
+F.states = () => {
+  startFlow('states', 'Pet state gallery', 'PET-03 (idle, cue, exercise, waiting, celebration, snoozed, focus, disconnected) + suppression states');
+  const cells = Object.entries(PET_STATES).filter(([k]) => S.version === 'V2' || !k.startsWith('cam')).map(([k, d]) => `<div class="gcell"><div class="gp st-${d.cls || k}"><div class="art">${petSVG(S.pet, S.colour)}</div>${d.badge ? `<div class="gb">${ICON[d.badge] ? icon(d.badge, 14) : d.badge}</div>` : ''}</div><div><b>${d.label}</b></div>${d.tag ? `<span class="gt">${d.tag}</span>` : '<span class="small muted">no tag</span>'}</div>`).join('');
+  $('#gallery').innerHTML = `<div class="row"><h2 style="flex:1">Pet states</h2>${btn('Close', 'closeGallery')}</div><p class="muted">Every pet supports the same states. Each state has a shape/icon badge and a text tag, so it never depends on colour. With reduced motion, animations become still poses.</p><div class="gal">${cells}</div>`;
+  $('#gallery').classList.add('show'); cap('Gallery of pet states. Close it to return to the desktop.');
+};
+
+/* 4. combined reminder */
+F.reminder = () => { startFlow('reminder', 'Combined reminder', 'RHY-02, RHY-03, WAT-02; reminder rules section 6'); S.dismissals = 0; setClock('Tue 11:15'); showReminder(); };
+function showReminder(waterDone = false){
+  setPet('reminder');
+  say(`<h4>Time for a short break?</h4><ul class="reason"><li>48 min of work since your last break</li><li>Eye rest due - folded into this break</li><li class="${waterDone ? 'doneLine' : ''}">Water: 1 serving behind your own pace</li></ul>
+    <div class="row" style="gap:0">${btn('Start 2-min movement', 'moveIntro', '', 'primary')}${waterDone ? '' : btn('Log 250 ml', 'remWater')}${btn('Already did it', 'remDone')}</div>
+    <div class="row" style="gap:0">${btn('Snooze 10 min', 'remSnooze')}${btn('Focus...', 'focusMenu')}${btn('Not now', 'remDismiss', '', 'link')}</div>
+    <p class="small muted" style="margin:4px 0 0">One reminder for all three. Snooze covers all of them.</p>`, {wide: true});
+  cap('One combined reminder with explicit reasons. Try each action. Reviewer: <button class="tgl" data-a="noResp">simulate 10 min, no response</button>');
+}
+
+/* 5. water */
+F.water = () => { startFlow('water', 'Hydration log', 'WAT-01, WAT-02'); waterPanel(); };
+function waterPanel(editId){
+  const tot = waterTotal(), pct = Math.min(100, Math.round(tot / S.waterGoal * 100));
+  const rows = S.water.map(w => editId === w.id
+    ? `<tr><td>${w.t}</td><td><input type="number" id="wEdit" value="${w.ml}" step="50" style="width:80px"> ml</td><td>${btn('Save', 'wSave', w.id, 'primary')}</td></tr>`
+    : `<tr><td>${w.t}</td><td>${w.ml} ml</td><td>${btn('Edit', 'wEdit', w.id, 'link')}${btn('Remove', 'wDel', w.id, 'link')}</td></tr>`).join('');
+  say(`<h4>Water today</h4><div class="progress" role="img" aria-label="${tot} of ${S.waterGoal} ml"><i style="width:${pct}%"></i></div>
+    <p class="small" style="margin:0">${tot} / ${S.waterGoal} ml (your goal) ${tot >= S.waterGoal ? '&middot; <b>goal reached - nothing more needed</b>' : ''}</p>
+    <div class="row" style="gap:0">${S.servings.map(ml => btn(`+${ml}`, 'logW', ml)).join('')}<input type="number" id="wCustom" placeholder="ml" style="width:70px;margin:3px">${btn('Add', 'wCustom')}</div>
+    <table class="t small">${rows || '<tr><td class="muted">No entries yet today. That means nothing logged, not zero water.</td></tr>'}</table>`, {wide: true, expanded: true});
+  cap('Quick log, custom amount, edit (correction) and remove. Totals recalculate. At the goal, no encouragement to keep drinking.');
+}
+
+/* 6. movement */
+F.movement = () => { startFlow('movement', 'Movement session (six-day programme)', 'MOV-01, MOV-02; Guided movement journey'); setClock('Tue 11:20'); moveIntro(); };
+function todayIdx(){ const d = S.clock.slice(0, 3); return Math.max(0, DAYS.indexOf(d)); }
+function moveIntro(){
+  const di = todayIdx();
+  if (di === 6) { say(`<h4>Sunday is optional</h4><p>No routine is scheduled. Pick one if you'd like.</p>${PROGRAMME.map((p, i) => btn(p[0], 'mvDay', i)).join('')}`); return; }
+  const p = PROGRAMME[di]; S.mv = {day: di, step: 0, done: 0, skipped: 0, ver: null};
+  setPet('exercise', 'Ready?');
+  say(`<h4>${p[0]}: ${p[1]}</h4><p class="small muted" style="margin:0">3 steps &middot; about 2 min &middot; placeholder content pending review</p>
+    <p class="small">Use a steady chair; if it has wheels, choose standing or lock them. Stop if anything feels uncomfortable - skipping is fine.</p>
+    <div class="row" style="gap:0">${btn('Seated', 'mvVer', 'seated', 'primary')}${btn('Standing', 'mvVer', 'standing')}${btn('Later', 'mvLater')}${btn('Skip today', 'mvSkipDay', '', 'link')}</div>
+    <p class="small muted" style="margin:4px 0 0">Other days: ${PROGRAMME.map((q, i) => i === di ? '' : `<button class="btn link" data-a="mvDay" data-v="${i}">${q[0]}</button>`).join('')}</p>`, {wide: true, expanded: true});
+  cap(`Today's routine (${p[0]}). Choose seated or standing, then do, skip or stop steps.`);
+}
+function figure(step, ver){
+  const arms = [['M42 46 L30 30','M58 46 L70 30'],['M42 46 L28 56','M58 46 L72 56'],['M42 46 L34 64','M58 46 L66 64']][step % 3];
+  const legs = ver === 'standing' ? '<path d="M50 70 L42 98 M50 70 L58 98" stroke="#2d6a6e" stroke-width="5" stroke-linecap="round"/>' : '<path d="M50 70 L70 72 L70 96 M50 70 L66 80 L66 98" stroke="#2d6a6e" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M34 74 h40 M38 74 v24" stroke="#8a979d" stroke-width="4"/>';
+  return `<svg viewBox="0 0 100 104" aria-hidden="true"><circle cx="50" cy="22" r="10" fill="#2d6a6e"/><path d="M50 32 L50 70" stroke="#2d6a6e" stroke-width="6" stroke-linecap="round"/><path d="${arms[0]} M${arms[1].slice(1)}" stroke="#2d6a6e" stroke-width="5" stroke-linecap="round" fill="none"/>${legs}</svg>`;
+}
+function moveStep(){
+  const m = S.mv, p = PROGRAMME[m.day];
+  if (m.step >= 3) return moveEnd();
+  say(`<h4>Step ${m.step + 1} of 3 &middot; ${m.ver}</h4><div class="illus">${figure(m.step, m.ver)}<div><b>${p[2][m.step]}</b><p class="small">Move slowly, within a comfortable range, about 30 seconds. Breathe normally.</p></div></div>
+    <div class="row" style="gap:0">${btn('Done', 'mvDone', '', 'primary')}${btn('Skip step', 'mvSkip')}${btn('Stop', 'mvStop', '', 'link')}</div>
+    <p class="small muted" style="margin:2px 0 0">Text and illustration are also read by screen readers; reduced motion shows still images.</p>`, {wide: true, expanded: true});
+  cap(`Step ${m.step + 1}: Done / Skip step / Stop. Skips and stops are recorded as partial, never as complete.`);
+}
+function moveEnd(stopped){
+  const m = S.mv, full = m.done === 3 && !stopped;
+  setPet(full ? 'celebrate' : 'idle');
+  say(full ? `<h4>Routine complete</h4><p>All 3 steps done. Saved as <b>self-reported</b>.</p>`
+    : `<h4>Saved as partial</h4><p>${m.done} of 3 steps done${m.skipped ? `, ${m.skipped} skipped` : ''}${stopped ? ', stopped early' : ''}. Recorded as partial (self-reported), not complete. No catch-up needed.</p>${btn('Try again later today', 'mvLater')}`);
+  cap(full ? 'Complete: celebration state, self-reported label.' : 'Partial outcome shown honestly.');
+  if (full) later(() => setPet('idle'), 1800);
+}
+
+/* 7. focus / pause / meeting / quiet */
+F.focus = () => { startFlow('focus', 'Focus, pause, meeting and quiet hours', 'RHY-03, RHY-04; precedence rules'); setClock('Tue 14:05'); focusMenu();
+  cap('Focus chooser. Also try: <button class="tgl" data-a="pauseMenu">Pause...</button> <button class="tgl" data-a="meeting">Meeting</button> <button class="tgl" data-a="simPresent">Presentation detected</button> <button class="tgl" data-a="simQuiet">After hours</button>'); };
+function focusMenu(){
+  say(`<h4>Quiet focus</h4><p class="small">I'll hold reminders. Nothing is replayed when focus ends.</p>
+    <div class="row" style="gap:0">${[30, 60, 90].map(m => btn(m + ' min', 'focusStart', m, m === 60 ? 'primary' : '')).join('')}<input type="number" id="fCustom" placeholder="min" style="width:64px;margin:3px">${btn('Start', 'focusStart', 'custom')}</div>`);
+}
+
+/* 8. recovery */
+F.recovery = () => { startFlow('recovery', 'Deadline day + recovery-day plan', 'REC-01'); setClock('Tue 19:40'); recCheckIn(); };
+function recCheckIn(){
+  setPet('cue');
+  say(`<h4>Long day</h4><p>You've been active at the PC for over 9 hours today. Was today a deadline-heavy day?</p>
+    <div class="row" style="gap:0">${btn('Yes, it was', 'recYes', '', 'primary')}${btn('No', 'recNo')}${btn("Don't ask today", 'recNo', 'quiet', 'link')}</div>
+    <p class="small muted" style="margin:0">Only you decide. I don't infer stress or tiredness.</p>`);
+  cap('Neutral check-in after a long active day (or user taps "Deadline day" on the pet). The user confirms workload.');
+}
+
+/* 9. pomodoro */
+F.pomodoro = () => { startFlow('pomodoro', 'User-started Pomodoro', 'FOC-01'); setClock('Tue 15:00'); pomoMenu(); };
+function pomoMenu(){
+  if (S.mode === 'focus') { say(`<h4>Replace quiet focus?</h4><p>Starting a Pomodoro will end your quiet focus (${S.focusLeft} min left).</p>${btn('Replace focus with Pomodoro', 'pomoMenuForce', '', 'primary')}${btn('Cancel', 'closeBubble')}`); return; }
+  if (S.paused) { say(`<h4>Coaching is paused</h4><p>Resume coaching for this Pomodoro session? Your pause ends now.</p>${btn('Resume for this session', 'pomoResumeCoach', '', 'primary')}${btn('Cancel', 'closeBubble')}`); return; }
+  say(`<h4>Pomodoro</h4><p class="small">Off until you press Start. Breaks suggest looking away, moving, and water only if you're behind your own goal.</p>
+    <div class="row" style="gap:0">${btn('25 / 5', 'pomoStart', '25/5', 'primary')}${btn('50 / 10', 'pomoStart', '50/10')}${btn('Custom...', 'pomoStart', '40/8')}</div>
+    <div class="toggle">${sw(S.pomoAuto, 'pomoAuto', '', 'Auto-start next round')}<span class="small">Auto-start next round (off)</span></div>`);
+  cap('Pomodoro is opt-in per session. Reviewer: <button class="tgl" data-a="focusStart" data-v="60">start focus first</button> <button class="tgl" data-a="pauseStart" data-v="60">pause coaching first</button>');
+}
+function pomoControls(){
+  const p = S.pomo;
+  say(`<h4>Pomodoro &middot; ${p.phase === 'work' ? 'work' : 'break'} ${p.paused ? '(paused)' : ''}</h4><p class="mono" style="font-size:22px;margin:4px 0">${fmt(p.left)}</p>
+    <div class="row" style="gap:0">${p.paused ? btn('Resume', 'pomoResume', '', 'primary') : btn('Pause', 'pomoPause')}${btn('End', 'pomoEnd')}</div>`);
+  cap('Compact timer on the pet; click the pet for Pause/Resume/End. Reviewer: <button class="tgl" data-a="pomoBreak">skip to break</button> <button class="tgl" data-a="pomoLock">simulate PC lock</button>');
+}
+const fmt = s => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+let tick = setInterval(() => {
+  const p = S.pomo; if (!p || p.paused) return;
+  p.left = Math.max(0, p.left - 1);
+  setPet('pomodoro', `${p.phase === 'work' ? 'Work' : 'Break'} ${fmt(p.left)}`);
+  if (p.left === 0) { p.phase === 'work' ? A.pomoBreak() : pomoBreakEnd(); }
+}, 1000);
+function pomoBreakEnd(){
+  S.pomo.paused = true; setPet('idle', 'Round done');
+  say(`<h4>Break over</h4><p>Start another round? (Auto-start is off.)</p>${btn('Start next round', 'pomoStart', S.pomo.preset, 'primary')}${btn('End Pomodoro', 'pomoEnd')}`);
+}
+
+/* 10. phone */
+F.phone = () => { startFlow('phone', 'Phone interruption self-report', 'DIS-01'); setClock('Tue 11:52'); A.phoneLog(); };
+
+/* 11. weekly */
+F.weekly = () => { startFlow('weekly', 'Weekly review', 'REV-01; Weekly reflection journey'); setClock('Sat 17:00'); setPet('cue');
+  say(`<h4>Your week in review is ready</h4><p class="small">About a minute. Optional.</p>${btn('Open', 'openReview', '', 'primary')}${btn('Later', 'wkLater')}${btn('Skip this week', 'wkSkip', '', 'link')}`);
+  cap('Offered at the chosen week-end time. If skipped, offered once on the next workday, no nagging.'); };
+const WEEK = {
+  strong: {t:'Strong week', cov:'Recorded on 6 of 6 workdays', good:['Movement routine done on 6 of 6 scheduled days (self-reported).','Water logged up to your goal on 5 of 6 workdays.','20 of 24 offered breaks marked done.'], miss:['Wednesday afternoon break: snoozed twice, not done.'], sug:['Keep your current reminder timing - it suited you this week.']},
+  mixed: {t:'Mixed week', cov:'Recorded on 6 of 6 workdays', good:['Movement routine done on 3 of 6 days; 1 more partial.','Longest observed work block shortened from 2 h 40 to 1 h 55 (estimate).'], miss:['Water logged on 2 of 6 days. On 2 days nothing was logged (no data, not zero).','9 of 21 breaks snoozed or set aside, mostly 15:00-17:00.'], sug:['Move afternoon reminders to 16:00?','Add a 500 ml button so logging takes one tap?','Try the seated version of Thursday’s routine?']},
+  missing: {t:'Not enough data', cov:'Recorded on 2 of 6 workdays (app not running on 4 days)', good:['2 movement routines done on the days recorded.'], miss:[], sug:[], none:'Not enough data for conclusions this week. Missing days are not counted as misses.'},
+  first: {t:'First week', cov:'3 days so far (started Wednesday)', good:['You set up your pet and logged water on all 3 days.','First routine completed on Thursday.'], miss:[], sug:['Pick your preferred routine version (seated or standing) to save a step?'], none:'Comparisons start after two full weeks.'},
+};
+function reviewWin(){
+  const v = WEEK[S.reviewVariant];
+  const ph = S.phone.length ? S.phone : [{t:'Mon 12:10', l:'work'},{t:'Tue 15:40', l:'personal'},{t:'Thu 11:05', l:'unsure'}];
+  openWin('HealthierYou - Weekly review', `<nav aria-label="Review"><button class="on">Weekly review</button><button data-a="openMonth">Monthly progress</button><button data-a="settings" data-v="goals">Goals</button></nav><div class="content">
+    <div class="sim" style="background:#262b48;color:#eef0ff;border-radius:6px;padding:6px 8px;font-size:12px;margin-bottom:8px">Reviewer: variant ${Object.keys(WEEK).map(k => `<button class="chip ${S.reviewVariant === k ? 'on' : ''}" data-a="wkVar" data-v="${k}">${WEEK[k].t}</button>`).join('')}</div>
+    <h2>Week of 13-18 Oct</h2><p class="muted">${v.cov}. Figures come only from what you logged or the PC recorded.</p>
+    ${v.none ? `<div class="note">${v.none}</div>` : ''}
+    <h3>${icon('star')} What went well</h3><ul>${v.good.map(g => `<li>${g}</li>`).join('')}</ul>
+    ${v.miss.length ? `<h3>Planned but missed</h3><ul>${v.miss.map(g => `<li>${g}</li>`).join('')}</ul>` : ''}
+    ${v.sug.length ? `<h3>For next week (up to 3)</h3>${v.sug.map((s, i) => `<div class="card row"><span style="flex:1">${s}</span><span id="sug${i}">${btn('Apply', 'sug', i, 'primary')}${btn('Not for me', 'sugNo', i)}</span></div>`).join('')}` : ''}
+    <h3>Phone interruptions <span class="small muted">(self-reported, not detected)</span></h3>
+    <table class="t">${ph.map((p, i) => `<tr><td>${p.t}</td><td>${['work','personal','unsure'].map(l => `<button class="chip ${p.l === l ? 'on' : ''}" data-a="phoneFix" data-v="${i}:${l}">${l}</button>`).join('')}</td></tr>`).join('')}</table>
+    <p class="small muted">How these are worked out: break follow-through = breaks you marked done / breaks offered; routine = days marked complete / scheduled days. Stays on this PC unless you share that category.</p></div>`);
+  if (!S.phone.length) S.phone = ph;
+  cap(`Weekly review: ${v.t}. Switch variants in the dark strip.`);
+}
+
+/* 12. monthly */
+F.monthly = () => { startFlow('monthly', 'Monthly progress', 'REV-02'); monthWin(); };
+const MONTHS = {
+  water: {name:'Water goal days', unit:'% of recorded workdays', base:58, data:[['Jun',62,'13 of 21 days','21/26'],['Jul',null,'no data','0/27'],['Aug',0,'0 of 4 days','4/26'],['Sep',71,'17 of 24 days','24/26'],['Oct',75,'12 of 16 days','16/17 so far','part']]},
+  move: {name:'Routines completed', unit:'% of scheduled days', base:50, data:[['Jun',55,'14 of 25'],['Jul',null,'no data'],['Aug',25,'1 of 4'],['Sep',63,'15 of 24'],['Oct',69,'11 of 16','','part']]},
+  breaks: {name:'Break follow-through', unit:'% of offered breaks', base:60, data:[['Jun',64,'58 of 91'],['Jul',null,'no data'],['Aug',40,'6 of 15'],['Sep',70,'71 of 101'],['Oct',72,'49 of 68','','part']]},
+};
+function monthWin(){
+  const m = MONTHS[S.monthMetric], empty = S.monthVariant === 'empty';
+  const chart = empty ? `<div class="note">Not enough data yet. Your first monthly chart appears after two weeks of use. Days you used the app: 4.</div>` : S.monthTable
+    ? `<table class="t"><tr><th>Month</th><th>${m.unit}</th><th>Detail</th><th>Coverage</th></tr>${m.data.map(d => `<tr><td>${d[0]}</td><td>${d[1] === null ? 'No data' : d[1] + '%'}</td><td>${d[2]}${d[4] ? ' (month in progress)' : ''}</td><td>${d[3] || '-'}</td></tr>`).join('')}</table>`
+    : `<div class="chart" role="img" aria-label="${m.name} by month. Use 'Show as table' for values.">${S.monthBase ? `<div class="baseline" style="bottom:${m.base * 1.6}px"><span>your first 4 weeks: ${m.base}%</span></div>` : ''}
+       ${m.data.map(d => `<div class="bar"><span class="num">${d[1] === null ? '-' : d[1] + '%'}</span><div class="v ${d[1] === null ? 'none' : d[1] === 0 ? 'zero' : d[4] ? 'part' : ''}" style="height:${d[1] === null ? 160 : d[1] * 1.6}px"></div><span class="lab">${d[0]}<br>${d[1] === null ? 'no data' : d[2]}</span></div>`).join('')}</div><div style="height:44px"></div>
+       <div class="legend"><span><i style="background:var(--blue)"></i>measured</span><span><i style="border:2px solid var(--blue)"></i>measured zero</span><span><i style="background:repeating-linear-gradient(45deg,#c9d2d6 0 4px,#fff 4px 8px);border:1px dashed #8a979d"></i>no data</span><span><i style="outline:2px dashed var(--blue);background:var(--blue)"></i>month in progress</span><span><i style="border-top:2px dashed var(--orange);height:0"></i>baseline</span></div>`;
+  const st = ['met','met','part','none','met','off','fut'];
+  const days = empty ? '' : `<h3>October, day by day (${MONTHS.water.name.toLowerCase()})</h3><div class="days">${Array.from({length: 31}, (_, i) => { const d = i + 1, wd = (d + 2) % 7; const k = d > 20 ? 'fut' : wd === 6 ? 'off' : d === 7 ? 'zero' : d === 9 || d === 14 ? 'none' : d % 5 === 0 ? 'part' : 'met';
+      const sym = {met:'&#10003;', part:'&#9680;', zero:'0', none:'&ndash;', off:'off', fut:''}[k]; return `<div class="day ${k}" title="${d} Oct: ${k}"><span>${d}</span><span>${sym}</span></div>`; }).join('')}</div>
+    <div class="legend"><span>&#10003; goal met</span><span>&#9680; some logged</span><span>0 nothing logged (app running)</span><span>&ndash; no data (app not running)</span><span>off non-workday</span></div>`;
+  openWin('HealthierYou - Monthly progress', `<nav aria-label="Review"><button data-a="openReview">Weekly review</button><button class="on">Monthly progress</button></nav><div class="content">
+    <div class="sim" style="background:#262b48;color:#eef0ff;border-radius:6px;padding:6px 8px;font-size:12px;margin-bottom:8px">Reviewer: ${['normal','empty'].map(k => `<button class="chip ${S.monthVariant === k ? 'on' : ''}" data-a="moVar" data-v="${k}">${k === 'normal' ? 'With history' : 'Empty (first weeks)'}</button>`).join('')}</div>
+    <h2>Monthly progress</h2><div class="row">${Object.entries(MONTHS).map(([k, v]) => `<button class="chip ${S.monthMetric === k ? 'on' : ''}" data-a="moMetric" data-v="${k}">${v.name}</button>`).join('')}</div>
+    <p class="muted small">${m.unit}. Rates per eligible day, so longer months don't look better. Each month is judged against the goal you had then.</p>
+    ${chart}${empty ? '' : `<div class="row">${btn(S.monthTable ? 'Show as chart' : 'Show as table', 'moTable')}${btn(S.monthBase ? 'Hide baseline' : 'Show baseline', 'moBase')}</div>`}${days}</div>`);
+  cap('Monthly chart with coverage, measured-zero vs no-data, month-in-progress, baseline and a table alternative.');
+}
+
+/* 13. sharing */
+F.sharing = () => { startFlow('sharing', 'Sharing preview, stop and delete', 'SHR-01, SHR-02; draft pending contract'); S.server = 'paired'; settings('sharing'); cap('Switch a category on: the preview appears first. Then try Sync now, switching it off, and Delete what I shared.'); };
+function shPreview(k, confirm){
+  const c = SHARE_CATS.find(x => x[0] === k);
+  modal(`<h2>${confirm ? 'Start sharing' : 'Preview'}: ${c[1]} ${DRAFT}</h2>
+    <p>Sent to: <b>office server (simulated)</b>, once a day per category.</p>
+    <table class="t"><tr><th>Fields</th><td class="mono">${esc(c[2])}</td></tr><tr><th>Today's actual record</th><td class="mono">${c[3]}</td></tr><tr><th>Never sent</th><td>Individual entries, times, notes, camera images</td></tr></table>
+    <div class="note">${AUDIENCE}</div><p class="small muted">Sharing starts from today. You can stop at any time; deleting what was already shared is a separate step.</p>
+    <div class="row">${confirm ? btn('Start sharing', 'shConfirm', k, 'primary') + btn('Cancel', 'closeModal') : btn('Close', 'closeModal', '', 'primary')}</div>`);
+}
+
+/* 14. backup */
+F.backup = () => { startFlow('backup', 'Export / import and update from file', 'PRD section 9 (install/update/backup); draft pending contract'); settings('backup'); cap('Export, import (replace, with error variants), update from file with signature check, rollback.'); };
+
+/* 15. offline */
+F.offline = () => { startFlow('offline', 'Server unreachable / offline', 'Server outage journey; LAN-01; SHR-02'); S.server = 'offline'; S.pending = {hydration: 2, outcomes: 1}; S.sharing.hydration = S.sharing.outcomes = true; setPet('offline'); offlineBubble(); };
+function offlineBubble(){
+  say(`<h4>${icon('plug')} Can't reach the office server</h4><p>Since 10:05. Reminders, logging and reviews keep working on this PC.</p><p class="small">3 summaries are waiting. They'll be sent when it's back, only for categories you still share.</p>
+    ${btn('Details', 'settings', 'sharing')}${btn('OK', 'closeBubble', '', 'primary')}${btn('Open pet menu', 'menuAnyway', '', 'link')}`);
+  cap('Disconnected badge (plug icon + text tag). Reviewer: <button class="tgl" data-a="setServer" data-v="paired">server back</button>');
+}
+
+/* 16. keyboard */
+F.keyboard = () => { startFlow('keyboard', 'Keyboard path + accessibility', 'PET-04; accessibility'); settings('a11y');
+  cap('Press Ctrl+Alt+H (or <button class="tgl" data-a="panel">open pet panel</button>): the panel takes focus on purpose, Tab moves, Esc closes and returns focus to the spreadsheet. Try 125%/150% text and reduced motion.'); };
+function petPanel(){
+  petMenu(); const b = $('#bubble'); b.setAttribute('aria-modal', 'false'); b.dataset.panel = '1';
+  const first = b.querySelector('button:not(.bx)'); if (first) first.focus();
+  $('#ledger').classList.add('inactive');
+  cap('Pet panel has keyboard focus (focus ring visible). Esc closes it and the spreadsheet becomes active again.');
+}
+
+/* 17. admin */
+F.admin = () => { startFlow('admin', 'Admin status page (server PC)', 'PRD flow 12; LAN-01; no individual health analytics; draft pending contract'); adminWin(); };
+function adminWin(slip){
+  $('#adminWin').style.display = 'flex';
+  const devs = [['Desk A','0.0.0','11:40','Paired'],['Desk B','0.0.0','yesterday 18:02','Paired'],['Desk C','-','-','Slip issued, not used']];
+  $('#adminBody').innerHTML = `<h2>Server status ${DRAFT}</h2><div class="note"><b>No habit data or charts are available on this page.</b> It shows service health, devices, pairing and updates only.</div>
+    <div class="row"><div class="card" style="flex:1">${icon('dot')} <b>Service running</b><br><span class="small muted">Up 3 d 4 h &middot; port 8443</span></div><div class="card" style="flex:1"><b>Last backup</b><br><span class="small muted">Today 13:00 &middot; 14 daily, 2 weekly kept</span></div><div class="card" style="flex:1"><b>Database</b><br><span class="small muted">2.1 MB &middot; journal 312 entries</span></div></div>
+    <h3>Devices</h3><table class="t"><tr><th>Alias</th><th>App version</th><th>Last seen</th><th>State</th><th></th></tr>${devs.map(d => `<tr><td>${d[0]}</td><td>${d[1]}</td><td>${d[2]}</td><td>${d[3]}</td><td>${btn('Revoke', 'adRevoke', d[0], 'link')}</td></tr>`).join('')}</table>
+    ${btn('Create pairing slip...', 'adSlip', '', 'primary')}${slip ? `<div class="card"><b>Pairing slip for Desk C</b> <span class="small muted">(single use, expires in 24 h)</span><p class="mono small">hy1-officepc-8443-SAMPLEFINGERPRINTBASE32XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX-SAMPLESECRET0000</p><p class="small">Fingerprint words: <b>amber cedar lotus river maple quartz</b></p><p class="small muted">Sample values only. Copy for internal chat or print. ${btn('Copy', 'noop', '', 'link')}${btn('Print', 'noop', '', 'link')}</p></div>` : ''}
+    <h3>Updates</h3><p class="small">Channel: pilot &middot; current release 0.0.0 &middot; previous compatible release kept for rollback. ${btn('Upload release...', 'noop', '', 'link')}</p>
+    <h3>Audit log</h3><table class="t small"><tr><td>Today 09:12</td><td>Slip created for Desk C</td></tr><tr><td>Yesterday 17:40</td><td>Backup completed</td></tr></table>
+    <p class="small muted">Anyone with administrator access to this PC's operating system could technically open the unencrypted shared summaries; the app itself has no way to view them.</p>`;
+  cap('Admin page on the server PC (localhost only): health, devices, slips, updates, audit log. No personal habit data.');
+}
+
+/* 18. camera (V2) */
+F.camera = () => { startFlow('camera', 'Posture check: consent > calibrate > cue > recalibrate > off', 'CAM-01, CAM-02; V2 quality gate'); S.camera = 'off'; camConsent(); };
+function camConsent(){
+  openWin('HealthierYou - Posture check (V2)', `<div class="content"><h2>Posture check ${V2}</h2>
+    <p>Uses your webcam to notice when you've stayed in a position that differs from your <b>own comfortable position</b> for a few minutes, and offers a gentle cue.</p>
+    <ul><li>Not a medical assessment or posture score.</li><li>Video stays in memory on this PC. Frames are never saved or sent.</li><li>A camera badge shows on the pet while it's on. One click turns it off.</li><li>Everything else works without the camera.</li></ul>
+    <div class="sim" style="background:#262b48;color:#eef0ff;border-radius:6px;padding:6px 8px;font-size:12px">Reviewer: simulate camera access ${['allowed','denied','busy','none'].map(o => btn(o, 'camStart', o)).join('')}</div>
+    <div class="row" style="margin-top:12px">${btn('Turn on camera', 'camStart', 'allowed', 'primary')}${btn('Not now', 'closeWin')}</div></div>`);
+  cap('Consent screen. Off by default. Choose an access outcome.');
+}
+function silhouette(lean){
+  return `<svg width="200" height="170" viewBox="0 0 200 170" aria-hidden="true"><g transform="${lean ? 'translate(0 14) rotate(6 100 160)' : ''}"><circle cx="100" cy="58" r="30" fill="none" stroke="#9fb0b7" stroke-width="3"/><path d="M30 168 Q34 112 100 104 Q166 112 170 168" fill="none" stroke="#9fb0b7" stroke-width="3"/></g>
+    <path d="M40 116 H160" stroke="#56B4E9" stroke-width="2" stroke-dasharray="6 5"/><circle cx="56" cy="116" r="4" fill="#56B4E9"/><circle cx="144" cy="116" r="4" fill="#56B4E9"/></svg>`;
+}
+function calibrate(outcome = 'ok'){
+  S.camera = 'calibrating';
+  const view = (pct, msg) => `<div class="content"><h2>Calibrate ${V2}</h2><div class="row" style="align-items:flex-start"><div class="cam"><span class="camlbl"><i></i>Camera on</span>${silhouette()}<span class="camnote">Simulated view - no camera is used in this prototype</span></div>
+    <div style="flex:1"><p>Sit the way you usually work, comfortably. Hold roughly still for about 20 seconds.</p><div class="progress"><i style="width:${pct}%"></i></div><p class="small" id="calMsg">${msg}</p>
+    <div class="sim" style="background:#262b48;color:#eef0ff;border-radius:6px;padding:6px 8px;font-size:12px">Reviewer: result ${btn('usable', 'calibrate', 'ok')}${btn('not usable', 'calibrate', 'bad')}</div>${btn('Cancel', 'camOff')}</div></div></div>`;
+  openWin('HealthierYou - Posture check (V2)', view(10, 'Looking for head and both shoulders...'));
+  setPet('camera', 'Calibrating');
+  later(() => { if (S.camera === 'calibrating') $('#hyBody').innerHTML = view(60, 'Hold still...'); }, 700);
+  later(() => {
+    if (S.camera !== 'calibrating') return;
+    if (outcome === 'bad'){ S.camera = 'off'; setPet('idle');
+      $('#hyBody').innerHTML = `<div class="content"><h2>Calibration not usable</h2><div class="err">Both shoulders weren't fully in view for long enough. Move the camera or sit back a little, then try again. No cues are given without a usable calibration.</div>${btn('Try again', 'calibrate', 'ok', 'primary')}${btn('Turn camera off', 'camOff')}</div>`;
+      cap('Calibration failed quality checks: reason shown, no cues.'); return; }
+    S.camera = 'on'; setPet('camera');
+    $('#hyBody').innerHTML = `<div class="content"><h2>Calibration saved</h2><div class="ok">Saved as a few numbers describing your usual position - no images.</div><p>I'll only cue you after a sustained change of about a minute, and at most every 30 minutes. I'll stay quiet during focus, meetings and off-hours.</p>${btn('Done', 'closeWin', '', 'primary')}</div>`;
+    cap('Camera on: badge "CAM" on the pet plus tag. Reviewer: <button class="tgl" data-a="camCue">sustained change</button> <button class="tgl" data-a="camNoRead">no reading</button> <button class="tgl" data-a="camSuspect">camera moved</button> <button class="tgl" data-a="camConflict">another app takes camera</button> <button class="tgl" data-a="camOff">off</button>');
+  }, 1500);
+  cap('Calibrating (simulated silhouette, no getUserMedia).');
+}
+
+/* 19. meditation (V2) */
+F.meditation = () => { startFlow('meditation', 'Meditation pause', 'CAL-01'); S.medTime = '15:30'; setClock('Tue 15:30'); setPet('cue');
+  say(`<h4>A short pause?</h4><p class="small">Your daily invitation. Optional, text only, no sound.</p><div class="row" style="gap:0">${btn('2 min', 'medStart', 2)}${btn('5 min', 'medStart', 5, 'primary')}${btn('10 min', 'medStart', 10)}</div>${btn('Not today', 'medSkip', '', 'link')}`);
+  cap('Invitation at the chosen time (set in Settings > Meditation). Missed or declined = skipped today, no backlog.'); };
+const MED_TEXT = {
+  breath: ['Settle into your chair. Let your hands rest.','Notice your breath without changing it.','If your mind wanders, that is normal. Come back to the next breath.','Let your shoulders soften.','When you are ready, look around the room and return to work.'],
+  open: ['Keep your eyes open and rest your gaze on something still.','Notice three things you can see.','Notice two things you can hear.','Notice the feeling of your feet on the floor.','When you are ready, return to work.'],
+};
+function medSession(min, mode = 'breath', i = 0, paused = false){
+  S.med = {min, mode, i, paused};
+  setPet('focus', `Pause ${min} min`);
+  say(`<h4>Meditation pause &middot; ${min} min</h4><div class="card" style="min-height:64px" aria-live="polite">${MED_TEXT[mode][i]}</div>
+    <p class="small muted" style="margin:0">Part ${i + 1} of 5 &middot; ${mode === 'breath' ? 'breath-focused' : 'eyes open, not breath-focused'}</p>
+    <div class="row" style="gap:0">${btn(i < 4 ? 'Next' : 'Finish', 'medNext', '', 'primary')}${btn(paused ? 'Resume' : 'Pause', 'medPause')}${btn('Stop', 'medStop')}</div>
+    ${btn(mode === 'breath' ? 'Use eyes-open, non-breath version' : 'Use breath version', 'medMode', '', 'link')}`, {wide: true, expanded: true});
+  cap('Text-guided session with pause, stop and an eyes-open/non-breath alternative. Next simulates time passing.');
+}
+
+/* 20. v3 placeholder */
+F.v3 = () => {};
+
+/* ---------- actions ---------- */
+const A = {
+  noop(){}, flip(v, t){ t.setAttribute('aria-checked', t.getAttribute('aria-checked') !== 'true'); }, flow(v){ (F[v] || F.reset)(); },
+  revMin(){ $('#rev').classList.toggle('min'); },
+  version(v){ S.version = v; renderRev(); if (S.flow === 'camera' || S.flow === 'meditation') F.reset(); },
+  closeBubble(){ closeBubble(); if (S.mode === 'reminder' || S.mode === 'cue') setPet(S.server === 'offline' ? 'offline' : 'idle'); $('#ledger').classList.remove('inactive'); },
+  closeWin(){ closeWin(); }, closeModal(){ closeModal(); }, closeAdmin(){ $('#adminWin').style.display = 'none'; },
+  closeGallery(){ $('#gallery').classList.remove('show'); cap('Back on the desktop.'); },
+  tray(){
+    const ex = $('#trayMenu'); if (ex){ ex.remove(); return; }
+    const m = document.createElement('div'); m.id = 'trayMenu';
+    m.innerHTML = `<button data-a="trayDo" data-v="toggle">${$('#pet').style.display === 'none' ? 'Show pet' : 'Hide pet'}</button><button data-a="trayDo" data-v="panel">Open pet panel (Ctrl+Alt+H)</button><button data-a="trayDo" data-v="pause">Pause coaching...</button><button data-a="trayDo" data-v="settings">Settings</button><button data-a="trayDo" data-v="review">Reviews</button>`;
+    $('#stage').appendChild(m);
+  },
+  trayDo(v){ $('#trayMenu')?.remove(); if (v === 'toggle'){ const p = $('#pet'); p.style.display = p.style.display === 'none' ? '' : 'none'; closeBubble(); cap(p.style.display === 'none' ? 'Pet hidden. Reopen from the tray icon.' : 'Pet shown.'); }
+    else if (v === 'panel') petPanel(); else if (v === 'pause') A.pauseMenu(); else if (v === 'settings') settings('pet'); else reviewWin(); },
+  /* setup */
+  suNext(){ S.setupStep = Math.min(SETUP_STEPS.length - 1, S.setupStep + 1); setupStep(); },
+  suBack(){ S.setupStep = Math.max(0, S.setupStep - 1); setupStep(); },
+  suConn(v){ S.connChoice = v; if (v !== 'lan' && S.flow === 'setup') S.server = 'none'; setupStep(); },
+  slipOutcome(v){ S.slipOutcome = v; setupStep(); },
+  suCheck(){ $('#slipResult').innerHTML = `<p class="small muted">Checking...</p>`; later(() => { const r = $('#slipResult'); if (r) r.innerHTML = SLIP[S.slipOutcome]; cap(`Pairing result: ${S.slipOutcome}.`); }, 500); },
+  suPaired(){ S.server = 'paired'; setupStep(); cap('Paired. Operational data disclosed separately from optional health sharing.'); },
+  suNoMatch(){ $('#slipResult').innerHTML = SLIP.mismatch; },
+  pairStart(){ S.connChoice = 'lan'; S.setupStep = 1; S.flow = 'setup'; setupStep(); },
+  suFinish(){ S.setupDone = true; closeWin(); $('#pet').style.display = ''; drawPet(); setPet('celebrate'); say(`<h4>All set</h4><p>I'll sit here at the edge. Click me any time, or press Ctrl+Alt+H.</p>`); later(() => { setPet('idle'); closeBubble(); }, 2600); cap('Setup finished. The pet appears at the chosen edge and returns to idle.'); },
+  /* pet edits */
+  pickPet(v){ const p = petById(v); if (!p.colours){ cap(`${p.name}: art pending the visual-direction decision. Same actions as all pets.`); return; } if (S.petName === petById(S.pet).def) S.petName = p.def; S.pet = v; S.colour = 0; drawPet(); rerenderTab(); },
+  colour(v){ S.colour = +v; drawPet(); rerenderTab(); }, edge(v){ S.edge = v; placePet(); rerenderTab(); }, tone(v){ S.tone = v; rerenderTab(); },
+  motion(){ S.motion = !S.motion; applyA11y(); rerenderTab(); },
+  resetPet(){ Object.assign(S, {pet:'turtle', petName:'Shelly', colour:0, scale:100, tone:'Gentle', edge:'right', motion:true}); petPos = null; applyA11y(); drawPet(); rerenderTab(); },
+  intensity(v){ S.intensity = v; rerenderTab(); }, cat(v){ S.cats[v] = !S.cats[v]; rerenderTab(); },
+  autoPresent(){ S.autoPresent = !S.autoPresent; rerenderTab(); }, camHint(){ S.camHint = !S.camHint; rerenderTab(); },
+  waterOn(){ S.waterOn = !S.waterOn; rerenderTab(); }, day(v){ S.workDays[v] = S.workDays[v] ? 0 : 1; rerenderTab(); }, pomoAuto(){ S.pomoAuto = !S.pomoAuto; if (S.flow === 'pomodoro' && !S.pomo) pomoMenu(); else rerenderTab(); },
+  settings(v){ closeBubble(); settings(v); },
+  fs(v){ S.fs = Math.round(14 * v / 100); applyA11y(); rerenderTab(); }, rm(){ S.rm = !S.rm; applyA11y(); rerenderTab(); }, hc(){ S.hc = !S.hc; applyA11y(); rerenderTab(); },
+  /* pet menu */
+  menuAnyway(){ S.mode = 'idle'; petMenu(); setPet('offline'); },
+  waterPanel(){ waterPanel(); }, moveIntro(){ moveIntro(); }, focusMenu(){ focusMenu(); }, pomoMenu(){ pomoMenu(); },
+  openReview(){ closeBubble(); if (S.mode === 'cue') setPet('idle'); reviewWin(); }, openMonth(){ monthWin(); },
+  /* reminder */
+  remWater(){ A.logW(250, true); showReminder(true); cap('Water logged inside the reminder; the water reason is struck through, the rest stays.'); },
+  remDone(){ setPet('celebrate'); say(`<h4>Nice</h4><p>Break recorded (self-reported). Next check in about 45 min.</p>`); later(() => { setPet('idle'); closeBubble(); }, 2000); cap('Completion: celebration, then idle.'); },
+  remSnooze(){ closeBubble(); setPet('snoozed'); cap('Snoozed: one 10-min snooze for the whole combined reminder. <button class="tgl" data-a="snoozeEnd">simulate 10 min later</button>'); },
+  snoozeEnd(){ setClock('Tue 11:25'); showReminder(); cap('After snooze: the same single reminder returns once (no stack of three).'); },
+  remDismiss(){ S.dismissals++; closeBubble(); setPet('idle');
+    if (S.dismissals >= 3){ say(`<h4>Fewer reminders?</h4><p>You've set aside 3 reminders today. That's fine. Would a lighter schedule suit you better?</p>${btn('Use Light', 'useLight', '', 'primary')}${btn('Keep Balanced', 'closeBubble')}`); cap('After 3 dismissals: gentle offer to reduce intensity, never escalation or guilt.'); }
+    else cap(`Dismissed (${S.dismissals}/3) - recorded as dismissed, never as done. <button class="tgl" data-a="redo">show reminder again</button>`); },
+  redo(){ showReminder(); }, useLight(){ S.intensity = 'Light'; toastPet('Switched to Light. You can change it in Settings.'); },
+  noResp(){ closeBubble(); setPet('waiting'); cap('No response for 10 min: bubble collapses to a badge. Logged as "offered, no response", not dismissed. Click the pet to reopen.'); S.mode = 'waiting'; },
+  /* water */
+  logW(v, quiet){ const ml = +v; if (!ml || ml <= 0) return; S.water.push({id: S.wid++, t: S.clock.slice(4), ml}); if (quiet) return;
+    const tot = waterTotal(); setPet(tot >= S.waterGoal ? 'celebrate' : 'idle');
+    say(`<p style="margin:0 24px 6px 0">Logged ${ml} ml &middot; ${tot} / ${S.waterGoal} ml${tot >= S.waterGoal ? '<br><b>Goal reached for today.</b> Nothing more needed.' : ''}</p>${btn('Undo', 'wUndo')}${btn('Details', 'waterPanel', '', 'link')}`);
+    cap(tot >= S.waterGoal ? 'Goal reached: a simple confirmation, no "keep drinking" encouragement.' : 'Quick log with Undo.'); },
+  wUndo(){ const w = S.water.pop(); toastPet(`Removed ${w ? w.ml : 0} ml. Total ${waterTotal()} ml.`); setPet('idle'); },
+  wCustom(){ const v = +($('#wCustom').value || 0); if (v > 0 && v <= 2000){ S.water.push({id: S.wid++, t: S.clock.slice(4), ml: v}); waterPanel(); } else { cap('Custom amount must be 1-2000 ml (validation example).'); } },
+  wEdit(v){ waterPanel(+v); }, wSave(v){ const w = S.water.find(x => x.id === +v); const n = +$('#wEdit').value; if (w && n > 0) w.ml = n; waterPanel(); cap('Corrected entry saved as a correction; totals recalculated.'); },
+  wDel(v){ S.water = S.water.filter(x => x.id !== +v); waterPanel(); },
+  /* movement */
+  mvVer(v){ S.mv.ver = v; setPet('exercise'); moveStep(); }, mvDone(){ S.mv.done++; S.mv.step++; moveStep(); }, mvSkip(){ S.mv.skipped++; S.mv.step++; moveStep(); },
+  mvStop(){ moveEnd(true); }, mvDay(v){ const d = DAYS[+v]; setClock(`${d} 11:20`); moveIntro(); },
+  mvLater(){ closeBubble(); setPet('idle'); toastPet("OK, I'll offer it again later today (once)."); },
+  mvSkipDay(){ closeBubble(); setPet('idle'); toastPet('Skipped for today. Recorded as skipped. No catch-up tomorrow.'); },
+  /* focus etc. */
+  focusStart(v){ const m = v === 'custom' ? Math.max(5, Math.min(240, +($('#fCustom')?.value || 45))) : +v; S.focusLeft = m - 1; closeBubble(); setPet('focus', `Focus ${m} min`); cap(`Focus on: reminders held, pet eyes closed, tag shows time. <button class="tgl" data-a="focusEnd">end focus</button> <button class="tgl" data-a="pomoMenu">start Pomodoro (asks to replace)</button>`); },
+  focusEnd(){ setPet('idle'); toastPet('Focus ended. Reminders resume; missed ones are not replayed.'); },
+  pauseMenu(){ say(`<h4>Pause coaching</h4><p class="small">No reminders until you resume. Logging still works.</p>${['30 min','1 hour','Rest of today','Until I resume'].map((l, i) => btn(l, 'pauseStart', [30, 60, 600, 0][i])).join('')}`); },
+  pauseStart(v){ S.paused = true; closeBubble(); setPet('paused', +v ? `Paused ${+v >= 600 ? 'today' : v + ' min'}` : 'Paused'); cap('Coaching paused (highest precedence). Click the pet to resume.'); },
+  pauseEnd(){ S.paused = false; setPet('idle'); toastPet('Coaching resumed.'); },
+  meeting(){ S.meeting = !S.meeting; closeBubble(); setPet(S.meeting ? 'meeting' : 'idle'); cap(S.meeting ? 'Manual "in a meeting": prompts held, pet dimmed with mute badge. Reminders are not replayed afterwards.' : 'Meeting over.'); },
+  simPresent(){ closeBubble(); $('#pet').style.display = 'none'; $('#trayTxt').textContent = 'HealthierYou (hidden: presentation)';
+    cap('Presentation/full-screen detected: pet hides itself and prompts pause. Detection is imperfect; the manual toggle always works. <button class="tgl" data-a="presentEnd">presentation ends</button>'); },
+  presentEnd(){ $('#pet').style.display = ''; $('#trayTxt').textContent = 'HealthierYou'; setPet('idle'); cap('Pet returns. No backlog of prompts.'); },
+  simQuiet(){ closeBubble(); setClock('Tue 19:10'); setPet('quiet'); cap('Outside work hours: moon badge, "Off hours" tag, no prompts. Logging still possible from the menu.'); },
+  /* recovery */
+  recAsk(){ recCheckIn(); },
+  recNo(v){ closeBubble(); setPet('idle'); toastPet(v === 'quiet' ? "OK, I won't ask again today." : 'OK. Normal breaks continue as usual.'); cap('Declined: nothing changes; no plan is created.'); },
+  recYes(){ say(`<h4>Plan a gentler recovery day?</h4><p class="small">A personal routine: more short breaks, an optional walk and a calm finish. Not a leave request.</p>
+    <div class="row" style="gap:0">${btn('Tomorrow (Wed 22 Oct)', 'recPlan', 'Wed 22 Oct', 'primary')}${btn('Choose a date', 'recDate')}${btn('Later', 'recLater')}${btn('No thanks', 'recNo', '', 'link')}</div>`); cap('Invitation: tomorrow, choose a date, later, or no.'); },
+  recDate(){ say(`<h4>Choose a date</h4>${['Thu 23 Oct','Fri 24 Oct','Sat 25 Oct','Mon 27 Oct'].map(d => btn(d, 'recPlan', d)).join('')}`); },
+  recLater(){ closeBubble(); setPet('idle'); toastPet("OK. You can plan it from the pet menu > Deadline day."); },
+  recPlan(v){ S.recovery = {date: v, walk: '16:00', interval: false, shutdown: '18:30'}; recWin(); },
+  recSave(){ closeWin(); setPet('celebrate'); say(`<h4>Recovery day planned</h4><p>${S.recovery.date}. I'll show it in the morning.</p>${btn('Reschedule', 'recDate')}${btn('Cancel plan', 'recCancel', '', 'link')}`); later(() => setPet('idle'), 1500);
+    cap('One pending plan. Reschedule or cancel freely. <button class="tgl" data-a="recDay">jump to the recovery day</button>'); },
+  recCancel(){ S.recovery = null; closeBubble(); setPet('idle'); toastPet('Recovery plan cancelled.'); },
+  recDay(){ setClock('Wed 09:35'); setPet('cue'); say(`<h4>Today is your recovery day</h4><ul class="reason"><li>Short breaks offered a little more often</li><li>Optional walk at ${S.recovery?.walk || '16:00'}</li><li>Your water goal stays ${S.waterGoal} ml</li><li>Lunch away from the screen if you can; finish around ${S.recovery?.shutdown || '18:30'}</li></ul>${btn('Sounds good', 'closeBubble', '', 'primary')}${btn('Edit plan', 'recWin')}${btn('Cancel for today', 'recCancel', '', 'link')}`, {wide: true});
+    cap('Recovery-day morning. <button class="tgl" data-a="recEnd">jump to end of day</button>'); },
+  recWin(){ recWin(); },
+  recEnd(){ setClock('Wed 18:30'); setPet('cue'); say(`<h4>End of your recovery day</h4><p>Did this routine feel helpful?</p>${['Yes','Somewhat','No'].map(r => btn(r, 'recReflect', r)).join('')}${btn('Skip', 'recReflect', 'skip', 'link')}<p class="small muted" style="margin:0">Stays on this PC.</p>`); },
+  recReflect(v){ S.recovery = null; setPet('idle'); toastPet(v === 'skip' ? 'Skipped.' : 'Thanks. Noted privately.'); cap('One optional reflection, kept on this PC. Plan cleared.'); },
+  /* pomodoro */
+  pomoMenuForce(){ S.mode = 'idle'; S.focusLeft = 0; pomoMenu(); },
+  pomoResumeCoach(){ S.paused = false; setPet('idle'); pomoMenu(); },
+  pomoStart(v){ const [w, b] = String(v).split('/').map(Number); S.pomo = {preset: v, work: w, brk: b, phase: 'work', left: w * 60 - 1, paused: false}; closeBubble(); setPet('pomodoro', `Work ${fmt(S.pomo.left)}`); cap(`Pomodoro running (${v}). Click the pet for controls. Reviewer: <button class="tgl" data-a="pomoBreak">skip to break</button> <button class="tgl" data-a="pomoLock">simulate PC lock</button>`); },
+  pomoPause(){ S.pomo.paused = true; setPet('pomodoro', `Paused ${fmt(S.pomo.left)}`); pomoControls(); },
+  pomoResume(){ S.pomo.paused = false; pomoControls(); },
+  pomoEnd(){ S.pomo = null; closeBubble(); setPet('idle'); toastPet('Pomodoro ended.'); cap('Ended. No timer runs until you press Start again.'); },
+  pomoBreak(){ if (!S.pomo) return; S.pomo.phase = 'break'; S.pomo.left = S.pomo.brk * 60; S.pomo.paused = true; setPet('cue', 'Break time');
+    say(`<h4>Break &middot; ${S.pomo.brk} min</h4><ul class="reason"><li>Look away from the screen, blink naturally</li><li>Stand or move comfortably</li>${waterTotal() < S.waterGoal ? '<li>Water - you are behind your own pace</li>' : ''}</ul><p class="small">Feel free to leave the desk.</p>${btn('Start break', 'pomoBreakGo', '', 'primary')}${btn('Skip break', 'pomoBreakSkip')}${btn('End Pomodoro', 'pomoEnd', '', 'link')}`, {wide: true});
+    cap('Break suggestions are one combined card; regular reminders are folded in, not duplicated. Skipping is not completion.'); },
+  pomoBreakGo(){ S.pomo.paused = false; closeBubble(); setPet('pomodoro', `Break ${fmt(S.pomo.left)}`); later(() => { if (S.pomo && S.pomo.phase === 'break'){ S.pomo.left = 0; pomoBreakEnd(); } }, 2500); cap('Break running (shortened to 2.5 s in this prototype).'); },
+  pomoBreakSkip(){ S.pomo.phase = 'break'; pomoBreakEnd(); cap('Break skipped: recorded as declined, not completed. No auto restart.'); },
+  pomoLock(){ if (!S.pomo) return; S.pomo.paused = true; setPet('pomodoro', `Paused ${fmt(S.pomo.left)}`); say(`<h4>Pomodoro paused</h4><p>Your PC was locked. The timer waits until you resume. No catch-up rounds.</p>${btn('Resume', 'pomoResume', '', 'primary')}${btn('End', 'pomoEnd')}`); cap('Lock/sleep pauses the timer; explicit resume required.'); },
+  /* phone */
+  phoneLog(){ const e = {t: S.clock, l: null}; S.phone.push(e); say(`<p style="margin:0 24px 6px 0">Phone interruption noted &middot; ${S.clock.slice(4)}</p><p class="small muted" style="margin:0 0 4px">Optional: what was it?</p>${['work','personal','unsure'].map(l => btn(l, 'phoneLabel', l)).join('')}${btn('Undo', 'phoneUndo', '', 'link')}`);
+    cap('One tap creates an editable, self-reported event. Labels and corrections are also available in the weekly review.'); },
+  phoneLabel(v){ S.phone[S.phone.length - 1].l = v; toastPet(`Saved as ${v}. Edit it in your weekly review.`); },
+  phoneUndo(){ S.phone.pop(); toastPet('Removed.'); },
+  phoneFix(v){ const [i, l] = v.split(':'); S.phone[+i].l = l; reviewWin(); cap('Self-reported phone event corrected.'); },
+  /* weekly / monthly */
+  wkLater(){ closeBubble(); setPet('idle'); toastPet("OK, I'll offer it once on your next workday."); },
+  wkSkip(){ closeBubble(); setPet('idle'); toastPet("Skipped. I won't ask again this week."); },
+  wkVar(v){ S.reviewVariant = v; reviewWin(); },
+  sug(v){ $('#sug' + v).innerHTML = '<b>Applied</b> &middot; <button class="btn link" data-a="noop">Undo</button>'; cap('Suggestion applied to settings (reversible).'); },
+  sugNo(v){ $('#sug' + v).innerHTML = '<span class="muted">Hidden</span>'; },
+  moVar(v){ S.monthVariant = v; monthWin(); }, moMetric(v){ S.monthMetric = v; monthWin(); }, moTable(){ S.monthTable = !S.monthTable; monthWin(); }, moBase(){ S.monthBase = !S.monthBase; monthWin(); },
+  /* sharing */
+  shToggle(v){
+    if (!S.sharing[v]) return shPreview(v, true);
+    S.sharing[v] = false; const n = S.pending[v] || 0; S.pending[v] = 0; rerenderTab(); if (S.flow === 'setup') return;
+    modal(`<h2>Sharing stopped ${DRAFT}</h2><p>${SHARE_CATS.find(c => c[0] === v)[1]}: no more summaries will be sent.${n ? ` ${n} unsent summar${n > 1 ? 'ies were' : 'y was'} discarded.` : ''}</p><p>What you already shared stays on the server until you delete it.</p>${btn('Delete what I shared...', 'shDelete', v, 'primary')}${btn('Keep it', 'closeModal')}`);
+    cap('Stop sharing is immediate (unsent queue discarded). Deletion of already-shared data is a separate step.'); },
+  shPreview(v){ shPreview(v, false); },
+  shConfirm(v){ S.sharing[v] = true; S.pending[v] = 1; closeModal(); if (S.flow === 'setup') setupStep(); else rerenderTab(); cap('Sharing on from today. 1 summary waiting. Try <b>Sync now</b>.'); },
+  shSync(){ if (S.server === 'offline'){ cap('Server unreachable: summaries stay queued and retry automatically.'); return; } S.pending = {}; S.lastSync = S.clock.slice(4); rerenderTab(); cap('Synced: only categories currently switched on were sent.'); },
+  shDelete(v){ const c = SHARE_CATS.find(x => x[0] === v);
+    modal(`<h2>Delete what I shared: ${c[1]} ${DRAFT}</h2><label class="fld">Which dates?</label><label><input type="radio" name="rng" checked> All dates</label> <label><input type="radio" name="rng"> A date range</label>
+      <p>This removes the summaries from the server's active store. Server backups expire within 30 days. Your own data on this PC is not affected.</p>
+      <div class="row">${btn('Delete from server', 'shDelGo', v, 'danger')}${btn('Cancel', 'closeModal')}</div>`); },
+  shDelGo(v){ if (S.server === 'offline'){ modal(`<h2>Deletion queued</h2><p>The server can't be reached. Your request is saved and will be sent automatically. Status: <b>waiting - retrying</b>.</p>${btn('OK', 'closeModal', '', 'primary')}`); return; }
+    modal(`<h2>Sending deletion request...</h2><div class="progress"><i style="width:50%"></i></div>`);
+    later(() => modal(`<h2>Deleted from the server</h2><div class="ok">Receipt: ${SHARE_CATS.find(c => c[0] === v)[1]}, all dates, removed from the active store today at ${S.clock.slice(4)}.</div><p class="small">Server backups that may contain it expire within 30 days. Late uploads from your other PCs cannot bring it back.</p>${btn('Done', 'closeModal', '', 'primary')}`), 800);
+    cap('Deletion has acknowledgement/receipt status. Offline variant queues it.'); },
+  shStale(){ modal(`<h2>Switched off on another PC ${DRAFT}</h2><p>Hydration summary sharing was switched off on your other PC on 19 Oct. Switch it on again here?</p><p class="small muted">If you switch it on, sharing restarts from today. Earlier dates are not sent.</p>${btn('Switch on again', 'shConfirm', 'hydration', 'primary')}${btn('Leave it off', 'closeModal')}`); cap('Conflict: a stale enable from a second PC never silently re-enables sharing.'); },
+  unpair(){ modal(`<h2>Unpair this PC?</h2><p>This PC stops syncing. Your local data stays. Summaries already on the server stay until you delete them per category.</p>${btn('Unpair', 'unpairGo', '', 'danger')}${btn('Cancel', 'closeModal')}`); },
+  unpairGo(){ S.server = 'none'; Object.keys(S.sharing).forEach(k => S.sharing[k] = false); closeModal(); rerenderTab(); },
+  setServer(v){ S.server = v; renderRev();
+    if (v === 'paired'){ const n = Object.values(S.pending).reduce((a, b) => a + b, 0); S.pending = {}; setPet('idle'); toastPet(`Back online.${n ? ` Sent ${n} waiting summar${n > 1 ? 'ies' : 'y'}.` : ''}`); }
+    else { setPet('offline'); offlineBubble(); }
+    if ($('#hyWin').style.display !== 'none' && S.tab === 'sharing') rerenderTab(); },
+  /* backup */
+  exportStart(){ modal(`<h2>Export my data ${DRAFT}</h2><p>Choose a password for the backup file. You'll need it to import. It can't be recovered if forgotten.</p><label class="fld">Password</label><input type="password" value="example" aria-label="Backup password"><label class="fld">Includes</label><p class="small">Settings, goals history, pet edits, sharing choices, 90 days of events, 24 months of summaries, consent log. <b>Not included:</b> pairing (pair again after import).</p>${btn('Save backup file...', 'exportGo', '', 'primary')}${btn('Cancel', 'closeModal')}`); },
+  exportGo(){ modal(`<h2>Backup ready</h2><div class="ok">Saved <span class="mono">HealthierYou-backup-2026-10-20.hybackup</span> (simulated; nothing was written).</div>${btn('Done', 'closeModal', '', 'primary')}`); cap('Export complete (simulated).'); },
+  importStart(){ modal(`<h2>Import a backup ${DRAFT}</h2><p>Chosen file: <span class="mono">HealthierYou-backup-2026-10-20.hybackup</span></p><div class="warn">Import <b>replaces</b> all HealthierYou data on this PC. It does not merge.</div>
+    <div class="sim" style="background:#262b48;color:#eef0ff;border-radius:6px;padding:6px 8px;font-size:12px">Reviewer: outcome ${btn('ok', 'importGo', 'ok')}${btn('wrong password', 'importGo', 'pw')}${btn('newer version', 'importGo', 'ver')}${btn('damaged file', 'importGo', 'bad')}</div>
+    ${btn('Replace my data', 'importGo', 'ok', 'danger')}${btn('Cancel', 'closeModal')}`); },
+  importGo(v){ const r = {ok: '<div class="ok"><b>Imported.</b> Your reviews and settings are restored. Pair again if you use the office server.</div>', pw: '<div class="err"><b>Wrong password.</b> Nothing was changed.</div>', ver: '<div class="err"><b>This backup is from a newer version.</b> Update HealthierYou first. Nothing was changed.</div>', bad: '<div class="err"><b>The file is damaged or not a HealthierYou backup.</b> Nothing was changed.</div>'}[v];
+    modal(`<h2>Import</h2>${r}${btn('Close', 'closeModal', '', 'primary')}`); cap(`Import outcome: ${v}.`); },
+  updStart(){ modal(`<h2>Install update from file ${DRAFT}</h2><p>Installer: <span class="mono">HealthierYou-setup-0.0.1.exe</span><br>Signature: <span class="mono">HealthierYou-setup-0.0.1.exe.sig</span></p>
+    <div class="sim" style="background:#262b48;color:#eef0ff;border-radius:6px;padding:6px 8px;font-size:12px">Reviewer: ${btn('signature ok', 'updGo', 'ok')}${btn('bad / missing signature', 'updGo', 'bad')}</div>${btn('Check and install', 'updGo', 'ok', 'primary')}${btn('Cancel', 'closeModal')}`); },
+  updGo(v){ modal(v === 'ok' ? `<h2>Signature verified</h2><div class="ok">Version 0.0.1 will install at the next quiet moment (never during a reminder or camera session). Your data is copied first.</div>${btn('OK', 'closeModal', '', 'primary')}` : `<h2>Update refused</h2><div class="err">The signature is missing or doesn't match. Nothing was installed. Ask your administrator for the original files.</div>${btn('OK', 'closeModal', '', 'primary')}`); },
+  rollback(){ modal(`<h2>Install previous version</h2><div class="warn">Goes back one release. If the older version can't read your newer data, it restores the copy taken before the update, and anything recorded since then is lost. Consider exporting first.</div>${btn('Export first', 'exportStart')}${btn('Continue', 'updGo', 'ok', 'danger')}${btn('Cancel', 'closeModal')}`); },
+  /* admin */
+  adSlip(){ adminWin(true); cap('Slip shows full fingerprint + single-use secret (sample values) and 6-word cross-check.'); },
+  adRevoke(v){ modal(`<h2>Revoke ${esc(v)}?</h2><p>That PC can no longer sync. Its user keeps their local data and can pair again with a new slip.</p>${btn('Revoke', 'closeModal', '', 'danger')}${btn('Cancel', 'closeModal')}`); },
+  /* camera */
+  camConsent(){ closeBubble(); camConsent(); },
+  camStart(v){
+    if (v === 'allowed') return calibrate('ok');
+    S.camera = v === 'denied' ? 'denied' : v === 'busy' ? 'busy' : 'off';
+    const msg = {denied: `<div class="err"><b>Windows is blocking camera access for desktop apps.</b> HealthierYou keeps working without it.</div>${btn('Open Windows camera settings (simulated)', 'noop')}`, busy: `<div class="warn"><b>Your camera is in use by another app</b> (for example a video call). Posture check will wait; nothing is measured meanwhile.</div>${btn('Try again', 'camStart', 'allowed')}`, none: `<div class="warn"><b>No camera found.</b> Posture check needs a webcam. Everything else works as usual.</div>`}[v];
+    openWin('HealthierYou - Posture check (V2)', `<div class="content"><h2>Posture check ${V2}</h2>${msg}${btn('Continue without camera', 'closeWin', '', 'primary')}</div>`);
+    setPet('idle'); cap(`Camera ${v}: explicit unavailable state, no score inferred, V1 continues.`); },
+  calibrate(v){ calibrate(v || 'ok'); },
+  camCue(){ if (S.camera === 'off') return; closeWin(); S.camera = 'on'; setPet('reminder', 'Camera on');
+    say(`<h4>Small reset?</h4><p>For a few minutes you've been leaning further forward than your usual position. A quick shoulder roll or sitting back might feel good.</p>${btn('Thanks', 'camThanks', '', 'primary')}${btn('Snooze 30 min', 'camThanks')}${btn('Turn camera off', 'camOff', '', 'link')}<p class="small muted" style="margin:0">Compared with your calibration, not a health score. Next cue no sooner than 30 min.</p>`, {wide: true});
+    cap('One cue after a sustained (60 s+) change. No per-frame nagging; 30-min cooldown.'); },
+  camThanks(){ closeBubble(); setPet('camera'); },
+  camNoRead(){ if (S.camera === 'off') return; closeWin(); closeBubble(); S.camera = 'noread'; setPet('camNo'); cap('No reading (away, dark, occluded or low confidence): shown as "no reading", no score inferred, no cues. <button class="tgl" data-a="camBack">reading returns</button>'); },
+  camBack(){ S.camera = 'on'; setPet('camera'); cap('Readings resumed.'); },
+  camSuspect(){ if (S.camera === 'off') return; closeWin(); S.camera = 'suspect'; setPet('camNo', 'Cam: cues paused');
+    say(`<h4>Did the camera move?</h4><p>The view changed suddenly, so I've paused posture cues. If it doesn't settle in 2 minutes, I'll ask you to recalibrate.</p>${btn('Recalibrate now', 'calibrate', 'ok', 'primary')}${btn('Later', 'camLater')}${btn('Turn camera off', 'camOff', '', 'link')}`, {wide: true});
+    cap('Baseline suspect: cues suspended at once rather than coaching against an old baseline.'); },
+  camLater(){ closeBubble(); cap('Still suspended. <button class="tgl" data-a="camAsk">2 minutes later</button>'); },
+  camAsk(){ say(`<h4>Recalibrate?</h4><p>The view hasn't settled, so the old calibration can't be used. Recalibrate to restart posture cues.</p>${btn('Recalibrate', 'calibrate', 'ok', 'primary')}${btn('Turn camera off', 'camOff')}`); cap('Asked once to recalibrate; nothing scored meanwhile.'); },
+  camConflict(){ if (S.camera === 'off') return; closeWin(); S.camera = 'busy'; setPet('idle', 'Camera paused'); $('#petCam').style.display = 'none';
+    say(`<h4>Camera taken by another app</h4><p>Posture check is paused while another app uses the camera. Everything else keeps working.</p>${btn('OK', 'closeBubble', '', 'primary')}${btn('Turn posture check off', 'camOff', '', 'link')}`); cap('Camera conflict: V1 features continue.'); },
+  camOff(){ S.camera = 'off'; clearTimers(); closeWin(); setPet('idle'); toastPet('Camera off. Capture stopped.'); cap('Off is immediate (target: capture released within 2 s). Badge removed.'); },
+  /* meditation */
+  medStart(v){ medSession(+v); }, medSkip(){ closeBubble(); setPet('idle'); toastPet('Skipped for today. No reminder later.'); },
+  medNext(){ const m = S.med; if (m.i >= 4){ setPet('idle'); say('<h4>Done</h4><p>Back to work whenever you are ready.</p>'); cap('Session finished; logged on this PC only.'); return; } medSession(m.min, m.mode, m.i + 1); },
+  medPause(){ const m = S.med; medSession(m.min, m.mode, m.i, !m.paused); },
+  medStop(){ closeBubble(); setPet('idle'); toastPet('Stopped. That is completely fine.'); },
+  medMode(){ const m = S.med; medSession(m.min, m.mode === 'breath' ? 'open' : 'breath', m.i); },
+  panel(){ petPanel(); },
+};
+function recWin(){
+  const r = S.recovery || {date: 'Wed 22 Oct', walk: '16:00', interval: false, shutdown: '18:30'}; S.recovery = r;
+  openWin('HealthierYou - Recovery day', `<div class="content"><h2>Recovery day: ${r.date}</h2><p class="muted">A gentler routine you control. Not a leave request, and not a reason to work longer today.</p>
+    <div class="toggle">${sw(true, 'flip', '', 'More short breaks')}<span>Short movement and screen-free breaks offered a little more often</span></div>
+    <div class="toggle">${sw(true, 'flip', '', 'Optional walk')}<span>Optional comfortable 10-15 min walk at <input type="time" value="${r.walk}"> <label class="small"><input type="checkbox"> repeat every 90 min</label></span></div>
+    <div class="toggle">${sw(true, 'flip', '', 'Lunch away')}<span>Lunch away from the screen, if practical</span></div>
+    <div class="toggle">${sw(true, 'flip', '', 'Calm pause')}<span>One brief calming pause</span></div>
+    <div class="toggle">${sw(true, 'flip', '', 'Shutdown time')}<span>Finish work around <input type="time" value="${r.shutdown}"></span></div>
+    <div class="toggle">${sw(true, 'flip', '', 'Reflection')}<span>One end-of-day question: "Did this routine feel helpful?"</span></div>
+    <div class="note">Water stays at your own goal (${S.waterGoal} ml) - no catch-up. Today's normal movement routine is reused; nothing extra is owed.</div>
+    <div class="row">${btn('Save plan', 'recSave', '', 'primary')}${btn('Change date', 'recDate')}${btn('Cancel', 'recCancel', '', 'link')}</div></div>`);
+  cap('Recovery-day plan. Only one pending plan at a time.');
+}
+function rerenderTab(){
+  if (S.flow === 'setup' && $('#hyWin').style.display !== 'none' && $('#hyTitle').textContent.includes('Setup')) return setupStep();
+  if ($('#hyWin').style.display !== 'none' && $('#hyTitle').textContent.includes('Settings')) settings(S.tab);
+}
+function applyA11y(){
+  document.documentElement.style.setProperty('--fs', S.fs + 'px');
+  $('#stage').classList.toggle('rm', S.rm || !S.motion);
+  $('#stage').classList.toggle('hc', S.hc);
+  placeBubble();
+}
+
+/* ---------- events ---------- */
+document.addEventListener('click', e => {
+  const t = e.target.closest('[data-a]');
+  if (!t || t.disabled) return;
+  if (t.tagName === 'INPUT' && t.type === 'radio') { A[t.dataset.a]?.(t.dataset.v, t); return; }
+  e.preventDefault();
+  const fn = A[t.dataset.a];
+  if (fn) fn(t.dataset.v, t); else console.warn('No action', t.dataset.a);
+});
+document.addEventListener('input', e => {
+  const k = e.target.dataset?.in; if (!k) return;
+  if (k === 'petName'){ S.petName = e.target.value || petById(S.pet).def; setPet(S.mode); }
+  if (k === 'scale'){ S.scale = +e.target.value; $('#scaleLbl').textContent = S.scale + '%'; drawPet(); }
+  if (k === 'goal'){ const v = +e.target.value; if (v >= 500 && v <= 5000) S.waterGoal = v; }
+  if (k === 'medTime'){ S.medTime = e.target.value || null; }
+});
+document.addEventListener('keydown', e => {
+  if (e.ctrlKey && e.altKey && (e.key === 'h' || e.key === 'H')){ e.preventDefault(); petPanel(); return; }
+  if (e.key === 'Escape'){
+    if ($('#modalWrap').classList.contains('show')) return closeModal();
+    if ($('#gallery').classList.contains('show')) return A.closeGallery();
+    if ($('#bubble').classList.contains('show')){ const wasPanel = $('#bubble').dataset.panel; closeBubble(); delete $('#bubble').dataset.panel; $('#ledger').classList.remove('inactive');
+      if (wasPanel){ document.activeElement?.blur(); cap('Panel closed with Esc; focus returned to the spreadsheet.'); } return; }
+    if ($('#trayMenu')) return $('#trayMenu').remove();
+  }
+});
+/* pet drag + click; the real pet window never takes focus (WS_EX_NOACTIVATE), so mousedown is prevented here too */
+(function petPointer(){
+  const pet = $('#pet'); let st = null;
+  const scale = () => $('#stage').getBoundingClientRect().width / 1366;
+  pet.addEventListener('pointerdown', e => { e.preventDefault(); st = {x: e.clientX, y: e.clientY, px: pet.offsetLeft, py: pet.offsetTop, moved: false}; pet.setPointerCapture(e.pointerId); });
+  pet.addEventListener('pointermove', e => { if (!st) return; const k = scale(), dx = (e.clientX - st.x) / k, dy = (e.clientY - st.y) / k;
+    if (Math.abs(dx) + Math.abs(dy) > 4) { st.moved = true; pet.classList.add('drag'); }
+    if (st.moved) { petPos = {x: st.px + dx, y: st.py + dy}; pet.style.left = petPos.x + 'px'; pet.style.top = petPos.y + 'px'; placeBubble(); } });
+  pet.addEventListener('pointerup', () => { if (!st) return; pet.classList.remove('drag');
+    if (st.moved){ const dw = $('#desk').clientWidth; if (S.edge !== 'free') S.edge = petPos.x + pet.offsetWidth / 2 > (dw + 250) / 2 ? 'right' : 'left'; placePet(); cap(`Dropped: snapped to the ${S.edge === 'free' ? 'drop point' : S.edge + ' edge'}. Position is remembered per monitor in the product.`); }
+    else onPetClick();
+    st = null; });
+})();
+function onPetClick(){
+  $('#trayMenu')?.remove();
+  if ($('#bubble').classList.contains('show')){ closeBubble(); return; }
+  if (S.mode === 'waiting' || S.mode === 'snoozed') return showReminder();
+  if (S.mode === 'paused') return say(`<h4>Coaching paused</h4>${btn('Resume coaching', 'pauseEnd', '', 'primary')}${btn('Open menu', 'menuAnyway')}`);
+  if (S.mode === 'focus' && S.focusLeft) return say(`<h4>Focus on</h4><p class="small">${S.focusLeft} min left. Reminders are held.</p>${btn('End focus', 'focusEnd', '', 'primary')}${btn('Open menu', 'menuAnyway')}`);
+  if (S.mode === 'meeting') return say(`<h4>In a meeting</h4>${btn('Meeting over', 'meeting', '', 'primary')}`);
+  if (S.camera === 'suspect') return A.camAsk();
+  petMenu();
+}
+function fit(){ const k = Math.min(window.innerWidth / 1366, window.innerHeight / 768, 1); $('#stage').style.transform = `scale(${k})`; }
+window.addEventListener('resize', fit);
+
+/* ---------- init ---------- */
+fit(); renderRev(); drawPet(); setPet('idle'); cap('Click the pet, drag it, or pick a flow on the left.');
+</script>
+</body>
+</html>
