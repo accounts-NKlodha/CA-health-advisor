@@ -1,4 +1,6 @@
 > **Approved baseline.** PRD revision 0.3, approved by the owner on 18 October 2026 and published here on 20 October 2026 with the owner's name removed (owner's instruction). It supersedes `docs/PRD.md` (revision 0.1). Later owner decisions recorded in `docs/Decisions.md` (for example DEC16 V1/V2-first sequence and DEC17 8 GB minimum PC) take precedence where they differ. Source package SHA-256 before redaction: 13224412c460fc0f260ebf8c84ef7e6e0715e263d231217ebad6c4d2a9fd962e.
+>
+> **Execution entry point.** Current work is governed by the owner decisions recorded in `docs/Decisions.md` and by `docs/Architecture_V1_V2.md`. Wherever they differ from this file, they take precedence. The status, approval, budget, calendar and deadline sections below (for example the 5 Nov all-versions target, the 4 GB minimum PC and the gate states as of 18 Oct) are a historical snapshot, not current instructions. The requirements and acceptance criteria stay in force unless a recorded decision changes them.
 
 # HealthierYou — Approved PRD and Claude Design Package
 PRD 0.3 and Claude design brief approved by user on 18 October 2026. Prototype is not yet produced or approved. No product development authorised. Sound/colour deferred to V4, outside November 5 V1–V3 target. This file supersedes the older PRD 0.1 currently published on GitHub.
