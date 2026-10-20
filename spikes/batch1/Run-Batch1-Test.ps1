@@ -921,6 +921,23 @@ try {
         else { Set-Result 'C3' 'Not run' 'no clear owner answer' $note }
     }
 
+    # Windows' own record of camera use by this app (LastUsedTimeStart/Stop, FILETIME UTC). A stop
+    # time close to the app's last camera_stopped means Windows saw the camera released.
+    try {
+        $np = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam\NonPackaged'
+        $lines = @()
+        foreach ($k in @(Get-ChildItem $np -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -like '*HY Spike*' })) {
+            $p = Get-ItemProperty $k.PSPath
+            $st = ''; $sp = ''
+            if ($p.LastUsedTimeStart) { $st = [DateTime]::FromFileTimeUtc([int64]$p.LastUsedTimeStart).ToLocalTime().ToString('HH:mm:ss.fff') }
+            if ($p.LastUsedTimeStop) { $sp = [DateTime]::FromFileTimeUtc([int64]$p.LastUsedTimeStop).ToLocalTime().ToString('HH:mm:ss.fff') }
+            $lines += ("{0}`tlast_start={1}`tlast_stop={2}" -f ($k.PSChildName -replace [regex]::Escape($env:USERNAME), '<user>'), $st, $sp)
+        }
+        if ($lines.Count -eq 0) { $lines = @('no Windows camera-usage record for HY Spike (capture may bypass the Windows privacy layer)') }
+        Set-Content -Path (Join-Path $ResultsDir 'camera-usage.txt') -Value $lines -Encoding ASCII
+        foreach ($l in $lines) { Log ("Windows camera-usage record: " + $l) }
+    } catch { Log ("camera-usage record not readable: " + $_.Exception.Message) 'Yellow' }
+
     # ============================================================ STEP 7  C4
     Invoke-Phase 'C4 Camera permission denied' @('C4') {
         if ($SkipCamera) { Set-Result 'C4' 'Not run' '' 'Skipped (-SkipCamera)'; return }

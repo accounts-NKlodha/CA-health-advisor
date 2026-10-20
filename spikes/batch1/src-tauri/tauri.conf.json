@@ -14,7 +14,7 @@
         "label": "control",
         "url": "control.html",
         "title": "HY Spike: batch 1",
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,MediaFoundationVideoCapture",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
         "width": 460,
         "height": 360,
         "resizable": true
@@ -23,7 +23,7 @@
         "label": "pet",
         "url": "pet.html",
         "title": "HY Pet",
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,MediaFoundationVideoCapture",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
         "width": 160,
         "height": 160,
         "x": 1100,
