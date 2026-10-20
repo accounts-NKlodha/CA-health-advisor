@@ -2,7 +2,7 @@
 
 Status: **proposal for review**, revision 2 (20 Oct 2026). It addresses the six points in Codex's review of PR #3 and the owner's answers relayed on the PR.
 
-**Baseline:** the owner-approved PRD 0.3 package, uploaded 18 Oct as `HealthierYou_Discovery_Claude_Package.md`. Its SHA-256 is `13224412c460fc0f260ebf8c84ef7e6e0715e263d231217ebad6c4d2a9fd962e`, and it includes the recovery, focus and community addendum. This repository's `docs/PRD.md` (0.1) is superseded. The package is due to be committed as `docs/PRD_0.3.md`; that publication is pending a personal-data check and is not part of this commit.
+**Baseline:** the owner-approved PRD 0.3, published as [`docs/PRD_0.3.md`](PRD_0.3.md) (approved 18 Oct 2026; owner's name removed at the owner's instruction; source package SHA-256 `13224412c460fc0f260ebf8c84ef7e6e0715e263d231217ebad6c4d2a9fd962e`). It includes the recovery, focus and community addendum. This repository's `docs/PRD.md` (0.1) is superseded.
 
 **Other inputs:** delivery and feasibility packet revision 2; feasibility batch 1 (final build 6ef6eb3); the camera-vision note (20 Oct); and the `spike/batch1` code.
 
