@@ -7,6 +7,8 @@
 <!--
   HealthierYou V1/V2 SIMULATED clickable prototype for design review.
   Not product code. No network calls, no storage, no camera access. Changes live in the in-memory state object S only.
+  Revision 3 (owner feedback, 21 Oct): translucent pet body, one reminder at a time with per-activity status, illustrated
+  movement routines, visual weekly review, pet size control, "Bring pet above clock" with simulated display changes.
   Structure: CSS -> static desktop markup -> JS (state S, pet art, render helpers, actions A, flows F).
   Spec: docs/Wireframes_V1_V2.md
 -->
@@ -108,7 +110,7 @@ code,.mono{font-family:Consolas,monospace;font-size:.9em}
 /* pet */
 #pet{position:absolute;width:128px;height:128px;z-index:40;touch-action:none;cursor:grab;user-select:none}
 #pet.drag{cursor:grabbing}
-#pet .art{width:100%;height:100%;transform-origin:50% 100%}
+#pet .art{width:100%;height:100%;transform-origin:50% 100%;opacity:var(--pet-alpha);filter:drop-shadow(0 0 1px #ffffffd9) drop-shadow(0 3px 4px #00000038)}
 #pet svg{width:100%;height:100%;overflow:visible}
 #pet .eye{transform-box:fill-box;transform-origin:center;transition:transform .2s}
 #petBadge{position:absolute;right:2px;top:18%;min-width:26px;height:26px;border-radius:13px;background:#fff;border:2px solid var(--ink);display:none;align-items:center;justify-content:center;font:700 12px/1 "Segoe UI",sans-serif;padding:0 4px}
@@ -121,8 +123,8 @@ code,.mono{font-family:Consolas,monospace;font-size:.9em}
 .st-celebrate .art{animation:hop .6s ease-out 2}
 .st-exercise .art{animation:stretch 1.6s ease-in-out infinite}
 .st-focus .eye,.st-quiet .eye,.st-snoozed .eye,.st-paused .eye{transform:scaleY(.15)}
-.st-meeting .art,.st-paused .art,.st-quiet .art{opacity:.55}
-.st-offline .art{filter:grayscale(.7)}
+.st-meeting .art,.st-paused .art,.st-quiet .art{opacity:calc(var(--pet-alpha) * .6)}
+.st-offline .art{filter:grayscale(.7) drop-shadow(0 0 1px #ffffffd9)}
 .st-hidden{display:none}
 @keyframes bob{50%{transform:translateY(-3px)}}
 @keyframes wiggle{25%{transform:rotate(-5deg)}75%{transform:rotate(5deg)}}
@@ -162,7 +164,7 @@ code,.mono{font-family:Consolas,monospace;font-size:.9em}
 #rev button.f:hover{background:#ffffff26}
 #rev button.f.on{background:#8f97ff;color:#14173a;font-weight:700}
 #rev button.f[disabled]{opacity:.45;cursor:not-allowed}
-#rev .cap{background:#11142c;border-radius:6px;padding:8px;margin:6px 0;line-height:1.4;min-height:96px;max-height:190px;overflow:auto}
+#rev .cap{background:#11142c;border-radius:6px;padding:8px;margin:6px 0;line-height:1.4;min-height:96px;max-height:270px;overflow:auto}
 #rev .cap b{color:#fff}
 #rev .sim button{background:#ffffff14;border:1px solid #ffffff2a;color:#eef0ff;border-radius:4px;padding:3px 6px;margin:2px 2px 2px 0;font-size:11.5px}
 #rev .tgl{background:none;border:1px solid #ffffff44;color:#fff;border-radius:4px;padding:2px 6px}
@@ -202,10 +204,152 @@ code,.mono{font-family:Consolas,monospace;font-size:.9em}
 .cam .camlbl{position:absolute;left:8px;top:6px;font-size:11px;display:flex;align-items:center;gap:5px}
 .cam .camlbl i{width:9px;height:9px;border-radius:50%;background:var(--verm)}
 .cam .camnote{position:absolute;bottom:6px;left:0;right:0;text-align:center;font-size:11px;color:#9fb0b7}
+
+/* ---------- revision 3 (owner feedback 21 Oct) ---------- */
+/* 1. pet look: body slightly see-through; bubbles, badges, tags and buttons stay fully opaque */
+#stage{--pet-alpha:.85}
+#stage.hc,#stage.prevlook{--pet-alpha:1}
+.gcell .art{opacity:var(--pet-alpha)}
+#petFound{position:absolute;inset:-6px;border-radius:50%;border:3px solid #ffd54a;box-shadow:0 0 0 3px #1f2a3055;display:none;pointer-events:none;animation:found 1.2s ease-out 2}
+@keyframes found{0%{transform:scale(1.25);opacity:0}40%{opacity:1}100%{transform:scale(1)}}
+/* 6. size control */
+.segc{display:inline-flex;border:1px solid #9fb0b7;border-radius:8px;overflow:hidden;vertical-align:middle;background:#fff}
+.segc button{border:0;border-right:1px solid #d3dbdf;background:#fff;color:var(--ink);padding:5px 11px;font-size:.9em}
+.segc button:last-child{border-right:0}
+.segc button[aria-pressed=true]{background:var(--acc);color:#fff;font-weight:600}
+.segc.compact button{padding:3px 9px;font-size:.84em}
+.req{display:inline-block;background:#e7f6f0;color:#0b5a43;border:1px solid #7cc4a8;border-radius:4px;padding:1px 6px;font-size:11.5px;font-weight:600;vertical-align:middle}
+.menuFoot{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:6px;padding-top:6px;border-top:1px solid #edf1f2;font-size:.9em}
+/* 7. simulated display changes */
+#offDisp{position:absolute;inset:0;display:none;background:repeating-linear-gradient(45deg,#14181b 0 10px,#1c2125 10px 20px)}
+#offDisp span{position:absolute;right:24px;bottom:40px;width:300px;color:#9fb0b7;font:600 12.5px/1.4 "Segoe UI",sans-serif;text-align:right}
+.disp-small #offDisp{display:block}
+.disp-small #desk{right:342px;bottom:168px}
+.disp-small #taskbar{right:342px;bottom:128px}
+.disp-small #taskbar>.tb:nth-child(3),.disp-small #taskbar>.tb:nth-child(4){display:none}
+.disp-small #hyWin,.disp-small #hyWin.big{left:252px;top:8px;width:766px;height:452px}
+.disp-small #ledger{width:766px;height:452px}
+.tb-right #desk{right:64px;bottom:0}
+.tb-right #taskbar{left:auto;top:26px;width:64px;height:auto;flex-direction:column;padding:8px 4px;gap:6px}
+.tb-right #taskbar>.tb:not(:first-child){display:none}
+.tb-right #taskbar>.tb:first-child{font-size:12px;padding:6px 2px;width:56px}
+.tb-right #tray{margin-left:0;margin-top:auto;flex-direction:column;gap:6px;padding-bottom:6px}
+.tb-right #trayTxt{display:none}
+.tb-right #clock{text-align:center;width:56px;white-space:normal;line-height:1.25}
+/* 2. one reminder at a time + per-activity status strip */
+.remStrip{display:flex;gap:5px;margin:8px 0 2px}
+.rs{flex:1;min-width:0;border:1px solid var(--line);border-radius:8px;padding:4px 6px;font-size:11px;line-height:1.25;background:#fff;color:var(--ink)}
+.rs b{display:flex;align-items:center;gap:4px;font-size:11.5px}
+.rs b svg{flex:none}
+.rs.now{border-color:var(--acc);box-shadow:inset 0 0 0 1px var(--acc);background:var(--acc-soft)}
+.rs.done{border-color:#7cc4a8;background:#effaf5}
+.rs.snz{border-style:dashed}
+.rs.skip,.rs.part{background:#fbf6ec;border-color:#e2c78d}
+.rs.ok{background:#f4f7f8}
+#capBox .rs{background:#1b1f3d;color:#eef0ff;border-color:#ffffff33}
+#capBox .rs.now{border-color:#8f97ff;box-shadow:inset 0 0 0 1px #8f97ff}
+#capBox .remStrip{gap:3px;flex-direction:column}
+#capBox .rs{padding:2px 6px;font-size:11px;display:flex;gap:6px;align-items:center}
+#capBox .rs b{flex:none;width:78px}
+.remLog{margin:4px 0 0;padding:0;list-style:none;font-size:11px;color:#c9cdf5}
+.remLog li{border-top:1px solid #ffffff14;padding:2px 0}
+.remOnly{font-size:.84em;color:var(--muted);margin:4px 0 0}
+/* 3. illustrated movement panel */
+#bubble.xwide{width:476px}
+.mvHead{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 26px 2px 0}
+.mvName{font-size:1.28em;margin:2px 0 4px}
+.mvDose{display:inline-flex;align-items:center;gap:5px;background:var(--acc-soft);color:#1d4f52;border-radius:999px;padding:3px 10px;font-size:.86em;font-weight:600}
+.mvBody{display:flex;gap:12px;align-items:flex-start;margin:8px 0 4px}
+.mvFigWrap{flex:none;width:152px;background:linear-gradient(#f4f8f8,#e2ecea);border-radius:12px;padding:6px 6px 4px;text-align:center}
+.mvFig{width:140px;height:140px;display:block;margin:0 auto}
+.mvFigWrap .small{font-size:10.5px;color:var(--muted);display:block;line-height:1.25}
+.mvSteps{margin:0;padding-left:20px;font-size:.92em}
+.mvSteps li{margin:0 0 5px;line-height:1.35;padding-left:2px}
+.mvSteps li::marker{font-weight:700;color:var(--acc)}
+.mvAlt{background:#fff8e8;border:1px solid #f0d9a6;border-radius:8px;padding:6px 10px;font-size:.86em;margin:6px 0}
+.mvDots{display:flex;gap:4px;margin:6px 0 2px}
+.mvDots i{flex:1;height:4px;border-radius:2px;background:#dbe3e6}
+.mvDots i.on{background:var(--acc)}
+.mvList{list-style:none;margin:6px 0;padding:0}
+.mvList li{display:flex;gap:10px;align-items:center;padding:4px 0;border-bottom:1px solid #edf1f2}
+.mvList svg{width:52px;height:52px;flex:none;margin:0;background:#eef4f3;border-radius:8px}
+.thumb *{animation:none!important}
+.mvFig .gh{fill:none;stroke:#2d6a6e;stroke-width:2;stroke-dasharray:4 3;opacity:.6}
+.mvFig .ar{fill:none;stroke:#b86e00;stroke-width:2.6;stroke-linecap:round}
+.mvFig .arh{fill:#b86e00}
+.a-tilt{transform-origin:60px 66px;animation:mvTilt 6s ease-in-out infinite}
+@keyframes mvTilt{0%,8%{transform:rotate(0)}22%,40%{transform:rotate(-24deg)}52%,58%{transform:rotate(0)}72%,90%{transform:rotate(24deg)}100%{transform:rotate(0)}}
+.a-roll{animation:mvRoll 2.4s ease-in-out infinite}
+@keyframes mvRoll{0%,100%{transform:translate(0,0)}25%{transform:translate(1px,-7px)}50%{transform:translate(-5px,-4px)}75%{transform:translate(-2px,1px)}}
+.a-spin{animation:mvSpin 2.4s linear infinite}
+@keyframes mvSpin{to{transform:rotate(-360deg)}}
+.a-twist{transform-origin:60px 66px;animation:mvTwist 6s ease-in-out infinite}
+@keyframes mvTwist{0%,8%{transform:rotate(0)}22%,40%{transform:rotate(35deg)}52%,58%{transform:rotate(0)}72%,90%{transform:rotate(-35deg)}100%{transform:rotate(0)}}
+.a-rise{animation:mvRise 2.6s ease-in-out infinite}
+@keyframes mvRise{0%,15%,85%,100%{transform:translateY(0)}40%,60%{transform:translateY(-7px)}}
+.a-rise5{animation:mvRise5 2.6s ease-in-out infinite}
+@keyframes mvRise5{0%,15%,85%,100%{transform:translateY(0)}40%,60%{transform:translateY(-5px)}}
+.a-heel{animation:mvHeel 2.6s ease-in-out infinite}
+@keyframes mvHeel{0%,15%,85%,100%{transform:rotate(0)}40%,60%{transform:rotate(22deg)}}
+/* 5. visual weekly review */
+#hyWin.big{left:258px;top:8px;width:956px;height:686px}
+#hyWin.big nav{width:150px}
+#hyWin.big .content{padding:14px 20px}
+.wkHero{position:relative;overflow:hidden;border-radius:14px;padding:16px 20px;color:#fff;background:linear-gradient(120deg,#1d5b5f 0%,#2d6a6e 40%,#3b4cb0 100%);display:flex;align-items:flex-end;gap:16px;min-height:104px}
+.wkHero.v-mixed{background:linear-gradient(120deg,#1d5b5f 0%,#2d6a6e 40%,#6b4aa8 100%)}
+.wkHero.v-missing{background:linear-gradient(120deg,#46545c 0%,#5f6f7a 50%,#6f7a99 100%)}
+.wkHero.v-first{background:linear-gradient(120deg,#1d5b5f 0%,#2d7a6e 45%,#2f8f5b 100%)}
+.wkHero .spark{position:absolute;right:0;top:-24px;width:280px;height:140px;pointer-events:none}
+.wkHero>div{position:relative}
+.wkKick{font-size:11.5px;letter-spacing:.8px;text-transform:uppercase;opacity:.88}
+.wkTitle{font-size:28px;font-weight:750;line-height:1.15;display:flex;align-items:center;gap:8px;margin:2px 0}
+.wkCov{font-size:12.5px;opacity:.94}
+.wkTools{margin-left:auto;display:flex;gap:6px;flex:none}
+.wkTog{background:#ffffff22;border:1px solid #ffffff77;color:#fff;border-radius:999px;padding:5px 12px;font-size:12.5px}
+.wkTog[aria-pressed=true]{background:#fff;color:#1f2a30;font-weight:600}
+.wkRings{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:12px 0 8px}
+.wkRing{border:1px solid var(--line);border-radius:14px;padding:8px 12px;display:flex;align-items:center;gap:10px;background:#fff;box-shadow:0 2px 8px #1f2a300d}
+.wkRing>svg{width:108px;height:108px;flex:none;overflow:visible}
+.wkRing .nm svg{width:16px;height:16px}
+.wkRing .nm{font-weight:700;display:flex;align-items:center;gap:5px}
+.wkRing .sub{font-size:12px;color:var(--muted);line-height:1.35;margin-top:2px}
+.wkRing .sub b{color:var(--ink)}
+.rseg{transform-origin:66px 66px;animation:segIn .6s cubic-bezier(.2,.8,.3,1.15) both}
+@keyframes segIn{from{opacity:0;transform:scale(.55) rotate(-25deg)}}
+.wkStrip{display:grid;grid-template-columns:104px repeat(7,1fr);gap:4px 5px;align-items:center}
+.wkStrip .dh{text-align:center;font-size:11.5px;font-weight:700;color:var(--muted)}
+.wkStrip .rl{font-size:12px;display:flex;align-items:center;gap:5px;font-weight:600}
+.mk{height:22px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;animation:segIn .5s ease-out both}
+.mk.d{background:var(--c);color:var(--ct)}
+.mk.p{background:repeating-linear-gradient(135deg,var(--c) 0 4px,#fff 4px 8px);border:1px solid var(--c);color:#1f2a30}
+.mk.p,.mk.n{text-shadow:0 0 2px #fff,0 0 3px #fff,0 0 4px #fff}
+.mk.z{background:#fff;border:2px solid var(--c);color:#1f2a30}
+.mk.n{background:repeating-linear-gradient(45deg,#c9d2d6 0 3px,#fff 3px 7px);border:1px dashed #6f7d83;color:#3d4a50}
+.mk.o{background:#eef1f2;color:#7b878c;font-weight:500}
+.mk.s,.mk.t{background:#fff;border:1px dotted #9aa7ad;color:#7b878c;font-weight:500}
+.wkLegend{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;margin:6px 0 2px;color:var(--muted)}
+.wkLegend span{display:inline-flex;align-items:center;gap:4px}
+.wkLegend .mk{width:22px;height:14px;font-size:9px;animation:none;--c:#55646c;--ct:#fff}
+.wkCols{display:grid;grid-template-columns:5fr 7fr;gap:14px;margin-top:8px}
+.wkCols h3{margin:4px 0 6px;font-size:1em}
+.hi{border-radius:12px;padding:7px 12px;background:var(--soft);border-left:5px solid var(--acc);margin:0 0 6px;animation:rise .5s ease-out both;display:flex;gap:10px;align-items:center}
+.hi .big{font-size:22px;font-weight:800;color:#1f2a30;line-height:1.05;min-width:74px;white-space:nowrap}
+.hi .tx{font-size:12.5px;color:var(--muted);line-height:1.3}
+.hi.miss{border-left-color:var(--orange)}
+.hi.none{border-left-color:#6f7d83;background:repeating-linear-gradient(45deg,#eef2f3 0 6px,#fff 6px 12px)}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}}
+.sugc{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:12px;padding:6px 10px;margin:0 0 6px;background:linear-gradient(90deg,#eef7f6,#fff 70%);animation:rise .5s ease-out both}
+.sugc .ic{width:28px;height:28px;border-radius:50%;background:var(--acc);color:#fff;display:flex;align-items:center;justify-content:center;flex:none}
+.sugc .tx{flex:1;font-size:.93em;line-height:1.3}
+.sugc .ctl{flex:none;text-align:right;font-size:.9em;max-width:250px}
+.wkPlainView h3{font-size:1.02em}
+#wkTable td,#wkTable th{text-align:center}
+#wkTable td:first-child,#wkTable th:first-child{text-align:left}
 </style>
 </head>
 <body>
 <div id="stage">
+  <div id="offDisp" aria-hidden="true"><span>Outside the new, smaller simulated display (1024 x 640). A pet left here cannot be seen or clicked.</span></div>
   <div id="banner" role="note">Simulated prototype for design review. Not the product. No data is saved or sent.</div>
   <div id="desk">
     <div class="win" id="ledger" aria-label="Simulated spreadsheet application">
@@ -227,6 +371,7 @@ code,.mono{font-family:Consolas,monospace;font-size:.9em}
       <div id="petBadge" aria-hidden="true"></div>
       <div id="petCam" aria-hidden="true"><i></i>CAM</div>
       <div id="petTag"></div>
+      <div id="petFound" aria-hidden="true"></div>
     </div>
     <div id="bubble" role="dialog" aria-live="polite"></div>
     <div id="modalWrap"><div id="modal" role="dialog" aria-modal="true" tabindex="-1"></div></div>
@@ -257,7 +402,8 @@ const btn = (label, a, v = '', cls = '') => `<button class="btn ${cls}" data-a="
 const sw = (on, a, v, label) => `<button class="sw" role="switch" aria-checked="${!!on}" aria-label="${esc(label)}" data-a="${a}" data-v="${esc(v)}"></button>`;
 const DRAFT = '<span class="draft">Draft pending contract</span>';
 const PROPOSED = '<span class="proposed">Proposed default, owner to confirm</span>';
-const PROVISIONAL = '<span class="draft">Provisional, pending content review</span>';
+const PROVISIONAL = '<span class="draft">Provisional: pending content review</span>';
+const REQUIRED = '<span class="req">Required in the live product (owner, 21 Oct)</span>';
 const V2 = '<span class="v2tag">V2</span>';
 const DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 
@@ -275,6 +421,7 @@ const S0 = () => ({
   longDay: true, longDayHrs: 9, presenting: false, tombstones: [], del: null, restore: null,
   camera: 'off', medTime: null, setupStep: 0, connChoice: 'local', slipOutcome: 'ok', reviewVariant: 'strong', monthVariant: 'normal', monthMetric: 'water', monthTable: false, monthBase: true,
   mv: null, flow: null,
+  acts: null, remActive: null, gapUntil: 0, remLog: [], reviewPlain: false, display: 'normal', prevLook: false,
 });
 let S = S0();
 let timers = [];
@@ -337,6 +484,12 @@ const ICON = {
   star:'<path d="M12 3l2.6 5.8 6.4.6-4.8 4.3 1.4 6.3L12 16.8 6.4 20l1.4-6.3L3 9.4l6.4-.6z" fill="currentColor"/>',
   dot:'<circle cx="12" cy="12" r="5" fill="currentColor"/>',
   move:'<circle cx="12" cy="4" r="2.5" fill="currentColor"/><path d="M12 7v7m0 0l-4 7m4-7l4 7M6 10h12" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>',
+  eye:'<path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12z" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="12" cy="12" r="3" fill="currentColor"/>',
+  drop:'<path d="M12 3s-6 7-6 11a6 6 0 0 0 12 0c0-4-6-11-6-11z" fill="currentColor"/>',
+  check:'<path d="M5 12.5l4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>',
+  skip:'<path d="M5 6l7 6-7 6zM13 6l7 6-7 6z" fill="currentColor"/>',
+  pin:'<path d="M12 2a6 6 0 0 0-6 6c0 4.5 6 12 6 12s6-7.5 6-12a6 6 0 0 0-6-6z" fill="currentColor"/><circle cx="12" cy="8" r="2.2" fill="#fff"/>',
+  clock:'<circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="2.2" fill="none"/><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round"/>',
 };
 const icon = (n, size = 16) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true">${ICON[n]}</svg>`;
 
@@ -363,33 +516,69 @@ function setPet(state, tag){
   pet.setAttribute('aria-label', `${S.petName} the pet, ${d.label}${t ? ', ' + t : ''}. Click for actions. Ctrl+Alt+H opens the pet panel.`);
   S.mode = state;
 }
+/* Size is one value S.scale (75-150 %), shared by Settings > Pet and the pet menu. Resizing keeps the pet's bottom edge where it was. */
+const SIZES = [[75, 'Small', 'S'], [100, 'Medium', 'M'], [125, 'Large', 'L'], [150, 'Extra large', 'XL']];
+const petPx = () => Math.round(128 * S.scale / 100);
 function drawPet(){
   $('#petArt').innerHTML = petSVG(S.pet, S.colour);
-  const px = Math.round(128 * S.scale / 100);
-  const pet = $('#pet'); pet.style.width = pet.style.height = px + 'px';
+  const pet = $('#pet'), old = pet.offsetWidth, px = petPx();
+  pet.style.width = pet.style.height = px + 'px';
+  if (petPos && old) petPos.y += old - px;
   placePet();
 }
+function sizeCtl(compact){
+  return `<div class="segc${compact ? ' compact' : ''}" role="group" aria-label="Pet size">${SIZES.map(([v, l, c]) => `<button data-a="petSize" data-v="${v}" aria-pressed="${S.scale === v}" aria-label="${l} (${v}%)" title="${l} (${v}%)">${compact ? c : l}</button>`).join('')}</div>`;
+}
+function syncSizeUI(){
+  document.querySelectorAll('[data-a="petSize"]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.v === S.scale)));
+  const r = $('#petScale'); if (r) r.value = S.scale; const l = $('#scaleLbl'); if (l) l.textContent = S.scale + '%';
+}
+/* Home position = bottom-right corner of the visible work area, directly above the taskbar clock. */
+const PET_MARGIN = {r: 12, b: 10};
 let petPos = null;
 function placePet(){
-  const desk = $('#desk'), pet = $('#pet'), w = pet.offsetWidth, dh = desk.clientHeight, dw = desk.clientWidth;
-  if (!petPos) petPos = {x: dw - w - 16, y: dh - w - 18};
-  if (S.edge === 'left') petPos.x = 256; else if (S.edge === 'right') petPos.x = dw - w - 16;
-  petPos.y = Math.max(8, Math.min(dh - w - 18, petPos.y));
+  const desk = $('#desk'), pet = $('#pet'), w = pet.offsetWidth || petPx(), dh = desk.clientHeight, dw = desk.clientWidth;
+  if (!petPos) petPos = {x: dw - w - PET_MARGIN.r, y: dh - w - PET_MARGIN.b};
+  if (S.edge === 'left') petPos.x = 256; else if (S.edge === 'right') petPos.x = dw - w - PET_MARGIN.r;
+  petPos.y = Math.max(8, Math.min(dh - w - PET_MARGIN.b, petPos.y));
   pet.style.left = petPos.x + 'px'; pet.style.top = petPos.y + 'px';
   placeBubble();
+}
+/* "Bring pet above clock": reachable from the tray menu, Settings > Pet and the pet menu, so it works when the pet is lost.
+   It reads the CURRENT work area (after any display or taskbar change) and clamps the pet inside it. */
+function bringPet(from){
+  const pet = $('#pet');
+  if (S.presenting){ cap('A presentation is running, so the pet stays hidden (proposed default, owner to confirm). It comes back when the presentation ends.'); return; }
+  pet.style.display = '';
+  const desk = $('#desk'), W = desk.clientWidth, H = desk.clientHeight, w = pet.offsetWidth || petPx();
+  S.edge = 'right';
+  petPos = {x: Math.max(8, W - w - PET_MARGIN.r), y: Math.max(8, H - w - PET_MARGIN.b)};
+  pet.style.left = petPos.x + 'px'; pet.style.top = petPos.y + 'px';
+  const f = $('#petFound'); f.style.display = 'block'; later(() => { f.style.display = 'none'; }, 2600);
+  const side = S.display === 'right' ? 'beside the clock (the taskbar is on the right)' : 'just above the clock';
+  say(`<p style="margin:0 24px 0 0"><b>Here I am</b>, ${side}.</p>`);
+  later(() => { if (/Here I am/.test($('#bubble').innerText)) closeBubble(); }, 2600);
+  const msg = `<b>Bring pet above clock</b> (from ${from || 'the pet menu'}): pet returned to the bottom-right corner of the visible work area, ${side}, at x ${Math.round(petPos.x)}, y ${Math.round(petPos.y)} inside a ${W} x ${H} work area.`;
+  S.flow === 'petfix' ? petfixCap(msg) : cap(msg);
+}
+function applyDisplay(){
+  const st = $('#stage');
+  st.classList.toggle('disp-small', S.display === 'small');
+  st.classList.toggle('tb-right', S.display === 'right');
+  $('#trayMenu')?.remove();
 }
 
 /* ---------- bubble (pet-led UI) ---------- */
 let bubbleExpanded = false;
 function say(html, {wide = false, expanded = false, close = true} = {}){
   if (S.presenting) return; /* proposed default: during a presentation no bubble is shown at all */
-  const b = $('#bubble');
-  b.className = 'show' + (wide ? ' wide' : '');
+  const b = $('#bubble'); delete b.dataset.menu;
+  b.className = 'show' + (wide === 'x' ? ' xwide' : wide ? ' wide' : '');
   b.innerHTML = (close ? `<button class="bx" data-a="closeBubble" aria-label="Close (Escape)">&#x2715;</button>` : '') + html;
   bubbleExpanded = expanded;
   placeBubble();
 }
-function closeBubble(){ delete $('#bubble').dataset.panel; $('#bubble').className = ''; $('#bubble').innerHTML = ''; bubbleExpanded = false; }
+function closeBubble(){ delete $('#bubble').dataset.panel; delete $('#bubble').dataset.menu; $('#bubble').className = ''; $('#bubble').innerHTML = ''; bubbleExpanded = false; }
 function placeBubble(){
   const b = $('#bubble'); if (!b.classList.contains('show')) return;
   const pet = $('#pet'), desk = $('#desk');
@@ -402,8 +591,8 @@ function placeBubble(){
 }
 
 /* ---------- windows, modal, caption ---------- */
-function openWin(title, html){
-  const w = $('#hyWin'); w.style.display = 'flex'; $('#hyTitle').textContent = title; $('#hyBody').innerHTML = html;
+function openWin(title, html, big){
+  const w = $('#hyWin'); w.style.display = 'flex'; w.classList.toggle('big', !!big); $('#hyTitle').textContent = title; $('#hyBody').innerHTML = html;
   $('#ledger').classList.add('inactive');
 }
 function closeWin(){ $('#hyWin').style.display = 'none'; $('#ledger').classList.remove('inactive'); }
@@ -462,15 +651,16 @@ const FLOWS = [
   ['V1 Workday pet', null],
   ['setup', '1. First-run setup + optional pairing'],
   ['desktop', '2. Pet on desktop: menu, drag, edit'],
+  ['petfix', '2b. Pet size, look + bring above clock'],
   ['states', '3. Pet state gallery'],
-  ['reminder', '4. Combined reminder'],
+  ['reminder', '4. Combined reminder (one at a time)'],
   ['water', '5. Hydration log, undo, correct'],
-  ['movement', '6. Movement session (six-day)'],
+  ['movement', '6. Movement routine (illustrated)'],
   ['focus', '7. Focus, pause, meeting, quiet hours'],
   ['recovery', '8. Deadline day + recovery plan'],
   ['pomodoro', '9. User-started Pomodoro'],
   ['phone', '10. Phone interruption self-report'],
-  ['weekly', '11. Weekly review (4 variants)'],
+  ['weekly', '11. Weekly review (visual, 4 variants)'],
   ['monthly', '12. Monthly progress'],
   ['sharing', '13. Sharing preview, stop, delete'],
   ['backup', '14. Export / import, update from file'],
@@ -522,7 +712,10 @@ function petMenu(){
     <div class="row" style="gap:0">${btn("Today's movement", 'moveIntro', '', 'primary')}${btn('Focus...', 'focusMenu')}${btn('Pomodoro...', 'pomoMenu')}</div>
     <div class="row" style="gap:0">${btn('Phone interruption', 'phoneLog')}${btn(S.meeting ? 'Meeting over' : "I'm in a meeting", 'meeting')}${btn(S.paused ? 'Resume coaching' : 'Pause...', S.paused ? 'pauseEnd' : 'pauseMenu')}</div>
     <div class="row" style="gap:0">${btn('Deadline day', 'recAsk')}${cam ? btn(S.camera === 'off' ? 'Posture check ' + V2 : 'Camera off', S.camera === 'off' ? 'camConsent' : 'camOff') : ''}${btn('Reviews', 'openReview')}${btn('Settings', 'settings', 'pet')}</div>
-    <p class="small muted" style="margin:6px 0 0">Drag me to move. I never take keyboard focus from your work app.</p>`, {wide: true, expanded: true});
+    ${S.acts ? remStrip() : ''}
+    <div class="menuFoot"><span>Size</span>${sizeCtl(true)}${btn(icon('pin', 14) + ' Bring pet above clock', 'bringPet', 'pet menu', 'link')}</div>
+    <p class="small muted" style="margin:4px 0 0">Drag me to move. I never take keyboard focus from your work app.</p>`, {wide: true, expanded: true});
+  $('#bubble').dataset.menu = '1';
 }
 
 /* ---------- settings window ---------- */
@@ -539,15 +732,18 @@ TAB.pet = () => `<h2>Pet</h2><div class="note"><b>Two separate decisions.</b> (1
   <div class="row" style="align-items:flex-start;margin-top:10px">
    <div style="flex:1"><label class="fld" for="petName">Name</label><input type="text" id="petName" data-in="petName" value="${esc(S.petName)}" maxlength="20">
    <label class="fld">Colour</label>${petById(S.pet).colours.map((c, i) => `<button class="chip ${S.colour === i ? 'on' : ''}" data-a="colour" data-v="${i}"><i style="width:12px;height:12px;border-radius:50%;background:${c[0]};display:inline-block;border:1px solid #0003"></i>${c[2]}</button>`).join('')}
-   <label class="fld" for="petScale">Size: <span id="scaleLbl">${S.scale}%</span></label><input type="range" id="petScale" min="75" max="150" step="25" value="${S.scale}" data-in="scale" style="width:220px"></div>
+   <label class="fld" for="petScale">Size: <span id="scaleLbl">${S.scale}%</span> ${REQUIRED}</label>${sizeCtl()}<br><input type="range" id="petScale" min="75" max="150" step="25" value="${S.scale}" data-in="scale" style="width:260px;margin-top:6px" aria-label="Pet size, 75 to 150 percent">
+   <p class="small muted" style="margin:2px 0">75% to 150%. The pet resizes live; also in the pet menu.</p></div>
    <div style="flex:1"><label class="fld">Screen edge</label>${['left','right','free'].map(e => `<button class="chip ${S.edge === e ? 'on' : ''}" data-a="edge" data-v="${e}">${e === 'free' ? 'Where I drop it' : e[0].toUpperCase() + e.slice(1)}</button>`).join('')}
    <label class="fld">Tone of messages</label>${['Gentle','Plain','Cheerful'].map(t => `<button class="chip ${S.tone === t ? 'on' : ''}" data-a="tone" data-v="${t}">${t}</button>`).join('')}
    <label class="fld">Motion</label><div class="toggle">${sw(S.motion, 'motion', '', 'Pet animation')}<span>Animate the pet (off = still poses only)</span></div>
    <p>${btn('Reset to defaults', 'resetPet', '', 'link')}</p></div></div>
+  ${S.flow === 'setup' && !S.setupDone ? '' : `<div class="card row" id="bringCard" style="align-items:center"><div style="flex:1"><b>${icon('pin')} Lost the pet?</b><br><span class="small muted">Returns it to the bottom-right corner, just above the Windows clock, inside the visible screen, even after a display or taskbar change. Also in the tray icon menu.</span></div>${btn('Bring pet above clock', 'bringPet', 'Settings', 'primary')}</div>`}
+  <p class="small muted">Look: the pet body is drawn slightly see-through (85%) so your work shows through; its messages, badges and buttons stay fully opaque. With higher contrast on, the pet is drawn solid.</p>
   <p class="small muted">Edits apply instantly and are kept after restart (in the product).</p>`;
 TAB.reminders = () => `<h2>Reminders</h2>
   <label class="fld">Intensity</label>${['Light','Balanced','More often'].map(t => `<button class="chip ${S.intensity === t ? 'on' : ''}" data-a="intensity" data-v="${t}">${t}</button>`).join('')}
-  <div class="note">Balanced: movement after 45 min of active work, optional eye rest folded in at 20 min, 5-min gap between reminders, snooze 10 min. These are starting values to test, not medical advice.</div>
+  <div class="note">Balanced: movement after 45 min of active work, eye rest every 20 min, water only when you are behind your own pace. <b>One reminder at a time</b>, each answered on its own, with at least a 5-min calm gap before the next one; snooze 10 min. These are starting values to test, not medical advice.</div>
   <h3>What I remind you about</h3>
   ${[['movement','Movement breaks'],['eye','Eye rest (look away)'],['hydration','Water pacing']].map(([k, l]) => `<div class="toggle">${sw(S.cats[k], 'cat', k, l)}<span>${l}</span></div>`).join('')}
   <h3>When I stay quiet</h3>
@@ -566,18 +762,81 @@ TAB.goals = () => `<h2>Water & workweek</h2>
   <h3>Workweek</h3>${DAYS.map((d, i) => `<button class="chip ${S.workDays[i] ? 'on' : ''}" data-a="day" data-v="${i}" aria-pressed="${!!S.workDays[i]}">${d}${i === 6 ? ' (optional)' : ''}</button>`).join('')}
   <div class="row"><label class="fld">Hours <input type="time" data-in="hoursStart" value="${S.hours[0]}" aria-label="Work hours start"> to <input type="time" data-in="hoursEnd" value="${S.hours[1]}" aria-label="Work hours end"></label><label class="fld">Weekly review <select data-in="reviewAt">${['Sat 17:00', 'Fri 18:00'].map(o => `<option ${S.reviewAt === o ? 'selected' : ''}>${o}</option>`).join('')}</select></label><label class="fld">Time zone <select><option>Asia/Kolkata (IST)</option></select></label></div>
   <p class="small muted">Goal changes apply from today; past weeks are judged against the goal you had then.</p>`;
+/* Movement library: PROVISIONAL content pending the separate content review. Desk-safe, gentle, no medical claims. */
+const ROUTINES = {
+  neck: {name: 'Neck side stretch', where: 'Seated or standing', dose: 'Hold about 10 s, once each side · about 30 s', fig: 'neck',
+    steps: ['Sit tall with your feet flat and your shoulders relaxed.', 'Slowly tilt one ear towards the same shoulder, only as far as is comfortable.', 'Hold for about 10 seconds and breathe normally.', 'Come back to the centre, then repeat on the other side.'],
+    alt: ['Seated alternative', 'This one is done seated. Standing works too: stand tall, feet hip-width apart, and follow the same steps.']},
+  shoulders: {name: 'Shoulder rolls', where: 'Seated or standing', dose: '5 rolls backwards, then 5 forwards · about 30 s', fig: 'shoulders',
+    steps: ['Sit or stand tall with your arms loose by your sides.', 'Lift both shoulders up towards your ears.', 'Roll them back and down in a slow, smooth circle.', 'Do 5 rolls backwards, then 5 forwards.'],
+    alt: ['Seated alternative', 'Works the same seated: sit tall, let your arms hang beside the chair and follow the same steps.']},
+  twist: {name: 'Seated spinal twist', where: 'Seated', dose: 'Hold about 10 s, once each side · about 40 s', fig: 'twist',
+    steps: ['Sit tall towards the front of your chair, feet flat on the floor.', 'Rest one hand on the opposite knee and the other hand on the side of the seat.', 'Gently turn your chest and head towards the seat hand; keep your hips facing forward.', 'Hold for about 10 seconds, breathing normally, then come back to the centre.', 'Swap hands and repeat on the other side.'],
+    alt: ['Seated alternative', 'This movement is seated. If your chair swivels, plant your feet or hold the desk so the chair stays still. Standing option: hands on hips, turn your upper body gently each way.']},
+  calf: {name: 'Standing calf raises', where: 'Standing, holding the chair back', dose: '10 slow raises · about 40 s', fig: 'calf',
+    steps: ['Stand behind your chair and rest your hands lightly on the backrest.', 'Slowly rise up onto the balls of your feet.', 'Pause for a moment at the top.', 'Lower your heels slowly back to the floor. Repeat 10 times.'],
+    alt: ['Seated alternative: seated heel raises', 'Sit tall with your feet flat. Lift both heels, keeping your toes on the floor, then lower them slowly. 15 times.'],
+    seated: {name: 'Seated heel raises', where: 'Seated', dose: '15 slow raises · about 40 s', fig: 'heel',
+      steps: ['Sit tall with your feet flat on the floor, hip-width apart.', 'Lift both heels, keeping your toes on the floor.', 'Pause for a moment at the top.', 'Lower your heels slowly. Repeat 15 times.'],
+      alt: ['Seated alternative (shown)', 'You chose seated. Standing version: stand behind your chair, hold the backrest and rise onto the balls of your feet 10 times.']}},
+};
+/* Original simple SVG figures with CSS animation. Solid = start pose; dashed = where to move; orange arrow = direction.
+   With reduced motion the animation stops and the solid + dashed poses still explain the movement. */
+const FC = '#2d6a6e', FC2 = '#1f4f52', CH = '#b8c4c9';
+const arrowHead = (x, y, a) => `<path class="arh" d="M0 0 L-8 -4.5 L-8 4.5 Z" transform="translate(${x} ${y}) rotate(${a})"/>`;
+const FIG = {
+  neck: () => `<rect x="24" y="54" width="72" height="62" rx="12" fill="${CH}"/>
+    <path d="M28 80 Q30 68 46 66 L74 66 Q90 68 92 80 L88 118 H32 Z" fill="${FC}"/><rect x="55" y="54" width="10" height="16" rx="4" fill="${FC2}"/>
+    <g transform="rotate(-24 60 66)"><circle class="gh" cx="60" cy="40" r="14"/></g><g transform="rotate(24 60 66)"><circle class="gh" cx="60" cy="40" r="14"/></g>
+    <g class="a-tilt"><circle cx="60" cy="40" r="14" fill="${FC}"/><circle cx="55" cy="38" r="1.9" fill="#fff"/><circle cx="65" cy="38" r="1.9" fill="#fff"/><path d="M56 45 q4 3 8 0" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round"/></g>
+    <path class="ar" d="M53.9 18.4 A48 48 0 0 0 36 24.4"/>${arrowHead(36, 24.4, 152)}<path class="ar" d="M66.1 18.4 A48 48 0 0 1 84 24.4"/>${arrowHead(84, 24.4, 28)}`,
+  shoulders: () => `<rect x="28" y="50" width="7" height="50" rx="3" fill="${CH}"/><rect x="28" y="92" width="58" height="7" rx="3" fill="${CH}"/><rect x="54" y="99" width="5" height="17" fill="${CH}"/>
+    <rect x="42" y="44" width="17" height="52" rx="8" fill="${FC}"/><circle cx="52" cy="29" r="11" fill="${FC}"/><circle cx="58.5" cy="27.5" r="1.7" fill="#fff"/>
+    <rect x="44" y="84" width="40" height="11" rx="5" fill="${FC}"/><rect x="76" y="86" width="10" height="28" rx="5" fill="${FC}"/><rect x="76" y="110" width="17" height="6" rx="3" fill="${FC2}"/>
+    <g transform="translate(1 -7)"><rect class="gh" x="46" y="48" width="9" height="36" rx="4.5"/></g>
+    <g class="a-roll"><circle cx="50.5" cy="50" r="7" fill="${FC2}"/><rect x="46" y="48" width="9" height="36" rx="4.5" fill="${FC2}"/></g>
+    <circle cx="50" cy="47" r="15" fill="none" stroke="#b86e00" stroke-width="1.6" stroke-dasharray="3 4" opacity=".8"/>
+    <g class="a-spin" style="transform-origin:50px 47px"><circle cx="50" cy="32" r="4" fill="#b86e00"/></g>
+    <text x="92" y="40" font-size="9" fill="#55646c">up</text><text x="12" y="44" font-size="9" fill="#55646c">back</text><text x="64" y="72" font-size="9" fill="#55646c">down</text>`,
+  twist: () => `<text x="60" y="11" text-anchor="middle" font-size="9.5" fill="#55646c">seen from above</text>
+    <rect x="26" y="58" width="68" height="56" rx="12" fill="${CH}"/>
+    <rect x="44" y="72" width="13" height="40" rx="6" fill="${FC}" opacity=".85"/><rect x="63" y="72" width="13" height="40" rx="6" fill="${FC}" opacity=".85"/>
+    <ellipse cx="60" cy="73" rx="21" ry="9" fill="${FC2}"/>
+    <g transform="rotate(35 60 66)"><ellipse class="gh" cx="60" cy="62" rx="31" ry="10"/></g><g transform="rotate(-35 60 66)"><ellipse class="gh" cx="60" cy="62" rx="31" ry="10"/></g>
+    <g class="a-twist"><ellipse cx="60" cy="62" rx="31" ry="10" fill="${FC}"/><circle cx="60" cy="60" r="10" fill="${FC2}"/><path d="M55.5 68 L60 76 L64.5 68Z" fill="${FC2}"/></g>
+    <path class="ar" d="M98.1 52.2 A40 40 0 0 1 100 66"/>${arrowHead(100, 66, 92)}<path class="ar" d="M21.9 52.2 A40 40 0 0 0 20 66"/>${arrowHead(20, 66, 88)}
+    <text x="60" y="30" text-anchor="middle" font-size="9" fill="#55646c">hips stay facing forward</text>`,
+  calf: () => `<line x1="8" y1="115" x2="114" y2="115" stroke="${CH}" stroke-width="2.5"/>
+    <rect x="84" y="44" width="6" height="71" rx="3" fill="${CH}"/><rect x="84" y="76" width="28" height="6" rx="3" fill="${CH}"/><rect x="106" y="82" width="5" height="33" fill="${CH}"/>
+    <g transform="translate(0 -7)"><circle class="gh" cx="52" cy="20" r="10"/><rect class="gh" x="45" y="32" width="14" height="40" rx="7"/></g>
+    <g class="a-rise"><circle cx="52" cy="20" r="10" fill="${FC}"/><circle cx="58" cy="19" r="1.7" fill="#fff"/><rect x="45" y="32" width="14" height="40" rx="7" fill="${FC}"/>
+      <path d="M54 39 L70 55 L86 50" stroke="${FC2}" stroke-width="7" fill="none" stroke-linecap="round" stroke-linejoin="round"/><rect x="47" y="68" width="10" height="40" rx="5" fill="${FC}"/></g>
+    <g class="a-heel" style="transform-origin:70px 113px"><path d="M45 109 Q49 104 56 105 L70 110 Q72 114 68 114 L45 114 Z" fill="${FC2}"/></g>
+    <path class="ar" d="M26 82 V58"/>${arrowHead(26, 56, -90)}<text x="20" y="96" font-size="9" fill="#55646c">rise</text>`,
+  heel: () => `<line x1="8" y1="115" x2="114" y2="115" stroke="${CH}" stroke-width="2.5"/>
+    <rect x="22" y="44" width="6" height="52" rx="3" fill="${CH}"/><rect x="22" y="86" width="56" height="6" rx="3" fill="${CH}"/><rect x="46" y="92" width="5" height="23" fill="${CH}"/>
+    <rect x="32" y="38" width="15" height="50" rx="7" fill="${FC}"/><circle cx="40" cy="24" r="10" fill="${FC}"/><circle cx="46" cy="23" r="1.7" fill="#fff"/>
+    <rect x="34" y="76" width="50" height="11" rx="5" fill="${FC}"/>
+    <g transform="translate(0 -5)"><rect class="gh" x="74" y="80" width="10" height="28" rx="5"/></g>
+    <g class="a-rise5"><rect x="74" y="80" width="10" height="28" rx="5" fill="${FC}"/></g>
+    <g class="a-heel" style="transform-origin:97px 113px"><path d="M72 109 Q76 104 83 105 L97 110 Q99 114 95 114 L72 114 Z" fill="${FC2}"/></g>
+    <path class="ar" d="M106 106 V88"/>${arrowHead(106, 86, -90)}<text x="94" y="80" font-size="9" fill="#55646c">heels up</text>`,
+};
+const FIG_LABEL = {neck: 'Figure seen from the front, tilting the head slowly towards one shoulder, then the other', shoulders: 'Figure seen from the side, rolling the shoulder up, back and down in a circle', twist: 'Seated figure seen from above, turning the shoulders and head to one side and then the other while the hips stay forward', calf: 'Figure standing behind a chair, holding the backrest and rising onto the balls of the feet', heel: 'Seated figure lifting both heels while the toes stay on the floor'};
+const figSVG = (k, thumb) => `<svg class="mvFig${thumb ? ' thumb' : ''}" viewBox="0 0 120 120" role="img" aria-label="${FIG_LABEL[k]}">${FIG[k]()}</svg>`;
 const PROGRAMME = [
-  ['Mon','Neck, shoulders, upper back',['Slow, comfortable neck turns','Shoulder rolls, backwards','Chest opening: hands behind head, elbows wide']],
-  ['Tue','Hips and thighs',['Seated marching','Straighten one knee, then the other','Standing: rise from the chair and sit back slowly']],
-  ['Wed','Ankles, lower legs, short walk',['Ankle circles, each foot','Heel and toe raises','Optional: a 2-minute walk']],
-  ['Thu','Chest and trunk',['Gentle chest opening','Comfortable upper-body turn, each side','Side reach, each side']],
-  ['Fri','Hands, wrists, forearms',['Open and close your fingers','Supported wrist bends (forearm on desk)','Shake out your hands loosely']],
-  ['Sat','Whole-body change of position',['Stand and reach up comfortably','March on the spot or seated','Repeat a movement you liked this week']],
+  ['Mon', ['neck', 'shoulders', 'twist']],
+  ['Tue', ['neck', 'twist', 'calf']],
+  ['Wed', ['shoulders', 'calf', 'neck']],
+  ['Thu', ['twist', 'shoulders', 'calf']],
+  ['Fri', ['neck', 'shoulders', 'calf']],
+  ['Sat', ['calf', 'twist', 'neck']],
 ];
 TAB.movement = () => `<h2>Movement programme ${PROVISIONAL}</h2><div class="warn">Provisional content, for layout only, pending the separate content review. Final routines, sources and illustrations follow that review. This is not a treatment or an exercise prescription.</div>
-  <table class="t"><tr><th>Day</th><th>Focus</th><th>Steps (about 2 min)</th></tr>${PROGRAMME.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2].join('; ')}</td></tr>`).join('')}<tr><td>Sun</td><td colspan="2" class="muted">Optional / recovery. No catch-up for missed days.</td></tr></table>
+  <table class="t"><tr><th>Day</th><th>Three movements (about 2 min)</th></tr>${PROGRAMME.map(r => `<tr><td>${r[0]}</td><td>${r[1].map(k => ROUTINES[k].name).join(' &middot; ')}</td></tr>`).join('')}<tr><td>Sun</td><td class="muted">Optional / recovery. No catch-up for missed days.</td></tr></table>
+  <h3>Movement library (${Object.keys(ROUTINES).length} desk-safe routines)</h3><ul class="mvList">${Object.values(ROUTINES).map(r => `<li>${figSVG(r.fig, true)}<span><b>${r.name}</b><br><span class="small muted">${r.where} &middot; ${r.dose}${r.seated ? ` &middot; seated alternative: ${r.seated.name.toLowerCase()}` : ''}</span></span></li>`).join('')}</ul>
   <label class="fld">Default version</label>${['Ask each time', 'Seated', 'Standing'].map(o => `<button class="chip ${S.mvDefault === o ? 'on' : ''}" data-a="mvDefault" data-v="${o}" aria-pressed="${S.mvDefault === o}">${o}</button>`).join('')}
-  <p class="small muted">Every step has Skip and Stop. Completion is self-reported.</p>`;
+  <p class="small muted">Every movement has Skip and Stop. Completion is self-reported.</p>`;
 TAB.focus = () => `<h2>Focus & Pomodoro</h2><h3>Quiet focus</h3><p>Presets 30, 60, 90 min or custom. Pauses reminders; nothing is replayed afterwards.</p>
   <h3>Pomodoro</h3><p>Off until you press Start on the pet. Presets 25/5, 50/10 or custom.</p>
   <div class="toggle">${sw(S.pomoAuto, 'pomoAuto', '', 'Auto-start next round')}<span>Automatically start the next round <b>(off)</b></span></div>
@@ -647,7 +906,10 @@ function startFlow(id, title, ids){
   closeBubble(); closeWin(); closeModal(); clearTimers(); $('#adminWin').style.display = 'none'; $('#gallery').classList.remove('show'); $('#trayMenu')?.remove();
   S.flow = id; capState = {title, step:'', ids: ids || ''}; renderRev();
   if (S.server === 'offline' && id !== 'offline') S.server = 'paired';
-  S.paused = false; S.meeting = false; S.pomo = null; S.mv = null; setClock('Tue 11:15');
+  S.paused = false; S.meeting = false; S.pomo = null; S.mv = null; S.acts = null; S.remActive = null; setClock('Tue 11:15');
+  if (S.display !== 'normal'){ S.display = 'normal'; applyDisplay(); }
+  S.prevLook = false; $('#stage').classList.remove('prevlook'); $('#petFound').style.display = 'none';
+  petPos = null; placePet();
   if (S.camera !== 'off' && id !== 'camera') S.camera = 'off';
   setPet(S.server === 'offline' ? 'offline' : 'idle'); $('#pet').style.display = '';
 }
@@ -673,7 +935,7 @@ function setupStep(){
     case 6: body = S.server === 'paired' ? `<h2>Sharing ${DRAFT}</h2><p>Choose what, if anything, your PC sends to the office server. All are off; you can change this any time.</p>
         ${SHARE_CATS.filter(c => S.version === 'V2' || c[0] !== 'camera').map(([k, l]) => `<div class="toggle">${sw(S.sharing[k], 'shToggle', k, l)}<span style="flex:1">${l}</span>${btn('Preview', 'shPreview', k, 'link')}</div>`).join('')}
         <p class="small">${AUDIENCE}</p>${nav()}` : `<h2>Sharing</h2><div class="note">This PC is not paired, so nothing is shared. Pair later in Settings &gt; Sharing & server.</div>${nav()}`; break;
-    case 7: body = `<h2>Try a reminder</h2><p>This is how ${esc(S.petName)} will ask. One small bubble beside the pet; you choose Done, Snooze or Not now.</p>
+    case 7: body = `<h2>Try a reminder</h2><p>This is how ${esc(S.petName)} will ask. One small bubble beside the pet, one activity at a time (movement, eye rest or water); you answer each one on its own: Done, Snooze or Skip.</p>
       <div class="row" style="align-items:flex-end"><div style="width:110px">${petSVG(S.pet, S.colour)}</div><div class="card" style="width:300px"><b>Short break?</b><br><span class="small muted">47 min of work since your last break</span><div>${'<button class="btn primary" tabindex="-1">Start 2 min</button><button class="btn" tabindex="-1">Snooze</button>'}</div></div></div>
       <div class="row" style="margin-top:16px">${btn('Back', 'suBack')}${btn('Finish and go to my desktop', 'suFinish', '', 'primary')}</div>`; break;
   }
@@ -706,7 +968,17 @@ const SLIP = {
 };
 
 /* 2. desktop */
-F.desktop = () => { startFlow('desktop', 'Pet on the desktop', 'PET-02, PET-03, PET-04; Ordinary workday'); petMenu(); cap('Pet menu (expanded bubble). Drag the pet: it snaps to the nearest side. Settings > Pet edits name, size, colour, edge, tone, motion. The spreadsheet keeps keyboard focus throughout.'); };
+F.desktop = () => { startFlow('desktop', 'Pet on the desktop', 'PET-02, PET-03, PET-04; Ordinary workday'); petMenu(); cap('Pet menu (expanded bubble), with the size control and Bring pet above clock at the bottom. Drag the pet: it snaps to the nearest side. Settings > Pet edits name, size, colour, edge, tone, motion. The spreadsheet keeps keyboard focus throughout.'); };
+
+/* 2b. pet size, look and lost-pet recovery (owner feedback 21 Oct items 1, 6, 7) */
+F.petfix = () => { startFlow('petfix', 'Pet size, look and lost-pet recovery', 'PET-02 (size: required in the live product); owner feedback 21 Oct items 1, 6, 7'); petMenu();
+  petfixCap('Pet menu with the size control (S / M / L / XL) and Bring pet above clock.'); };
+function petfixCap(msg){
+  cap(`${msg}<br><b>Look:</b> pet body 85% opaque; bubbles, badges and buttons 100%. <button class="tgl" data-a="petLook">${S.prevLook ? 'Show revised look (85%)' : 'Compare: previous opaque pet'}</button><br>
+    <b>Size</b> persists: <button class="tgl" data-a="simRestart">simulate app restart</button><br>
+    <b>Lose the pet:</b> <button class="tgl" data-a="simLost">pet off-screen</button> <button class="tgl" data-a="simDisplay" data-v="small">display change: 1024 x 640</button> <button class="tgl" data-a="simDisplay" data-v="right">taskbar moved to the right</button> <button class="tgl" data-a="simDisplay" data-v="normal">restore display</button><br>
+    Then recover it from the <b>tray icon menu</b> or <b>Settings &gt; Pet</b>: <button class="tgl" data-a="tray">open tray menu</button> <button class="tgl" data-a="settings" data-v="pet">open Settings</button>`);
+}
 
 /* 3. states gallery */
 F.states = () => {
@@ -716,18 +988,103 @@ F.states = () => {
   $('#gallery').classList.add('show'); cap('Gallery of pet states. Close it to return to the desktop.');
 };
 
-/* 4. combined reminder */
-F.reminder = () => { startFlow('reminder', 'Combined reminder', 'RHY-02, RHY-03, WAT-02; reminder rules section 6'); S.dismissals = 0; setClock('Tue 11:15'); S.water = [{id: 1, t: '09:50', ml: 250}]; S.wid = 2; showReminder(); };
+/* 4. combined reminder, revised (owner, 21 Oct): ONE of movement / eye rest / water at a time, each answered on its own.
+   Each activity keeps its own status in S.acts; answering one never changes another. After any answer the next due
+   reminder waits for a calm gap (GAP min) or its next cycle, so there is never a burst of consecutive pop-ups. */
+const ACTS = {movement: {name: 'Movement', icon: 'move', every: 45}, eye: {name: 'Eye rest', icon: 'eye', every: 20}, water: {name: 'Water', icon: 'drop', every: 30}};
+const ACT_ORDER = ['movement', 'eye', 'water'];
+const GAP = 5, SNOOZE = 10;
+const nowMin = () => toMin(S.clock.slice(4));
+const hhmm = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+const setClockMin = m => setClock(`${S.clock.slice(0, 3)} ${hhmm(m)}`);
+F.reminder = () => { startFlow('reminder', 'Combined reminder: one at a time', 'RHY-02, RHY-03, WAT-02; reminder rules section 6; owner feedback 21 Oct item 2'); S.dismissals = 0; setClock('Tue 11:15'); S.water = [{id: 1, t: '09:50', ml: 250}]; S.wid = 2; remInit(); remTick(); };
+function remInit(){
+  const t = nowMin();
+  S.acts = {movement: {status: 'due', due: t, at: null, since: t - 48}, eye: {status: 'due', due: t, at: null}, water: {status: 'due', due: t, at: null}};
+  S.remActive = null; S.gapUntil = t; S.remLog = []; S.remShownAt = null; S.lightOffered = false;
+  remWaterCheck();
+}
+function remLog(t){ S.remLog.push(`${hhmm(nowMin())} ${t}`); }
+/* water is only due while behind the user's own pace; at the goal it pauses */
+function remWaterCheck(){
+  const w = S.acts.water; if (!['due', 'notdue', 'goal'].includes(w.status)) return;
+  if (goalReached()) w.status = 'goal'; else if (!behindPace()) { w.status = 'notdue'; w.due = nowMin() + ACTS.water.every; } else w.status = 'due';
+}
+function remTick(){
+  if (!S.acts) return;
+  const n = nowMin();
+  ACT_ORDER.forEach(k => { const a = S.acts[k];
+    if (['done', 'skipped', 'partial', 'noresp', 'snoozed', 'notdue'].includes(a.status) && n >= a.due){ a.status = 'due'; if (k === 'water') { a.status = 'notdue'; a.due = n - 1; remWaterCheck(); } }
+    if (k === 'water' && ['due', 'notdue', 'goal'].includes(a.status)) remWaterCheck(); });
+  if (S.remActive){
+    const a = S.acts[S.remActive], k = S.remActive;
+    if (a.status === 'showing' && n - S.remShownAt >= 10){ a.status = 'waiting'; closeBubble(); setPet('waiting', `${ACTS[k].name} waiting`); remLog(`${ACTS[k].name}: no response for 10 min, folded into a badge`); }
+    else if (a.status === 'waiting' && n - S.remShownAt >= 20){ a.status = 'noresp'; a.at = n; a.due = n + ACTS[k].every; S.remActive = null; S.gapUntil = n + GAP; setPet('idle'); remLog(`${ACTS[k].name}: offered, no response (not done)`); }
+    return renderRemRev();
+  }
+  if (n < S.gapUntil) return renderRemRev();
+  const next = ACT_ORDER.filter(k => S.acts[k].status === 'due' && S.cats[k === 'water' ? 'hydration' : k] !== false).sort((x, y) => S.acts[x].due - S.acts[y].due)[0];
+  if (next) showRem(next); else renderRemRev();
+}
+function remStrip(){
+  const n = nowMin();
+  const line = k => { const a = S.acts[k];
+    switch (a.status){
+      case 'showing': return ['now', 'Showing now'];
+      case 'active': return ['now', 'In progress'];
+      case 'waiting': return ['now', 'Waiting for you'];
+      case 'due': return ['due', S.remActive ? 'Due, waits its turn' : n < S.gapUntil ? `Due, after calm gap (${hhmm(S.gapUntil)})` : 'Due'];
+      case 'snoozed': return ['snz', `Snoozed to ${hhmm(a.due)}`];
+      case 'done': return ['done', `Done ${hhmm(a.at)}, next ${hhmm(a.due)}`];
+      case 'partial': return ['part', `Partly done ${hhmm(a.at)}`];
+      case 'skipped': return ['skip', `Skipped ${hhmm(a.at)} (not done)`];
+      case 'noresp': return ['skip', 'No response (not done)'];
+      case 'notdue': return ['ok', 'On your pace, not due'];
+      case 'goal': return ['done', 'Goal reached, paused'];
+    } return ['ok', a.status]; };
+  return `<div class="remStrip" role="list" aria-label="Status of each reminder">${ACT_ORDER.map(k => { const [c, t] = line(k); return `<div class="rs ${c}" role="listitem" data-k="${k}" data-status="${S.acts[k].status}"><b>${icon(ACTS[k].icon, 13)}${ACTS[k].name}</b>${t}</div>`; }).join('')}</div>`;
+}
+function remCard(k){
+  const a = S.acts[k], n = nowMin();
+  const resp = (label, kind, cls) => btn(label, 'remResp', `${k}:${kind}`, cls);
+  let body = '';
+  if (k === 'movement') body = `<h4>${icon('move')} Time to move?</h4><ul class="reason"><li>${n - a.since} min of work since your last movement break</li></ul>
+    <div class="row" style="gap:0">${btn('Start 2-min routine', 'moveFromRem', '', 'primary')}${resp('Already moved', 'done')}${resp('Snooze 10 min', 'snooze')}${resp('Skip', 'skip', 'link')}</div>`;
+  if (k === 'eye') body = `<h4>${icon('eye')} Rest your eyes?</h4><p class="small" style="margin:2px 0 6px">Look across the room at something far away for about 20 seconds, and blink normally.</p>
+    <div class="row" style="gap:0">${resp('Done', 'done', 'primary')}${resp('Snooze 10 min', 'snooze')}${resp('Skip', 'skip', 'link')}</div>`;
+  if (k === 'water'){ remWaterText = `${paceExpected() - waterTotal()} ml behind your own pace (about ${paceExpected()} ml expected by now, ${waterTotal()} ml logged)`;
+    body = `<h4>${icon('drop')} Water check</h4><ul class="reason"><li>Water: ${remWaterText}</li></ul>
+    <div class="row" style="gap:0">${S.servings.map(ml => resp(`Log ${ml} ml`, 'done:' + ml, ml === 250 ? 'primary' : '')).join('')}${resp('Snooze 10 min', 'snooze')}${resp('Skip', 'skip', 'link')}</div>`; }
+  return `<div data-rem="${k}">${body}${remStrip()}<p class="remOnly">One reminder at a time. Your answer here changes <b>${ACTS[k].name.toLowerCase()}</b> only.</p></div>`;
+}
 let remWaterText = null;
-function showReminder(waterDone = false){
-  setPet('reminder');
-  if (!waterDone) remWaterText = behindPace() ? `Water: ${paceExpected() - waterTotal()} ml behind your own pace (about ${paceExpected()} ml expected by now, ${waterTotal()} ml logged)` : null;
-  const n = 2 + (remWaterText ? 1 : 0);
-  say(`<h4>Time for a short break?</h4><ul class="reason"><li>48 min of work since your last break</li><li>Eye rest due - folded into this break</li>${remWaterText ? `<li class="${waterDone ? 'doneLine' : ''}">${remWaterText}</li>` : ''}</ul>
-    <div class="row" style="gap:0">${btn('Start 2-min movement', 'moveIntro', '', 'primary')}${waterDone || !remWaterText ? '' : btn('Log 250 ml', 'remWater')}${btn('Already did it', 'remDone')}</div>
-    <div class="row" style="gap:0">${btn('Snooze 10 min', 'remSnooze')}${btn('Focus...', 'focusMenu')}${btn('Not now', 'remDismiss', '', 'link')}</div>
-    <p class="small muted" style="margin:4px 0 0">One reminder for ${n === 3 ? 'all three' : 'both'}. Snooze covers ${n === 3 ? 'all of them' : 'both'}.${goalReached() ? ' Your logging goal is reached, so water is not listed.' : ''}</p>`, {wide: true});
-  cap('One combined reminder with explicit reasons. <b>Sample scenario:</b> 250 ml logged at 11:15 against about 390 ml expected by now (your goal spread evenly over your work hours); the water reason appears only when you are behind that pace. Reviewer: <button class="tgl" data-a="noResp">simulate 10 min, no response</button>');
+function showRem(k){
+  if (S.remActive && S.remActive !== k && S.acts[S.remActive].status !== 'due') return; /* never two at once */
+  S.remActive = k; const a = S.acts[k];
+  if (a.status !== 'waiting') { S.remShownAt = nowMin(); remLog(`${ACTS[k].name} reminder shown`); }
+  a.status = 'showing';
+  setPet('reminder'); say(remCard(k), {wide: true});
+  renderRemRev();
+}
+/* record one answer for ONE activity; nothing else in S.acts is touched */
+function remRecord(k, kind){
+  const a = S.acts && S.acts[k]; if (!a) return;
+  const n = nowMin();
+  if (kind === 'done'){ a.status = 'done'; a.at = n; a.due = n + ACTS[k].every; if (k === 'movement') a.since = n; }
+  else if (kind === 'partial'){ a.status = 'partial'; a.at = n; a.due = n + ACTS[k].every; if (k === 'movement') a.since = n; }
+  else if (kind === 'snooze'){ a.status = 'snoozed'; a.due = n + SNOOZE; }
+  else if (kind === 'skip'){ a.status = 'skipped'; a.at = n; a.due = n + ACTS[k].every; S.dismissals++; }
+  if (S.remActive === k) S.remActive = null;
+  S.gapUntil = n + GAP;
+  remLog(`${ACTS[k].name}: ${({done: 'done', partial: 'partly done', snooze: `snoozed to ${hhmm(a.due)}`, skip: 'skipped (not done)'})[kind]}. Others unchanged.`);
+  renderRemRev();
+}
+function renderRemRev(){
+  if (S.flow !== 'reminder' || !S.acts) return;
+  cap(`<b>One reminder at a time.</b> Each activity keeps its own status; answering one never marks another done. The next due one appears only after a ${GAP}-min calm gap or on its next cycle.<br>
+    Simulated time <b>${hhmm(nowMin())}</b> <button class="tgl" data-a="remAdv" data-v="1">+1 min</button> <button class="tgl" data-a="remAdv" data-v="5">+5 min</button> <button class="tgl" data-a="remAdv" data-v="10">+10 min</button>
+    ${remStrip()}<ul class="remLog">${S.remLog.slice(-5).map(l => `<li>${esc(l)}</li>`).join('')}</ul>
+    <span class="small"><b>Sample scenario:</b> 250 ml logged by 11:15 against about 390 ml expected by then (your goal spread evenly over your work hours); water is only due while you are behind that pace.</span>`);
 }
 
 /* 5. water */
@@ -744,39 +1101,44 @@ function waterPanel(editId){
   cap('Quick log, custom amount, edit (correction) and remove. Totals recalculate. At the goal, hydration reminders pause and manual logging stays available.');
 }
 
-/* 6. movement */
-F.movement = () => { startFlow('movement', 'Movement session (six-day programme)', 'MOV-01, MOV-02; Guided movement journey'); setClock('Tue 11:20'); moveIntro(); };
+/* 6. movement: every movement says WHAT to do (name, illustration, numbered steps, dose, seated alternative, Skip / Stop) */
+F.movement = () => { startFlow('movement', 'Movement routine (illustrated)', 'MOV-01, MOV-02; Guided movement journey; owner feedback 21 Oct item 3'); setClock('Tue 11:20'); moveIntro(); };
 function todayIdx(){ const d = S.clock.slice(0, 3); return Math.max(0, DAYS.indexOf(d)); }
-function moveIntro(){
+const mvRoutine = (key, ver) => { const r = ROUTINES[key]; return ver === 'seated' && r.seated ? Object.assign({key}, r.seated) : Object.assign({key}, r); };
+function moveIntro(fromRem){
   const di = todayIdx();
   if (di === 6) { say(`<h4>Sunday is optional</h4><p>No routine is scheduled. Pick one if you'd like.</p>${PROGRAMME.map((p, i) => btn(p[0], 'mvDay', i)).join('')}`); return; }
-  const p = PROGRAMME[di]; S.mv = {day: di, step: 0, done: 0, skipped: 0, ver: null};
+  const p = PROGRAMME[di]; S.mv = {day: di, step: 0, done: 0, skipped: 0, ver: null, fromRem: !!fromRem};
   setPet('exercise', 'Ready?');
-  say(`<h4>${p[0]}: ${p[1]}</h4><p class="small muted" style="margin:0">3 steps &middot; about 2 min &middot; provisional content, pending content review${S.mvDefault !== 'Ask each time' ? ` &middot; your default: ${S.mvDefault.toLowerCase()}` : ''}</p>
-    <p class="small">Use a steady chair; if it has wheels, choose standing or lock them. Stop if anything feels uncomfortable - skipping is fine.</p>
+  say(`<div class="mvHead"><b>${p[0]}'s routine</b> ${PROVISIONAL}</div><p class="small muted" style="margin:0">3 movements &middot; about 2 min${S.mvDefault !== 'Ask each time' ? ` &middot; your default: ${S.mvDefault.toLowerCase()}` : ''}</p>
+    <ul class="mvList">${p[1].map(k => { const r = ROUTINES[k]; return `<li>${figSVG(r.fig, true)}<span><b>${r.name}</b><br><span class="small muted">${r.where} &middot; ${r.dose}</span></span></li>`; }).join('')}</ul>
+    <p class="small" style="margin:4px 0">Use a steady chair; if it has wheels, lock them or hold the desk. Move gently and stop if anything feels uncomfortable. Skipping is fine.</p>
     <div class="row" style="gap:0">${btn('Seated', 'mvVer', 'seated', S.mvDefault === 'Standing' ? '' : 'primary')}${btn('Standing', 'mvVer', 'standing', S.mvDefault === 'Standing' ? 'primary' : '')}${btn('Later', 'mvLater')}${btn('Skip today', 'mvSkipDay', '', 'link')}</div>
-    <p class="small muted" style="margin:4px 0 0">Other days: ${PROGRAMME.map((q, i) => i === di ? '' : `<button class="btn link" data-a="mvDay" data-v="${i}">${q[0]}</button>`).join('')}</p>`, {wide: true, expanded: true});
-  cap(`Today's routine (${p[0]}). Choose seated or standing, then do, skip or stop steps.`);
-}
-function figure(step, ver){
-  const arms = [['M42 46 L30 30','M58 46 L70 30'],['M42 46 L28 56','M58 46 L72 56'],['M42 46 L34 64','M58 46 L66 64']][step % 3];
-  const legs = ver === 'standing' ? '<path d="M50 70 L42 98 M50 70 L58 98" stroke="#2d6a6e" stroke-width="5" stroke-linecap="round"/>' : '<path d="M50 70 L70 72 L70 96 M50 70 L66 80 L66 98" stroke="#2d6a6e" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M34 74 h40 M38 74 v24" stroke="#8a979d" stroke-width="4"/>';
-  return `<svg viewBox="0 0 100 104" aria-hidden="true"><circle cx="50" cy="22" r="10" fill="#2d6a6e"/><path d="M50 32 L50 70" stroke="#2d6a6e" stroke-width="6" stroke-linecap="round"/><path d="${arms[0]} M${arms[1].slice(1)}" stroke="#2d6a6e" stroke-width="5" stroke-linecap="round" fill="none"/>${legs}</svg>`;
+    <p class="small muted" style="margin:4px 0 0">Other days: ${PROGRAMME.map((q, i) => i === di ? '' : `<button class="btn link" data-a="mvDay" data-v="${i}">${q[0]}</button>`).join('')}</p>`, {wide: 'x', expanded: true});
+  cap(`Today's routine (${p[0]}): three named movements, each with an illustration, steps and dose. Choose seated or standing, then Done, Skip or Stop on each.`);
 }
 function moveStep(){
-  const m = S.mv, p = PROGRAMME[m.day];
-  if (m.step >= 3) return moveEnd();
-  say(`<h4>Step ${m.step + 1} of 3 &middot; ${m.ver}</h4><div class="illus">${figure(m.step, m.ver)}<div><b>${p[2][m.step]}</b><p class="small">Move slowly, within a comfortable range, about 30 seconds. Breathe normally.</p></div></div>
-    <div class="row" style="gap:0">${btn('Done', 'mvDone', '', 'primary')}${btn('Skip step', 'mvSkip')}${btn('Stop', 'mvStop', '', 'link')}</div>
-    <p class="small muted" style="margin:2px 0 0">Text and illustration are also read by screen readers; reduced motion shows still images.</p>`, {wide: true, expanded: true});
-  cap(`Step ${m.step + 1}: Done / Skip step / Stop. Skips and stops are recorded as partial, never as complete.`);
+  const m = S.mv, keys = PROGRAMME[m.day][1];
+  if (m.step >= keys.length) return moveEnd();
+  const r = mvRoutine(keys[m.step], m.ver);
+  say(`<div id="mvPanel" data-mv="${r.key}"><div class="mvHead"><span class="small muted">Movement ${m.step + 1} of ${keys.length} &middot; ${esc(r.where.toLowerCase())}</span> ${PROVISIONAL}</div>
+    <h4 class="mvName">${r.name}</h4><span class="mvDose">${icon('timer', 14)} ${r.dose}</span>
+    <div class="mvBody"><div class="mvFigWrap">${figSVG(r.fig)}<span class="small">Solid: start &middot; dashed: move to &middot; arrow: direction</span></div>
+    <ol class="mvSteps">${r.steps.map(t => `<li>${t}</li>`).join('')}</ol></div>
+    <div class="mvAlt"><b>${r.alt[0]}.</b> ${r.alt[1]}</div>
+    <p class="small muted" style="margin:2px 0">Move gently, within a comfortable range. Stop if anything hurts or feels wrong.</p>
+    <div class="row" style="gap:0">${btn(m.step + 1 < keys.length ? 'Done, next movement' : 'Done, finish', 'mvDone', '', 'primary')}${btn('Skip this movement', 'mvSkip')}${btn('Stop routine', 'mvStop')}</div>
+    <div class="mvDots" aria-hidden="true">${keys.map((_, i) => `<i class="${i <= m.step ? 'on' : ''}"></i>`).join('')}</div></div>`, {wide: 'x', expanded: true});
+  cap(`Movement ${m.step + 1}: ${r.name}. Done / Skip this movement / Stop routine. Skips and stops are recorded as partial, never as complete. Reduced motion shows the still start and target poses.`);
 }
 function moveEnd(stopped){
-  const m = S.mv, full = m.done === 3 && !stopped;
+  const m = S.mv, n = PROGRAMME[m.day][1].length, full = m.done === n && !stopped;
   setPet(full ? 'celebrate' : 'idle');
-  say(full ? `<h4>Routine complete</h4><p>All 3 steps done. Saved as <b>self-reported</b>.</p>`
-    : `<h4>Saved as partial</h4><p>${m.done} of 3 steps done${m.skipped ? `, ${m.skipped} skipped` : ''}${stopped ? ', stopped early' : ''}. Recorded as partial (self-reported), not complete. No catch-up needed.</p>${btn('Try again later today', 'mvLater')}`);
+  if (m.fromRem) remRecord('movement', full ? 'done' : 'partial');
+  say(full ? `<h4>Routine complete</h4><p>All ${n} movements done. Saved as <b>self-reported</b>.</p>`
+    : `<h4>Saved as partial</h4><p>${m.done} of ${n} movements done${m.skipped ? `, ${m.skipped} skipped` : ''}${stopped ? ', stopped early' : ''}. Recorded as partial (self-reported), not complete. No catch-up needed.</p>${btn('Try again later today', 'mvLater')}`);
   cap(full ? 'Complete: celebration state, self-reported label.' : 'Partial outcome shown honestly.');
+  if (S.flow === 'reminder') renderRemRev();
   if (full) later(() => setPet('idle'), 1800);
 }
 
@@ -848,27 +1210,70 @@ function renderSug(k){
   if (S.sugApplied[k]) return `<b>Applied</b> &middot; <span class="small">${d.show(d.get())} (was ${d.show(S.sugPrev[k])})</span> ${btn('Undo', 'sugUndo', k, 'link')}`;
   return btn('Apply', 'sug', k, 'primary') + btn('Not for me', 'sugNo', k);
 }
+/* Per-day codes, Mon..Sun: d done/met, p partly, z 0 (app running, not done), n no data (app not running), o day off, s before you started, t today (in progress) */
 const WEEK = {
-  strong: {t:'Strong week', cov:'Recorded on 6 of 6 workdays', good:['Movement routine done on 6 of 6 scheduled days (self-reported).','Water logged up to your goal on 5 of 6 workdays.','20 of 24 offered breaks marked done.'], miss:['Wednesday afternoon break: snoozed twice, not done.'], sug:['keep']},
-  mixed: {t:'Mixed week', cov:'Recorded on 6 of 6 workdays', good:['Movement routine done on 3 of 6 days; 1 more partial.','Longest observed work block shortened from 2 h 40 to 1 h 55 (estimate, this PC).'], miss:['Water logged on 2 of 6 days. On 2 days nothing was logged (no data, not zero).','9 of 21 breaks snoozed or set aside, mostly 15:00-17:00.'], sug:['afternoon','serving','seated']},
-  missing: {t:'Not enough data', cov:'Recorded on 2 of 6 workdays (app not running on 4 days)', good:['2 movement routines done on the days recorded.'], miss:[], sug:[], none:'Not enough data for conclusions this week. Missing days are not counted as misses.'},
-  first: {t:'First week', cov:'3 days so far (started Wednesday)', good:['You set up your pet and logged water on all 3 days.','First routine completed on Thursday.'], miss:[], sug:['seated'], none:'Comparisons start after two full weeks.'},
+  strong: {t:'Strong week', cov:'Recorded on 6 of 6 workdays', days:{move:'ddddddo', breaks:'ddpdppo', water:'ddddpdo'}, breaks:[20, 24],
+    good:['Movement routine done on 6 of 6 scheduled days (self-reported).','Water logged up to your goal on 5 of 6 workdays.','20 of 24 offered breaks marked done.'], miss:['Wednesday afternoon break: snoozed twice, not done.'], sug:['keep'],
+    hi:[['6/6', 'routine days, every scheduled day', 'move'], ['20/24', 'breaks taken when offered', 'bell'], ['Wed', 'afternoon break snoozed twice, not done', 'zz', 'miss']]},
+  mixed: {t:'Mixed week', cov:'Recorded on 6 of 6 workdays', days:{move:'dpdzdzo', breaks:'dpdppzo', water:'dpzdpzo'}, breaks:[12, 21],
+    good:['Movement routine done on 3 of 6 days; 1 more partial.','Longest observed work block shortened from 2 h 40 to 1 h 55 (estimate, this PC).'], miss:['Water goal reached on 2 of 6 days; on 2 days nothing was logged while the app was running (shown as 0, not as no data).','9 of 21 breaks snoozed or set aside, mostly 15:00-17:00.'], sug:['afternoon','serving','seated'],
+    hi:[['3 + 1', 'routines done, plus 1 partly done', 'move'], ['1 h 55', 'longest work block, down from 2 h 40 (estimate, this PC)', 'clock'], ['9/21', 'breaks set aside, mostly 15:00-17:00', 'zz', 'miss']]},
+  missing: {t:'Not enough data', cov:'Recorded on 2 of 6 workdays (app not running on 4 days)', days:{move:'dnndnno', breaks:'pnnznno', water:'znnpnno'}, breaks:[2, 7],
+    good:['2 movement routines done on the days recorded.'], miss:[], sug:[], none:'Not enough data for conclusions this week. Missing days are not counted as misses.',
+    hi:[['2', 'routines done on the 2 days recorded', 'move'], ['4 days', 'no data (app not running); not counted as misses', 'dot', 'none']]},
+  first: {t:'First week', cov:'3 days so far (started Wednesday)', days:{move:'sszdpto', breaks:'ssdpdto', water:'ssdpdto'}, breaks:[8, 10],
+    good:['You set up your pet and logged water on all 3 days.','First routine completed on Thursday.'], miss:[], sug:['seated'], none:'Comparisons start after two full weeks.',
+    hi:[['3 days', 'of water logging since you started', 'drop'], ['Thu', 'first routine completed', 'move']]},
 };
+const WK_ACTS = [['move', 'Movement', 'Movement routine', 'move', '#009E73', '#fff', 'days done'], ['breaks', 'Breaks', 'Breaks taken', 'bell', '#E69F00', '#1f2a30', 'breaks taken'], ['water', 'Water', 'Water goal', 'drop', '#0072B2', '#fff', 'goal days']];
+const MK = {d:['&#10003;', 'done'], p:['&#9680;', 'partly'], z:['0', '0 (app running, not done)'], n:['&ndash;', 'no data (app not running)'], o:['off', 'day off'], s:['&middot;', 'before you started'], t:['&middot;', 'today, in progress']};
+const MKWORD = {d:'done', p:'partly', z:'0', n:'no data', o:'off', s:'not started', t:'today'};
+function wkCount(codes){ const c = {d:0, p:0, z:0, n:0}; codes.slice(0, 6).split('').forEach(x => { if (x in c) c[x]++; }); return c; }
+function wkCenter(act, v){ const c = wkCount(v.days[act]); return act === 'breaks' ? `${v.breaks[0]}/${v.breaks[1]}` : `${c.d}/${c.d + c.p + c.z}`; }
+function wkSub(act, v){ const c = wkCount(v.days[act]); const bits = [];
+  if (c.p) bits.push(`${c.p} partly`); if (c.z) bits.push(`<b>${c.z} at 0</b>`); if (c.n) bits.push(`<b>${c.n} no data</b>`); return bits.join(' &middot; ') || 'every recorded day'; }
+function arcPath(cx, cy, r0, r1, a0, a1){
+  const pt = (r, a) => `${(cx + r * Math.cos(a * Math.PI / 180)).toFixed(2)} ${(cy + r * Math.sin(a * Math.PI / 180)).toFixed(2)}`;
+  return `M${pt(r1, a0)} A${r1} ${r1} 0 0 1 ${pt(r1, a1)} L${pt(r0, a1)} A${r0} ${r0} 0 0 0 ${pt(r0, a0)} Z`;
+}
+/* one segment per workday: done = solid, partly = stripes, 0 = white with a coloured outline, no data = grey hatching with a dashed edge */
+function ringSVG(act, label, color, unit, v){
+  const codes = v.days[act].slice(0, 6).split(''), span = 360 / codes.length, c = wkCount(v.days[act]);
+  const segs = codes.map((x, i) => {
+    const a0 = -90 + i * span + 2.5, a1 = a0 + span - 5;
+    const st = {d:[color, 'none', 0, ''], p:[`url(#p-${act})`, color, 1.4, ''], z:['#fff', color, 2.2, ''], n:[`url(#h-${act})`, '#6f7d83', 1.3, 'stroke-dasharray="3 2"'], s:['#f4f6f7', '#b8c2c6', 1, 'stroke-dasharray="1.5 2"'], t:['#f4f6f7', '#b8c2c6', 1, 'stroke-dasharray="1.5 2"']}[x];
+    return `<path class="rseg ${x}" data-code="${x}" d="${arcPath(66, 66, 45, 61, a0, a1)}" fill="${st[0]}" stroke="${st[1]}" stroke-width="${st[2]}" ${st[3]} style="animation-delay:${i * 80}ms"><title>${WK_DAYS[i]}: ${MK[x][1]}</title></path>`; }).join('');
+  return `<svg viewBox="0 0 132 132" role="img" aria-label="${label}: ${wkCenter(act, v)} ${unit}; ${c.p} partly, ${c.z} at zero, ${c.n} days with no data">
+    <defs><pattern id="h-${act}" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#fff"/><rect width="2.6" height="6" fill="#b9c4c9"/></pattern>
+    <pattern id="p-${act}" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(-45)"><rect width="7" height="7" fill="#fff"/><rect width="4" height="7" fill="${color}"/></pattern></defs>
+    ${segs}<text x="66" y="68" text-anchor="middle" font-size="25" font-weight="800" fill="#1f2a30">${wkCenter(act, v)}</text><text x="66" y="85" text-anchor="middle" font-size="10.5" fill="#55646c">${unit}</text></svg>`;
+}
+const WK_DAYS = DAYS;
+const SPARK = '<svg class="spark" viewBox="0 0 300 150" aria-hidden="true"><circle cx="40" cy="40" r="4" fill="#ffd54a"/><circle cx="90" cy="100" r="3" fill="#fff" opacity=".7"/><circle cx="150" cy="30" r="5" fill="#7fd1c7"/><circle cx="210" cy="85" r="3.5" fill="#ffd54a" opacity=".85"/><circle cx="260" cy="40" r="2.5" fill="#fff"/><path d="M120 70l4 9 9 4-9 4-4 9-4-9-9-4 9-4z" fill="#fff" opacity=".8"/><path d="M240 110l3 7 7 3-7 3-3 7-3-7-7-3 7-3z" fill="#ffd54a" opacity=".9"/><circle cx="180" cy="130" r="40" fill="#ffffff" opacity=".06"/><circle cx="60" cy="140" r="60" fill="#ffffff" opacity=".05"/></svg>';
 function reviewWin(){
-  const v = WEEK[S.reviewVariant];
+  const v = WEEK[S.reviewVariant], plain = S.reviewPlain;
   const ph = S.phone.length ? S.phone : [{t:'Mon 12:10', l:'work'},{t:'Tue 15:40', l:'personal'},{t:'Thu 11:05', l:'unsure'}];
-  openWin('HealthierYou - Weekly review', `<nav aria-label="Review"><button class="on">Weekly review</button><button data-a="openMonth">Monthly progress</button><button data-a="settings" data-v="goals">Goals</button></nav><div class="content">
+  const visual = `<div class="wkRings">${WK_ACTS.map(([k, , label, ic, col, , unit]) => `<div class="wkRing" data-act="${k}">${ringSVG(k, label, col, unit, v)}<div><div class="nm" style="color:${col === '#E69F00' ? '#8a5a00' : col}">${icon(ic)} ${label}</div><div class="sub">${wkSub(k, v)}</div></div></div>`).join('')}</div>
+    <div class="wkStrip" role="table" aria-label="Week strip, one column per day"><div role="row" style="display:contents"><div></div>${WK_DAYS.map(d => `<div class="dh" role="columnheader">${d}</div>`).join('')}</div>
+    ${WK_ACTS.map(([k, short, label, ic, col, ct]) => `<div role="row" style="display:contents"><div class="rl" role="rowheader">${icon(ic, 14)} ${short}</div>${v.days[k].split('').map((x, i) => `<div class="mk ${x}" role="cell" data-code="${x}" style="--c:${col};--ct:${ct};animation-delay:${200 + i * 50}ms" title="${WK_DAYS[i]}: ${MK[x][1]}" aria-label="${label}, ${WK_DAYS[i]}: ${MK[x][1]}">${MK[x][0]}</div>`).join('')}</div>`).join('')}</div>
+    <div class="wkLegend" id="wkLegend"><span><i class="mk d">&#10003;</i>done</span><span><i class="mk p">&#9680;</i>partly</span><span><i class="mk z">0</i>0: app running, not done</span><span><i class="mk n">&ndash;</i>no data: app not running</span><span><i class="mk o">off</i>day off</span><span><i class="mk s">&middot;</i>not started / today</span></div>`;
+  const table = `<div class="wkPlainView"><table class="t" id="wkTable"><tr><th>Activity</th>${WK_DAYS.map(d => `<th>${d}</th>`).join('')}<th>Summary</th></tr>${WK_ACTS.map(([k, , label]) => `<tr><td>${label}</td>${v.days[k].split('').map(x => `<td>${MKWORD[x]}</td>`).join('')}<td>${wkCenter(k, v)} ${WK_ACTS.find(a => a[0] === k)[6]}</td></tr>`).join('')}</table>
+    <p class="small muted">"0" means the app was running and nothing was done or logged. "No data" means the app was not running; those days are not counted as misses.</p>
+    <h3>What went well</h3><ul>${v.good.map(g => `<li>${g}</li>`).join('')}</ul>${v.miss.length ? `<h3>Planned but missed</h3><ul>${v.miss.map(g => `<li>${g}</li>`).join('')}</ul>` : ''}</div>`;
+  const his = `<h3>Highlights</h3>${v.hi.map(([big, tx, ic, tone], i) => `<div class="hi ${tone || ''}" style="animation-delay:${400 + i * 90}ms"><span class="big">${big}</span><span class="tx">${icon(ic, 13)} ${tx}</span></div>`).join('')}`;
+  const sugs = v.sug.length ? `<h3>Try next week</h3>${v.sug.map((k, i) => `<div class="sugc" style="animation-delay:${500 + i * 90}ms"><span class="ic">${icon(k === 'keep' ? 'check' : k === 'serving' ? 'drop' : k === 'seated' ? 'move' : 'clock', 15)}</span><span class="tx">${SUGS[k].text}</span><span class="ctl" id="sug-${k}">${renderSug(k)}</span></div>`).join('')}` : `<h3>Try next week</h3><p class="small muted">No suggestions until there is enough data.</p>`;
+  openWin('HealthierYou - Weekly review', `<nav aria-label="Review"><button class="on">Weekly review</button><button data-a="openMonth">Monthly progress</button><button data-a="settings" data-v="goals">Goals</button></nav><div class="content" id="wkContent">
     <div class="sim" style="background:#262b48;color:#eef0ff;border-radius:6px;padding:6px 8px;font-size:12px;margin-bottom:8px">Reviewer: variant ${Object.keys(WEEK).map(k => `<button class="chip ${S.reviewVariant === k ? 'on' : ''}" data-a="wkVar" data-v="${k}">${WEEK[k].t}</button>`).join('')}</div>
-    <h2>Week of 13-18 Oct</h2><p class="muted">${v.cov}. Figures come only from what you logged or the PC recorded.</p>
+    <div class="wkHero v-${S.reviewVariant}">${plain ? '' : SPARK}<div><div class="wkKick">Week of 13-18 Oct</div><div class="wkTitle">${icon(S.reviewVariant === 'missing' ? 'dot' : 'star', 24)} ${v.t}</div><div class="wkCov">${v.cov}. Figures come only from what you logged or the PC recorded.</div></div>
+      <div class="wkTools"><button class="wkTog" data-a="wkPlain" data-v="" aria-pressed="${plain}">${plain ? 'Show as graphics' : 'Show as table'}</button></div></div>
     ${v.none ? `<div class="note">${v.none}</div>` : ''}
-    <h3>${icon('star')} What went well</h3><ul>${v.good.map(g => `<li>${g}</li>`).join('')}</ul>
-    ${v.miss.length ? `<h3>Planned but missed</h3><ul>${v.miss.map(g => `<li>${g}</li>`).join('')}</ul>` : ''}
-    ${v.sug.length ? `<h3>For next week (up to 3)</h3>${v.sug.map(k => `<div class="card row"><span style="flex:1">${SUGS[k].text}</span><span id="sug-${k}">${renderSug(k)}</span></div>`).join('')}` : ''}
+    ${plain ? table : visual}
+    ${plain ? `<div>${sugs}</div>` : `<div class="wkCols"><div>${his}</div><div>${sugs}</div></div>`}
     <h3>Phone interruptions <span class="small muted">(self-reported, not detected)</span></h3>
     <table class="t">${ph.map((p, i) => `<tr><td>${p.t}</td><td>${['work','personal','unsure'].map(l => `<button class="chip ${p.l === l ? 'on' : ''}" data-a="phoneFix" data-v="${i}:${l}">${l}</button>`).join('')}</td></tr>`).join('')}</table>
-    <p class="small muted">How these are worked out: break follow-through = breaks you marked done / breaks offered; routine = days marked complete / scheduled days. Stays on this PC unless you share that category.</p></div>`);
+    <p class="small muted">How these are worked out: break follow-through = breaks you marked done / breaks offered; routine = days marked complete / scheduled days. Animations stop with reduced motion (Windows setting or Accessibility); "Show as table" gives a plain readable view. Stays on this PC unless you share that category.</p></div>`, true);
   if (!S.phone.length) S.phone = ph;
-  cap(`Weekly review: ${v.t}. Switch variants in the dark strip.`);
+  cap(`Weekly review: ${v.t}. Visual rings (one segment per workday), week strip, highlights and up to 3 suggestions with Apply / Undo. No data (hatched, "&ndash;") is drawn differently from 0 (outlined, "0"). "Show as table" gives the plain view. Switch variants in the dark strip.`);
 }
 
 /* 12. monthly */
@@ -1019,16 +1424,23 @@ const A = {
   noop(){}, flow(v){ (F[v] || F.reset)(); },
   revMin(){ $('#rev').classList.toggle('min'); },
   version(v){ S.version = v; renderRev(); if (S.flow === 'camera' || S.flow === 'meditation') F.reset(); },
-  closeBubble(){ closeBubble(); if (S.mode === 'reminder' || S.mode === 'cue') setPet(S.server === 'offline' ? 'offline' : 'idle'); $('#ledger').classList.remove('inactive'); },
+  closeBubble(){ closeBubble(); if (remCollapse()) return; if (S.mode === 'reminder' || S.mode === 'cue') setPet(S.server === 'offline' ? 'offline' : 'idle'); $('#ledger').classList.remove('inactive'); },
   closeWin(){ closeWin(); }, closeModal(){ closeModal(); }, closeAdmin(){ $('#adminWin').style.display = 'none'; },
   closeGallery(){ $('#gallery').classList.remove('show'); cap('Back on the desktop.'); },
   tray(){
     const ex = $('#trayMenu'); if (ex){ ex.remove(); return; }
     const m = document.createElement('div'); m.id = 'trayMenu';
-    m.innerHTML = `<button data-a="trayDo" data-v="toggle">${$('#pet').style.display === 'none' ? 'Show pet' : 'Hide pet'}</button><button data-a="trayDo" data-v="panel">Open pet panel (Ctrl+Alt+H)</button><button data-a="trayDo" data-v="pause">Pause coaching...</button><button data-a="trayDo" data-v="settings">Settings</button><button data-a="trayDo" data-v="review">Reviews</button>`;
+    m.innerHTML = `<button data-a="trayDo" data-v="toggle">${$('#pet').style.display === 'none' ? 'Show pet' : 'Hide pet'}</button><button data-a="trayDo" data-v="bring">${icon('pin', 14)} Bring pet above clock</button><button data-a="trayDo" data-v="panel">Open pet panel (Ctrl+Alt+H)</button><button data-a="trayDo" data-v="pause">Pause coaching...</button><button data-a="trayDo" data-v="settings">Settings</button><button data-a="trayDo" data-v="review">Reviews</button>`;
     $('#stage').appendChild(m);
+    /* place the menu next to the tray icon wherever the taskbar is */
+    const k = $('#stage').getBoundingClientRect().width / 1366, st = $('#stage').getBoundingClientRect(), t = $('#trayHY').getBoundingClientRect();
+    const tx = (t.left - st.left) / k, ty = (t.top - st.top) / k, tb = (t.bottom - st.top) / k;
+    m.style.right = 'auto'; m.style.bottom = 'auto';
+    if (S.display === 'right'){ m.style.left = (tx - m.offsetWidth - 8) + 'px'; m.style.top = Math.max(30, tb - m.offsetHeight) + 'px'; }
+    else { const br = ($('#taskbar').getBoundingClientRect().right - st.left) / k; m.style.left = Math.min(br - m.offsetWidth - 6, tx - 40) + 'px'; m.style.top = (ty - m.offsetHeight - 6) + 'px'; }
   },
   trayDo(v){ $('#trayMenu')?.remove(); if (v === 'toggle' && S.presenting){ A.presentEnd(); return; } if (v === 'toggle'){ const p = $('#pet'); p.style.display = p.style.display === 'none' ? '' : 'none'; closeBubble(); cap(p.style.display === 'none' ? 'Pet hidden. Reopen from the tray icon.' : 'Pet shown.'); }
+    else if (v === 'bring') bringPet('the tray menu');
     else if (v === 'panel') petPanel(); else if (v === 'pause') A.pauseMenu(); else if (v === 'settings') settings('pet'); else reviewWin(); },
   /* setup */
   suNext(){ S.setupStep = Math.min(SETUP_STEPS.length - 1, S.setupStep + 1); setupStep(); },
@@ -1054,16 +1466,27 @@ const A = {
   menuAnyway(){ S.mode = 'idle'; petMenu(); setPet('offline'); },
   waterPanel(){ waterPanel(); }, moveIntro(){ moveIntro(); }, focusMenu(){ focusMenu(); }, pomoMenu(){ pomoMenu(); },
   openReview(){ closeBubble(); if (S.mode === 'cue') setPet('idle'); reviewWin(); }, openMonth(){ monthWin(); },
-  /* reminder */
-  remWater(){ A.logW(250, true); showReminder(true); cap('Water logged inside the reminder; the water reason is struck through, the rest stays.'); },
-  remDone(){ setPet('celebrate'); say(`<h4>Nice</h4><p>Break recorded (self-reported). Next check in about 45 min.</p>`); later(() => { setPet('idle'); closeBubble(); }, 2000); cap('Completion: celebration, then idle.'); },
-  remSnooze(){ closeBubble(); setPet('snoozed'); cap('Snoozed: one 10-min snooze for the whole combined reminder. <button class="tgl" data-a="snoozeEnd">simulate 10 min later</button>'); },
-  snoozeEnd(){ setClock('Tue 11:25'); showReminder(); cap('After snooze: the same single reminder returns once (no stack of three).'); },
-  remDismiss(){ S.dismissals++; closeBubble(); setPet('idle');
-    if (S.dismissals >= 3){ say(`<h4>Fewer reminders?</h4><p>You've set aside 3 reminders today. That's fine. Would a lighter schedule suit you better?</p>${btn('Use Light', 'useLight', '', 'primary')}${btn('Keep Balanced', 'closeBubble')}`); cap('After 3 dismissals: gentle offer to reduce intensity, never escalation or guilt.'); }
-    else cap(`Dismissed (${S.dismissals}/3) - recorded as dismissed, never as done. <button class="tgl" data-a="redo">show reminder again</button>`); },
-  redo(){ showReminder(); }, useLight(){ S.intensity = 'Light'; toastPet('Switched to Light. You can change it in Settings.'); },
-  noResp(){ closeBubble(); setPet('waiting'); cap('No response for 10 min: bubble collapses to a badge. Logged as "offered, no response", not dismissed. Click the pet to reopen.'); S.mode = 'waiting'; },
+  /* reminder: one activity at a time */
+  remResp(v){ const [k, kind, ml] = String(v).split(':'); if (!S.acts || !S.acts[k]) return;
+    if (k === 'water' && kind === 'done') A.logW(+ml || 250, true);
+    remRecord(k, kind); closeBubble();
+    if (kind === 'done'){ setPet('celebrate'); later(() => { if (S.mode === 'celebrate') setPet('idle'); }, 1500); } else setPet(kind === 'snooze' ? 'snoozed' : 'idle', kind === 'snooze' ? `${ACTS[k].name} snoozed 10 min` : undefined);
+    if (kind === 'skip' && S.dismissals >= 3 && !S.lightOffered){ S.lightOffered = true; say(`<h4>Fewer reminders?</h4><p>You've skipped 3 reminders today. That's fine. Would a lighter schedule suit you better?</p>${btn('Use Light', 'useLight', '', 'primary')}${btn('Keep Balanced', 'closeBubble')}`); }
+    renderRemRev(); },
+  remAdv(v){ if (!S.acts) return; for (let i = 0; i < +v; i++){ setClockMin(nowMin() + 1); remTick(); } renderRemRev(); },
+  moveFromRem(){ if (S.acts && S.acts.movement) { S.acts.movement.status = 'active'; remLog('Movement: routine started'); } moveIntro(true); },
+  useLight(){ S.intensity = 'Light'; toastPet('Switched to Light. You can change it in Settings.'); },
+  /* pet size, look, recovery */
+  petSize(v){ S.scale = +v; drawPet(); syncSizeUI(); if ($('#bubble').dataset.menu) petMenu();
+    const m = `Pet size ${SIZES.find(z => z[0] === S.scale)?.[1] || S.scale + '%'} (${S.scale}%, ${petPx()} px). Kept in S.scale, so Settings and the pet menu show the same value after reopening.`; S.flow === 'petfix' ? petfixCap(m) : cap(m); },
+  bringPet(v){ $('#trayMenu')?.remove(); bringPet(v); },
+  simLost(){ closeBubble(); const d = $('#desk'), p = $('#pet'); petPos = {x: d.clientWidth + 220, y: d.clientHeight - 60}; p.style.left = petPos.x + 'px'; p.style.top = petPos.y + 'px';
+    petfixCap('<b>Pet lost:</b> it is off-screen (for example dragged past the edge, or left on a monitor that was unplugged), so it cannot be seen or clicked.'); },
+  simDisplay(v){ closeBubble(); S.display = v; applyDisplay(); if (v === 'normal'){ placePet(); }
+    petfixCap(v === 'small' ? '<b>Display change:</b> resolution dropped to 1024 x 640. The pet was left where the old screen was, outside the new work area (worst case: a missed display-change event).' : v === 'right' ? '<b>Display change:</b> taskbar moved to the right edge (Windows 10 allows this). The pet is now partly under the taskbar.' : 'Display restored to 1366 x 768 with the taskbar at the bottom.'); },
+  petLook(){ S.prevLook = !S.prevLook; $('#stage').classList.toggle('prevlook', S.prevLook); petfixCap(S.prevLook ? 'Showing the <b>previous</b> fully opaque pet for comparison.' : 'Showing the <b>revised</b> pet: body 85% opaque, bubble and controls fully opaque.'); },
+  simRestart(){ closeBubble(); closeWin(); petPos = null; drawPet(); setPet('idle'); petfixCap(`Simulated restart: the pet came back at its saved size (${S.scale}%, ${petPx()} px) in its home position above the clock. In the product the size is saved with the other pet settings.`); },
+  wkPlain(){ S.reviewPlain = !S.reviewPlain; reviewWin(); },
   /* water */
   logW(v, quiet){ const ml = +v; if (!ml || ml <= 0) return; S.water.push({id: S.wid++, t: S.clock.slice(4), ml}); if (quiet) return;
     const tot = waterTotal(); setPet(tot >= S.waterGoal ? 'celebrate' : 'idle');
@@ -1076,8 +1499,8 @@ const A = {
   /* movement */
   mvVer(v){ S.mv.ver = v; setPet('exercise'); moveStep(); }, mvDone(){ S.mv.done++; S.mv.step++; moveStep(); }, mvSkip(){ S.mv.skipped++; S.mv.step++; moveStep(); },
   mvStop(){ moveEnd(true); }, mvDay(v){ const d = DAYS[+v]; setClock(`${d} 11:20`); moveIntro(); },
-  mvLater(){ closeBubble(); setPet('idle'); toastPet("OK, I'll offer it again later today (once)."); },
-  mvSkipDay(){ closeBubble(); setPet('idle'); toastPet('Skipped for today. Recorded as skipped. No catch-up tomorrow.'); },
+  mvLater(){ const fr = S.mv && S.mv.fromRem && S.acts; closeBubble(); setPet('idle'); if (fr && S.acts.movement.status === 'active') { remRecord('movement', 'snooze'); toastPet('OK, movement snoozed for 10 min. Other reminders are unchanged.'); } else toastPet("OK, I'll offer it again later today (once)."); },
+  mvSkipDay(){ const fr = S.mv && S.mv.fromRem && S.acts; closeBubble(); setPet('idle'); if (fr) remRecord('movement', 'skip'); toastPet('Skipped for today. Recorded as skipped. No catch-up tomorrow.'); },
   /* focus etc. */
   focusStart(v){ const m = v === 'custom' ? Math.max(5, Math.min(240, +($('#fCustom')?.value || 45))) : +v; S.focusLeft = m - 1; closeBubble(); setPet('focus', `Focus ${m} min`); cap(`Focus on: reminders held, pet eyes closed, tag shows time. <button class="tgl" data-a="focusEnd">end focus</button> <button class="tgl" data-a="pomoMenu">start Pomodoro (asks to replace)</button>`); },
   focusEnd(){ setPet('idle'); toastPet('Focus ended. Reminders resume; missed ones are not replayed.'); },
@@ -1264,7 +1687,7 @@ function onField(e){
   const k = e.target.dataset?.in; if (!k) return;
   const v = e.target.value, d = S.recDraft;
   if (k === 'petName'){ S.petName = v || petById(S.pet).def; setPet(S.mode); }
-  if (k === 'scale'){ S.scale = +v; $('#scaleLbl').textContent = S.scale + '%'; drawPet(); }
+  if (k === 'scale'){ S.scale = +v; drawPet(); syncSizeUI(); }
   if (k === 'goal'){ const n = +v; if (n >= 500 && n <= 5000) S.waterGoal = n; }
   if (k === 'medTime'){ S.medTime = v || null; }
   if (k === 'hoursStart' && v) S.hours[0] = v;
@@ -1292,7 +1715,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape'){
     if (modalOpen()){ e.preventDefault(); return closeModal(); }
     if ($('#gallery').classList.contains('show')) return A.closeGallery();
-    if ($('#bubble').classList.contains('show')){ const b = $('#bubble'), had = b.dataset.panel || b.contains(document.activeElement); closeBubble(); delete b.dataset.panel; $('#ledger').classList.remove('inactive');
+    if ($('#bubble').classList.contains('show')){ const b = $('#bubble'), had = b.dataset.panel || b.contains(document.activeElement); closeBubble(); remCollapse(); delete b.dataset.panel; $('#ledger').classList.remove('inactive');
       if (had){ $('#workSurface').focus(); cap('Panel closed with Esc; focus moved to the simulated spreadsheet (work surface). In the product, Windows returns focus to the previous app; that is a build acceptance test.'); } return; }
     if ($('#trayMenu')) return $('#trayMenu').remove();
   }
@@ -1310,10 +1733,15 @@ document.addEventListener('keydown', e => {
     else onPetClick();
     st = null; });
 })();
+/* closing a reminder card without answering folds it into a badge: offered, not answered, nothing else pops up */
+function remCollapse(){
+  if (!S.acts || !S.remActive || S.acts[S.remActive].status !== 'showing') return false;
+  const k = S.remActive; S.acts[k].status = 'waiting'; setPet('waiting', `${ACTS[k].name} waiting`); remLog(`${ACTS[k].name}: closed without an answer, kept as a badge`); renderRemRev(); return true;
+}
 function onPetClick(){
   $('#trayMenu')?.remove();
-  if ($('#bubble').classList.contains('show')){ closeBubble(); return; }
-  if (S.mode === 'waiting' || S.mode === 'snoozed') return showReminder();
+  if ($('#bubble').classList.contains('show')){ closeBubble(); remCollapse(); return; }
+  if (S.acts && S.remActive && ['waiting', 'showing'].includes(S.acts[S.remActive].status)) return showRem(S.remActive);
   if (S.mode === 'paused') return say(`<h4>Coaching paused</h4>${btn('Resume coaching', 'pauseEnd', '', 'primary')}${btn('Open menu', 'menuAnyway')}`);
   if (S.mode === 'focus' && S.focusLeft) return say(`<h4>Focus on</h4><p class="small">${S.focusLeft} min left. Reminders are held.</p>${btn('End focus', 'focusEnd', '', 'primary')}${btn('Open menu', 'menuAnyway')}`);
   if (S.mode === 'meeting') return say(`<h4>In a meeting</h4>${btn('Meeting over', 'meeting', '', 'primary')}`);

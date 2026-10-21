@@ -3,7 +3,8 @@
 // Opens index.html from file://, clicks every flow in the reviewer index, clicks every visible action
 // in each flow's first screen (restarting the flow each time), walks primary buttons, checks the
 // keyboard path and pet drag, records console errors/warnings and any network request, saves screenshots,
-// and runs targeted STATE assertions (revision 2: persistence and undo, range deletion, focus, contract wording, water copy, proposed defaults).
+// and runs targeted STATE assertions (revision 2: persistence and undo, range deletion, focus, contract wording, water copy, proposed defaults;
+// revision 3, owner feedback 21 Oct: pet look, one reminder at a time, illustrated movement, visual weekly review, pet size, bring pet above clock).
 const path = require('path');
 const fs = require('fs');
 const { chromium } = require('playwright');
@@ -279,13 +280,15 @@ const SCOPE = '#bubble, #hyWin, #modalWrap.show #modal, #adminWin, #gallery.show
   await ev(() => A.logW(250, true)); 
   check('logging above the goal still works (manual logging available)', await ev(() => waterTotal() === 2000 + 500 + 250));
   await ev(() => F.reminder()); await page.waitForTimeout(150);
-  const r1 = await bubbleText();
-  check('pace model: 11:15 with 250 ml logged is behind (expected 390 ml)', await ev(() => paceExpected() === 390 && behindPace() === true) && /140 ml behind your own pace/.test(r1) && /about 390 ml expected/.test(r1));
+  check('pace model: 11:15 with 250 ml logged is behind (expected 390 ml), so water is due', await ev(() => paceExpected() === 390 && behindPace() === true && S.acts.water.status === 'due'));
   check('reminder labels the sample scenario', /Sample scenario/.test(await ev(() => document.querySelector('#capBox').innerText)));
-  await ev(() => { S.water = [{ id: 1, t: '09:50', ml: 500 }]; showReminder(); }); await page.waitForTimeout(100);
-  check('ahead of pace (500 ml at 11:15): no water reason is listed', !/behind your own pace/.test(await bubbleText()) && await ev(() => behindPace() === false));
-  await ev(() => { S.water = [{ id: 1, t: '09:50', ml: 2000 }]; showReminder(); }); await page.waitForTimeout(100);
-  check('goal reached: water not listed and reminders say so', !/Water:/.test(await bubbleText()) && /logging goal is reached/.test(await bubbleText()));
+  await ev(() => { A.remResp('movement:done'); A.remAdv(5); A.remResp('eye:done'); A.remAdv(5); }); await page.waitForTimeout(100);
+  const r1 = await bubbleText();
+  check('water card (its own turn, 11:25) names the pace gap: 180 ml behind, about 430 ml expected', await ev(() => S.remActive === 'water') && /180 ml behind your own pace/.test(r1) && /about 430 ml expected/.test(r1));
+  await ev(() => { F.reminder(); S.water = [{ id: 1, t: '09:50', ml: 500 }]; remTick(); A.remResp('movement:done'); A.remAdv(5); A.remResp('eye:done'); A.remAdv(10); }); await page.waitForTimeout(100);
+  check('ahead of pace (500 ml at 11:15): water is not due and never shown', await ev(() => behindPace() === false && S.acts.water.status === 'notdue' && !document.querySelector('[data-rem]') && /On your pace/.test(document.querySelector('#capBox').innerText)));
+  await ev(() => { F.reminder(); S.water = [{ id: 1, t: '09:50', ml: 2000 }]; remTick(); }); await page.waitForTimeout(100);
+  check('goal reached: water paused and the status strip says so', await ev(() => S.acts.water.status === 'goal' && /Goal reached/.test(document.querySelector('#capBox').innerText)) && !/Water:/.test(await bubbleText()));
   await reset(); await start('pomodoro'); await ev(() => A.pomoStart('25/5')); await ev(() => A.pomoBreak()); await page.waitForTimeout(100);
   const pb1 = await bubbleText();
   check('pomoBreak behind pace: 500 ml logged at 15:00 vs about 1220 ml expected', /720 ml behind your own pace/.test(pb1) && /about 1220 ml expected/.test(pb1));
@@ -322,6 +325,212 @@ const SCOPE = '#bubble, #hyWin, #modalWrap.show #modal, #adminWin, #gallery.show
   check('movement content is marked provisional pending content review', await ev(() => /Provisional/.test(document.querySelector('#hyBody').innerText) && /pending the separate content review/.test(document.querySelector('#hyBody').innerText)));
   check('simulation banner is intact', await ev(() => document.querySelector('#banner').innerText === 'Simulated prototype for design review. Not the product. No data is saved or sent.'));
 
+
+  // ---------------------------------------------------------------------------------------------
+  // Revision 3: owner feedback of 21 Oct (PR #4). One group per item; item 4 (deadline flow) is unchanged.
+  // ---------------------------------------------------------------------------------------------
+  const effOpacity = sel => ev(s2 => { let e = document.querySelector(s2), o = 1; while (e) { o *= +getComputedStyle(e).opacity; e = e.parentElement; } return Math.round(o * 1000) / 1000; }, sel);
+
+  // ---- 7. Item 1: pet a little more transparent; messages and controls fully opaque
+  G('7 pet look');
+  await reset(); await start('desktop');
+  const artOp = await ev(() => +getComputedStyle(document.querySelector('#petArt')).opacity);
+  check(`pet body opacity is between 0.75 and 0.85 (is ${artOp})`, artOp >= 0.75 && artOp <= 0.85);
+  check('pet menu bubble is fully opaque (effective opacity 1 up the whole tree)', await effOpacity('#bubble') === 1 && await ev(() => document.querySelector('#bubble').classList.contains('show')));
+  check('bubble buttons are fully opaque', await effOpacity('#bubble .btn') === 1);
+  await ev(() => { closeBubble(); setPet('waiting', 'Movement waiting'); });
+  check('state badge and text tag stay fully opaque while the body is translucent', await effOpacity('#petBadge') === 1 && await effOpacity('#petTag') === 1 && await effOpacity('#petArt') <= 0.85);
+  await ev(() => A.hc());
+  check('higher-contrast mode draws the pet solid (opacity 1)', await ev(() => +getComputedStyle(document.querySelector('#petArt')).opacity) === 1);
+  await ev(() => A.hc());
+  await start('petfix'); await click('#capBox [data-a="petLook"]');
+  check('reviewer compare shows the previous opaque pet, then the revised one', await ev(() => +getComputedStyle(document.querySelector('#petArt')).opacity) === 1 && (await (async () => { await click('#capBox [data-a="petLook"]'); return ev(() => +getComputedStyle(document.querySelector('#petArt')).opacity); })()) === artOp);
+
+  // ---- 8. Item 2: one of movement / eye rest / water at a time, each with its own response and status
+  G('8 one reminder at a time');
+  await reset(); await start('reminder');
+  await ev(() => { window.__maxRem = 0; const o = new MutationObserver(() => { window.__maxRem = Math.max(window.__maxRem, document.querySelectorAll('[data-rem]').length); }); o.observe(document.body, { subtree: true, childList: true, attributes: true }); window.__remObs = o; });
+  const remCount = () => ev(() => [...document.querySelectorAll('[data-rem]')].filter(e => e.offsetParent !== null).length);
+  const st = () => ev(() => JSON.parse(JSON.stringify(S.acts)));
+  check('flow opens with exactly ONE reminder card (movement first)', await remCount() === 1 && await ev(() => S.remActive === 'movement' && !!document.querySelector('#bubble [data-rem="movement"]')));
+  check('status strip shows each activity with its own status', await ev(() => { const r = [...document.querySelectorAll('#bubble .remStrip .rs')]; return r.length === 3 && r.map(x => x.dataset.k).join() === 'movement,eye,water' && r[0].dataset.status === 'showing' && r[1].dataset.status === 'due' && r[2].dataset.status === 'due'; }));
+  check('each card has its own responses (movement: start, already moved, snooze, skip)', await ev(() => ['movement:done', 'movement:snooze', 'movement:skip'].every(v => document.querySelector(`#bubble [data-a="remResp"][data-v="${v}"]`)) && !!document.querySelector('#bubble [data-a="moveFromRem"]')));
+  await click('#bubble [data-a="remResp"][data-v="movement:done"]');
+  let s1 = await st();
+  check('answering movement marks only movement done; eye rest and water stay due', s1.movement.status === 'done' && s1.eye.status === 'due' && s1.water.status === 'due');
+  check('no burst: no other reminder appears straight after an answer', await remCount() === 0);
+  await click('#capBox [data-a="remAdv"][data-v="1"]');
+  check('calm gap: 1 min later still no reminder', await remCount() === 0 && await ev(() => S.remActive === null));
+  await ev(() => A.remAdv(4)); await page.waitForTimeout(100);
+  check('after the 5-min calm gap exactly one reminder (eye rest) appears', await remCount() === 1 && await ev(() => S.remActive === 'eye' && !!document.querySelector('#bubble [data-rem="eye"]')));
+  await click('#bubble [data-a="remResp"][data-v="eye:snooze"]');
+  const s2 = await st();
+  check('snoozing eye rest snoozes only eye rest (movement keeps its done record, water still due)', s2.eye.status === 'snoozed' && JSON.stringify(s2.movement) === JSON.stringify(s1.movement) && s2.water.status === 'due');
+  await ev(() => A.remAdv(5)); await page.waitForTimeout(100);
+  check('next calm gap: water appears on its own', await remCount() === 1 && await ev(() => S.remActive === 'water' && !!document.querySelector('#bubble [data-rem="water"]')));
+  const beforeW = await st(), mlBefore = await ev(() => waterTotal());
+  await click('#bubble [data-a="remResp"][data-v="water:done:250"]');
+  const afterW = await st();
+  check('responding to WATER leaves movement and eye-rest status exactly unchanged', JSON.stringify(afterW.movement) === JSON.stringify(beforeW.movement) && JSON.stringify(afterW.eye) === JSON.stringify(beforeW.eye) && afterW.movement.status === 'done' && afterW.eye.status === 'snoozed');
+  check('water is recorded as done and 250 ml is logged', afterW.water.status === 'done' && await ev(() => waterTotal()) === mlBefore + 250);
+  await ev(() => A.remAdv(5)); await page.waitForTimeout(100);
+  check('snoozed eye rest returns once at 11:30, on its own', await remCount() === 1 && await ev(() => S.remActive === 'eye' && S.clock.endsWith('11:30')));
+  await click('#bubble [data-a="remResp"][data-v="eye:skip"]');
+  const s3 = await st();
+  check('Skip is recorded as skipped, never as done, and touches nothing else', s3.eye.status === 'skipped' && s3.movement.status === 'done' && s3.water.status === 'done');
+  check('never more than one reminder card in the DOM during the whole sequence', await ev(() => window.__maxRem) === 1);
+  await ev(() => A.remAdv(30)); await page.waitForTimeout(100);
+  const k30 = await ev(() => S.remActive);
+  await ev(() => A.closeBubble()); await page.waitForTimeout(80);
+  check('closing a card without answering folds it into a badge (waiting), no other card shows', await ev(k => S.acts[k].status === 'waiting' && S.mode === 'waiting', k30) && await remCount() === 0 && await ev(() => window.__maxRem) === 1);
+  await ev(() => { onPetClick(); }); 
+  check('clicking the pet reopens that same reminder', await ev(k => S.remActive === k && !!document.querySelector(`#bubble [data-rem="${k}"]`), k30));
+  await ev(() => window.__remObs.disconnect());
+  await start('reminder'); await click('#bubble [data-a="moveFromRem"]'); await click('#bubble [data-a="mvVer"][data-v="seated"]');
+  check('starting the routine from the movement card shows movement "In progress" only', await ev(() => S.acts.movement.status === 'active' && S.acts.eye.status === 'due' && S.acts.water.status === 'due'));
+  await click('#bubble [data-a="mvStop"]');
+  check('stopping the routine records movement as partly done; eye rest and water untouched', await ev(() => S.acts.movement.status === 'partial' && S.acts.eye.status === 'due' && S.acts.water.status === 'due' && S.remActive === null));
+  check('Reminders tab explains one reminder at a time with a calm gap', await (async () => { await ev(() => settings('reminders')); return /One reminder at a time/.test(await ev(() => document.querySelector('#hyBody').innerText)); })());
+
+  // ---- 9. Item 3: movement routine says WHAT to do
+  G('9 movement routine');
+  await reset(); await start('movement');
+  check('intro lists the three named movements with illustrations', await ev(() => document.querySelectorAll('#bubble .mvList li').length === 3 && document.querySelectorAll('#bubble .mvList svg.mvFig').length === 3));
+  await click('#bubble [data-a="mvVer"][data-v="standing"]');
+  const panel = () => ev(() => { const p = document.querySelector('#mvPanel'); if (!p) return null; return {
+    key: p.dataset.mv, name: p.querySelector('.mvName')?.innerText.trim(), fig: !!p.querySelector('svg.mvFig[role="img"][aria-label]'), ghost: p.querySelectorAll('svg.mvFig .gh').length,
+    steps: p.querySelectorAll('ol.mvSteps li').length, dose: p.querySelector('.mvDose')?.innerText || '', alt: p.querySelector('.mvAlt')?.innerText || '',
+    skip: !!p.querySelector('[data-a="mvSkip"]'), stop: !!p.querySelector('[data-a="mvStop"]'), done: !!p.querySelector('[data-a="mvDone"]'), prov: /Provisional: pending content review/.test(p.innerText), text: p.innerText }; });
+  const seen = [];
+  for (let i = 0; i < 3; i++) {
+    const pn = await panel(); seen.push(pn);
+    check(`panel ${i + 1} (${pn && pn.name}): name, illustration, 3-5 numbered steps, dose, alternative, Skip and Stop, provisional label`, pn && pn.name && pn.fig && pn.ghost >= 1 && pn.steps >= 3 && pn.steps <= 5 && /(\d+\s?s\b|\d+ (slow )?(raises|rolls|times)|min)/.test(pn.dose) && /seated/i.test(pn.alt) && pn.skip && pn.stop && pn.done && pn.prov, JSON.stringify(pn && { ...pn, text: undefined }));
+    if (i < 2) await click('#bubble [data-a="mvDone"]');
+  }
+  check('three different desk-safe movements shown (neck side stretch, seated spinal twist, standing calf raises)', seen.map(x => x.name).join('|') === 'Neck side stretch|Seated spinal twist|Standing calf raises');
+  check('standing calf raises offer a seated alternative (seated heel raises)', /Seated alternative: seated heel raises/i.test(seen[2].alt));
+  await click('#bubble [data-a="mvSkip"]');
+  check('Skip on the last movement ends as partial (2 done, 1 skipped), not complete', /Saved as partial/.test(await bubbleText()) && /2 of 3 movements done, 1 skipped/.test(await bubbleText()));
+  await start('movement'); await click('#bubble [data-a="mvVer"][data-v="seated"]'); await click('#bubble [data-a="mvDone"]'); await click('#bubble [data-a="mvDone"]');
+  check('seated version swaps in the seated alternative (Seated heel raises) with its own figure', (await panel()).name === 'Seated heel raises' && (await panel()).fig);
+  await click('#bubble [data-a="mvStop"]');
+  check('Stop ends the routine and records partial', /stopped early/.test(await bubbleText()));
+  const lib = await ev(() => Object.values(ROUTINES).map(r => ({ n: r.name, s: r.steps.length, a: !!r.alt, d: !!r.dose })));
+  check(`library has at least 3 routines, each with 3-5 steps, dose and alternative (${lib.length})`, lib.length >= 3 && lib.every(r => r.s >= 3 && r.s <= 5 && r.a && r.d));
+  check('no medical claims in movement content', await ev(() => !/cure|treat|prevent|relie|heal|therap|injur|posture correct|reduces? (pain|risk)/i.test(JSON.stringify(ROUTINES))));
+  await start('movement'); await click('#bubble [data-a="mvVer"][data-v="standing"]');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  check('reduced motion: figure animation stops, still start pose + dashed target pose remain', await ev(() => getComputedStyle(document.querySelector('#mvPanel .a-tilt')).animationName === 'none' && document.querySelectorAll('#mvPanel .gh').length >= 1));
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  check('with motion allowed the figure is animated', await ev(() => getComputedStyle(document.querySelector('#mvPanel .a-tilt')).animationName === 'mvTilt'));
+
+  // ---- 10. Item 5: visual weekly review
+  G('10 weekly review visual');
+  await reset(); await start('weekly'); await click('#bubble [data-a="openReview"]');
+  check('review renders three progress rings with one segment per workday', await ev(() => document.querySelectorAll('.wkRing > svg').length === 3 && [...document.querySelectorAll('.wkRing > svg')].every(s2 => s2.querySelectorAll('.rseg').length === 6)));
+  check('week strip shows 7 days x 3 activities', await ev(() => document.querySelectorAll('.wkStrip .mk').length === 21 && document.querySelectorAll('.wkStrip .dh').length === 7));
+  check('hero and concise highlights (2-3) are shown', await ev(() => !!document.querySelector('.wkHero .wkTitle') && document.querySelectorAll('.hi').length >= 2 && document.querySelectorAll('.hi').length <= 3));
+  await click('#hyBody [data-a="wkVar"][data-v="missing"]');
+  const nd = await ev(() => { const n = document.querySelector('.rseg.n'), z = document.querySelector('.rseg.z'), mn = document.querySelector('.wkStrip .mk.n'), mz = document.querySelector('.wkStrip .mk.z');
+    return { nFill: n && n.getAttribute('fill'), zFill: z && z.getAttribute('fill'), zStroke: z && z.getAttribute('stroke'), nDash: n && n.getAttribute('stroke-dasharray'), mnTxt: mn && mn.innerText.trim(), mzTxt: mz && mz.innerText.trim(), mnBg: mn && getComputedStyle(mn).backgroundImage, mzBg: mz && getComputedStyle(mz).backgroundImage, legend: document.querySelector('#wkLegend').innerText }; });
+  check('"no data" ring segments are hatched with a dashed edge', /^url\(#h-/.test(nd.nFill || '') && !!nd.nDash, JSON.stringify(nd));
+  check('a measured 0 is drawn differently: white segment with a coloured outline', nd.zFill === '#fff' && /^#/.test(nd.zStroke || '') && nd.zFill !== nd.nFill);
+  check('week strip: no data shows "–" on hatching, 0 shows "0" on plain white', nd.mnTxt === '–' && nd.mzTxt === '0' && /repeating-linear-gradient/.test(nd.mnBg) && nd.mzBg === 'none');
+  check('legend explains no data (app not running) vs 0 (app running)', /no data: app not running/.test(nd.legend) && /0: app running, not done/.test(nd.legend));
+  await click('#hyBody [data-a="wkVar"][data-v="mixed"]');
+  await click('#hyBody [data-a="sug"][data-v="afternoon"]');
+  check('suggestion Apply still bound to state in the new layout (afternoon 16:00)', await ev(() => S.afternoonAt === '16:00' && /Applied/.test(document.querySelector('#sug-afternoon').innerText)));
+  await click('#hyBody [data-a="sugUndo"][data-v="afternoon"]');
+  check('Undo restores the previous value', await ev(() => S.afternoonAt === '15:00' && !S.sugApplied.afternoon));
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  check('prefers-reduced-motion: ring and strip animations are off', await ev(() => getComputedStyle(document.querySelector('.rseg')).animationName === 'none' && getComputedStyle(document.querySelector('.mk')).animationName === 'none'));
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  check('with motion allowed the rings animate in', await ev(() => getComputedStyle(document.querySelector('.rseg')).animationName === 'segIn'));
+  await ev(() => A.rm());
+  check('the in-app Reduced motion setting also stops the animations', await ev(() => getComputedStyle(document.querySelector('.rseg')).animationName === 'none'));
+  await ev(() => A.rm()); await ev(() => A.openReview());
+  await click('#hyBody [data-a="wkPlain"]');
+  check('"Show as table" gives a plain readable view: table, no rings, toggle pressed', await ev(() => !!document.querySelector('#wkTable') && !document.querySelector('.wkRing') && document.querySelector('[data-a="wkPlain"]').getAttribute('aria-pressed') === 'true'));
+  check('table view keeps "no data" distinct from "0" and lists what went well', await (async () => { await click('#hyBody [data-a="wkVar"][data-v="missing"]'); const t = await ev(() => document.querySelector('#wkTable').innerText); return /no data/.test(t) && /\t0\t|\b0\b/.test(t) && /What went well/.test(await ev(() => document.querySelector('#hyBody').innerText)); })());
+  await click('#hyBody [data-a="wkVar"][data-v="mixed"]');
+  await click('#hyBody [data-a="sug"][data-v="serving"]');
+  check('suggestions work in the table view too (750 ml button applied, then undone)', await ev(() => S.servings.includes(750)) && await (async () => { await click('#hyBody [data-a="sugUndo"][data-v="serving"]'); return ev(() => S.servings.join() === '150,250,500'); })());
+  await click('#hyBody [data-a="wkPlain"]');
+  check('toggle returns to the graphics', await ev(() => !!document.querySelector('.wkRing') && !document.querySelector('#wkTable')));
+
+  // ---- 11. Item 6: pet size control
+  G('11 pet size');
+  await reset(); await start('desktop');
+  const petBox = () => ev(() => { const p = document.querySelector('#pet'); return { w: p.offsetWidth, h: p.offsetHeight, bottom: p.offsetTop + p.offsetHeight }; });
+  const b0 = await petBox();
+  check('pet menu has a size control bound to S.scale (Medium pressed)', b0.w === 128 && await ev(() => document.querySelector('#bubble [data-a="petSize"][data-v="100"]').getAttribute('aria-pressed') === 'true'));
+  await click('#bubble [data-a="petSize"][data-v="125"]');
+  const b1 = await petBox();
+  check('choosing Large in the pet menu resizes the pet live (128 -> 160 px)', b1.w === 160 && b1.h === 160 && await ev(() => S.scale === 125));
+  check('resizing keeps the pet\'s bottom edge in place', b1.bottom === b0.bottom);
+  check('pet menu shows Large pressed after re-render', await ev(() => document.querySelector('#bubble [data-a="petSize"][data-v="125"]').getAttribute('aria-pressed') === 'true'));
+  await ev(() => A.settings('pet'));
+  check('Settings > Pet shows the same size (Large chip + slider 125)', await ev(() => document.querySelector('#hyBody [data-a="petSize"][data-v="125"]').getAttribute('aria-pressed') === 'true' && document.querySelector('#petScale').value === '125'));
+  check('Settings notes the size control is required in the live product', /Required in the live product/.test(await ev(() => document.querySelector('#hyBody').innerText)));
+  await click('#hyBody [data-a="petSize"][data-v="75"]');
+  check('Small in Settings resizes the pet live (96 px)', (await petBox()).w === 96);
+  await page.$eval('#petScale', el => { el.value = 150; el.dispatchEvent(new Event('input', { bubbles: true })); });
+  check('slider (75-150 %) resizes the pet to 192 px and updates the chips', (await petBox()).w === 192 && await ev(() => document.querySelector('#hyBody [data-a="petSize"][data-v="150"]').getAttribute('aria-pressed') === 'true'));
+  await ev(() => { closeWin(); petMenu(); });
+  check('size persists on reopen: pet menu shows XL', await ev(() => document.querySelector('#bubble [data-a="petSize"][data-v="150"]').getAttribute('aria-pressed') === 'true'));
+  await ev(() => A.settings('reminders')); await ev(() => A.settings('pet'));
+  check('size persists on reopening Settings (slider 150)', await ev(() => document.querySelector('#petScale').value === '150' && S.scale === 150));
+  await ev(() => { S.flow = 'petfix'; A.simRestart(); });
+  check('size persists after a simulated app restart (192 px)', (await petBox()).w === 192);
+
+  // ---- 12. Item 7: Bring pet above clock (tray menu and Settings), after a lost pet and after display changes
+  G('12 bring pet above clock');
+  const geom = () => ev(() => { const r = s2 => { const b = document.querySelector(s2).getBoundingClientRect(); return { l: b.left, t: b.top, r: b.right, b: b.bottom, w: b.width }; };
+    return { pet: r('#pet'), desk: r('#desk'), clock: r('#clock'), bar: r('#taskbar'), shown: document.querySelector('#pet').style.display !== 'none' }; });
+  const inside = g => g.shown && g.pet.l >= g.desk.l - 0.5 && g.pet.r <= g.desk.r + 0.5 && g.pet.t >= g.desk.t - 0.5 && g.pet.b <= g.desk.b + 0.5;
+  const above = g => { const cx = (g.clock.l + g.clock.r) / 2; return g.pet.b <= g.clock.t + 0.5 && g.clock.t - g.pet.b < 40 && g.pet.l <= cx && cx <= g.pet.r; };
+  const trayBring = async () => { await click('#trayHY'); await click('#trayMenu [data-a="trayDo"][data-v="bring"]'); await page.waitForTimeout(80); };
+  const settingsBring = async () => { await ev(() => A.settings('pet')); await click('#bringCard [data-a="bringPet"]'); await page.waitForTimeout(80); };
+  await reset(); await start('petfix');
+  check('tray menu offers "Bring pet above clock"', await (async () => { await click('#trayHY'); const ok = await ev(() => /Bring pet above clock/.test(document.querySelector('#trayMenu').innerText)); await click('#trayHY'); return ok; })());
+  await click('#capBox [data-a="simLost"]');
+  check('simulated lost pet is outside the work area', !inside(await geom()));
+  await trayBring();
+  let g = await geom();
+  check('from the TRAY: lost pet returns directly above the clock', above(g), JSON.stringify(g));
+  check('from the TRAY: pet bounding box is inside the visible work area', inside(g), JSON.stringify(g));
+  await ev(() => A.simLost()); await settingsBring(); g = await geom();
+  check('from SETTINGS: lost pet returns above the clock and inside the work area', above(g) && inside(g), JSON.stringify(g));
+  await ev(() => closeWin()); await ev(() => A.simDisplay('small')); g = await geom();
+  check('display change to 1024 x 640 strands the pet outside the new work area', !inside(g) && g.desk.r < 1100);
+  await trayBring(); g = await geom();
+  check('after the display change, TRAY bring puts the pet above the clock inside the smaller work area', above(g) && inside(g), JSON.stringify(g));
+  await ev(() => A.simLost()); await settingsBring(); g = await geom();
+  check('after the display change, SETTINGS bring also works (above clock, inside)', above(g) && inside(g), JSON.stringify(g));
+  await ev(() => { closeWin(); S.scale = 150; drawPet(); A.simLost(); }); await trayBring(); g = await geom();
+  check('Extra-large pet is still placed fully inside the smaller work area, above the clock', above(g) && inside(g) && g.pet.w === 192, JSON.stringify(g));
+  await ev(() => { S.scale = 100; drawPet(); A.simDisplay('normal'); A.simDisplay('right'); }); g = await geom();
+  check('taskbar moved to the right leaves the pet partly outside the work area', !inside(g));
+  await trayBring(); g = await geom();
+  check('taskbar on the right: bring puts the pet inside the work area, beside the clock (bottom-right, next to the taskbar)', inside(g) && g.pet.r <= g.bar.l + 0.5 && g.pet.b > g.clock.t && g.pet.r > g.desk.r - 30, JSON.stringify(g));
+  await ev(() => A.simLost()); await settingsBring(); g = await geom();
+  check('taskbar on the right: SETTINGS bring also recovers the pet inside the work area', inside(g) && g.pet.r <= g.bar.l + 0.5, JSON.stringify(g));
+  await ev(() => { closeWin(); A.simDisplay('normal'); A.simLost(); }); await trayBring(); g = await geom();
+  check('display restored: bring returns the pet above the clock at full resolution', above(g) && inside(g) && g.desk.r > 1300, JSON.stringify(g));
+
+  // ---- 13. Kept as they were
+  G('13 unchanged decisions');
+  await reset(); await ev(() => settings('reminders'));
+  const prop = [await ev(() => document.querySelectorAll('#hyBody .proposed').length)];
+  await ev(() => settings('camera')); prop.push(await ev(() => document.querySelectorAll('#hyBody .proposed').length));
+  check('the three "Proposed default, owner to confirm" labels are still shown (2 on Reminders, 1 on Posture check)', prop[0] === 2 && prop[1] === 1 && (src.match(/Proposed default, owner to confirm/g) || []).length >= 2);
+  check('no proposed default is recorded as approved', !/(Proposed default|proposed default)[^<]{0,40}approved/i.test(src) && !/owner approved/i.test(src));
+  await start('admin');
+  check('per-user restore rule with the 7-day maximum is unchanged (owner decision)', /7 days is the maximum wait \(owner decision, 21 Oct\)/.test(await ev(() => document.querySelector('#adminBody').innerText)));
+  await start('recovery');
+  check('deadline / recovery-day flow unchanged (check-in offered with Yes / No)', await ev(() => !!document.querySelector('#bubble [data-a="recYes"]') && !!document.querySelector('#bubble [data-a="recNo"]')));
+  check('simulation banner and Draft labels intact', await ev(() => document.querySelector('#banner').innerText === 'Simulated prototype for design review. Not the product. No data is saved or sent.') && /Draft pending contract/.test(src));
+
   const passed = results.filter(r => r.ok).length, failed = results.length - passed;
   const byGroup = {}; results.forEach(r => { byGroup[r.group] = byGroup[r.group] || { pass: 0, fail: 0 }; byGroup[r.group][r.ok ? 'pass' : 'fail']++; });
   console.log('\nASSERTIONS');
@@ -335,11 +544,28 @@ const SCOPE = '#bubble, #hyWin, #modalWrap.show #modal, #adminWin, #gallery.show
   await start('reminder'); await snap('01-combined-reminder.png');
   await start('setup'); await clickAction('suNext|'); await page.check('input[data-v="lan"]'); await page.waitForTimeout(200);
   await clickAction('suCheck|'); await page.waitForTimeout(700); await snap('02-setup-pairing.png');
-  await start('weekly'); await clickAction('openReview|'); await clickAction('wkVar|mixed'); await snap('03-weekly-review-mixed.png');
+  const slow = async name => { await page.waitForTimeout(1500); await page.screenshot({ path: path.join(shots, name) }); };
+  await start('weekly'); await clickAction('openReview|'); await clickAction('wkVar|mixed'); await slow('03-weekly-review-mixed.png');
   await start('monthly'); await snap('04-monthly-progress.png');
   await start('sharing'); await clickAction('shToggle|hydration'); await snap('05-sharing-preview.png');
   await start('sharing'); await click('#hyBody [data-a="shDelete"][data-v="hydration"]'); await click('#modal input[data-v="range"]'); await page.fill('#delFrom', '2026-10-12'); await page.fill('#delTo', '2026-10-16'); await click('#modal [data-a="shDelAsk"]'); await click('#modal [data-a="shDelGo"]'); await page.waitForTimeout(1100); await snap('07-delete-range-receipt.png');
   await start('camera'); await clickAction('camStart|allowed'); await page.waitForTimeout(800); await snap('06-camera-calibration.png');
+  // revision 3 screens
+  await start('reminder'); await ev(() => { A.remResp('movement:done'); A.remAdv(5); A.remResp('eye:snooze'); A.remAdv(5); }); await snap('09-reminder-water-own-turn.png');
+  await start('movement'); await slow('10-movement-routine-intro.png');
+  await clickAction('mvVer|standing'); await slow('11-movement-routine-step.png');
+  await clickAction('mvDone|'); await clickAction('mvDone|'); await slow('12-movement-seated-alternative.png');
+  await start('weekly'); await clickAction('openReview|'); await clickAction('wkVar|strong'); await slow('13-weekly-review-strong.png');
+  await clickAction('wkVar|missing'); await slow('14-weekly-review-no-data-vs-zero.png');
+  await clickAction('wkVar|mixed'); await clickAction('wkPlain|'); await slow('15-weekly-review-table-view.png'); await clickAction('wkPlain|');
+  await start('petfix'); await ev(() => A.petSize(125)); await ev(() => A.settings('pet')); await ev(() => { document.querySelector('#hyBody .content').scrollTop = 330; }); await snap('16-pet-size-settings.png');
+  await start('petfix'); await ev(() => A.petSize(125)); await snap('17-pet-menu-size-and-look.png');
+  await page.screenshot({ path: path.join(shots, '18-pet-look-revised-detail.png'), clip: { x: 820, y: 330, width: 546, height: 438 } });
+  await ev(() => A.petLook()); await page.waitForTimeout(200); await page.screenshot({ path: path.join(shots, '19-pet-look-previous-detail.png'), clip: { x: 820, y: 330, width: 546, height: 438 } }); await ev(() => A.petLook());
+  await ev(() => A.petSize(100)); await ev(() => A.simDisplay('small')); await click('#trayHY'); await snap('20-pet-lost-after-display-change.png');
+  await click('#trayMenu [data-a="trayDo"][data-v="bring"]'); await snap('21-bring-pet-above-clock.png');
+  await ev(() => { A.simDisplay('right'); }); await click('#trayHY'); await click('#trayMenu [data-a="trayDo"][data-v="bring"]'); await snap('22-bring-pet-taskbar-right.png');
+  await ev(() => A.simDisplay('normal'));
 
   await browser.close();
   console.log(JSON.stringify({ assertions: { passed, failed, total: results.length }, flows: flows.length, perFlowFirstScreenActions: perFlow, clicks, keyboard: { focusedInBubble, bubbleClosed }, petLeftAfterDrag: left, networkRequests: requests, problems }, null, 2));
