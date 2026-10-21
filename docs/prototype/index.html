@@ -6,7 +6,7 @@
 <title>HealthierYou prototype (simulated)</title>
 <!--
   HealthierYou V1/V2 SIMULATED clickable prototype for design review.
-  Not product code. No network calls, no storage, no camera access.
+  Not product code. No network calls, no storage, no camera access. Changes live in the in-memory state object S only.
   Structure: CSS -> static desktop markup -> JS (state S, pet art, render helpers, actions A, flows F).
   Spec: docs/Wireframes_V1_V2.md
 -->
@@ -18,7 +18,9 @@
   --blue:#0072B2;--orange:#E69F00;--verm:#D55E00;--green:#009E73;--sky:#56B4E9;
   --fs:14px;
 }
+#workSurface:focus-visible{outline:3px solid #1a73e8;outline-offset:-3px}
 .hc{--ink:#000;--muted:#222;--line:#000;--acc:#003f5c;--soft:#fff}
+[hidden]{display:none!important}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:#2b3236;font-family:"Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif;color:var(--ink)}
 button{font:inherit;cursor:pointer}
@@ -62,6 +64,7 @@ h2{font-size:1.35em;margin:0 0 6px}h3{font-size:1.05em;margin:16px 0 6px}
 p{margin:6px 0;line-height:1.45}
 .muted{color:var(--muted)}.small{font-size:.86em}
 .draft{display:inline-block;background:#fdecc8;color:#5a4100;border:1px dashed #b8892a;border-radius:4px;padding:1px 6px;font-size:11.5px;font-weight:600;vertical-align:middle}
+.proposed{display:inline-block;background:#e8f0fe;color:#17325e;border:1px dashed #4a6fb5;border-radius:4px;padding:1px 6px;font-size:11.5px;font-weight:600;vertical-align:middle}
 .v2tag,.v3tag{display:inline-block;border-radius:4px;padding:0 5px;font-size:11px;font-weight:700;vertical-align:middle;border:1px solid}
 .v2tag{color:#3b4cb0;border-color:#8c99e0;background:#eef0fd}
 .v3tag{color:#666;border-color:#bbb;background:#f2f2f2}
@@ -144,6 +147,7 @@ code,.mono{font-family:Consolas,monospace;font-size:.9em}
 /* modal */
 #modalWrap{position:absolute;inset:0;background:#0006;z-index:50;display:none;align-items:center;justify-content:center}
 #modalWrap.show{display:flex}
+#modal:focus{outline:none}
 #modal{background:#fff;border-radius:10px;width:560px;max-height:600px;overflow:auto;padding:18px 22px;box-shadow:0 18px 48px #0005;font-size:var(--fs)}
 /* reviewer panel */
 #rev{position:absolute;left:0;top:26px;bottom:40px;width:240px;background:#262b48;color:#eef0ff;z-index:90;display:flex;flex-direction:column;font-size:12.5px;border-right:3px dashed #8f97ff}
@@ -208,7 +212,7 @@ code,.mono{font-family:Consolas,monospace;font-size:.9em}
       <div class="titlebar"><span class="t">Ledger_Q3.xlsx &mdash; Spreadsheet app (simulated, fictional data)</span><button class="x" tabindex="-1" aria-hidden="true">&#x2715;</button></div>
       <div class="ribbon"><b>Home</b><span>Insert</span><span>Formulas</span><span>Data</span><span>Review</span><span>View</span></div>
       <div class="fx"><b>F7</b><span>=F6+D7-E7</span></div>
-      <div style="overflow:hidden;flex:1"><table id="sheet"></table></div>
+      <div id="workSurface" tabindex="-1" role="group" aria-label="Spreadsheet work surface (simulated)" style="overflow:hidden;flex:1"><table id="sheet"></table></div>
     </div>
     <div class="win" id="hyWin" style="display:none" role="dialog" aria-label="HealthierYou">
       <div class="titlebar"><span class="t" id="hyTitle">HealthierYou</span><button class="x" data-a="closeWin" aria-label="Close window">&#x2715;</button></div>
@@ -225,7 +229,7 @@ code,.mono{font-family:Consolas,monospace;font-size:.9em}
       <div id="petTag"></div>
     </div>
     <div id="bubble" role="dialog" aria-live="polite"></div>
-    <div id="modalWrap"><div id="modal" role="dialog" aria-modal="true"></div></div>
+    <div id="modalWrap"><div id="modal" role="dialog" aria-modal="true" tabindex="-1"></div></div>
     <div id="gallery" role="dialog" aria-label="Pet state gallery"></div>
   </div>
   <div id="taskbar">
@@ -252,6 +256,8 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':
 const btn = (label, a, v = '', cls = '') => `<button class="btn ${cls}" data-a="${a}" data-v="${esc(v)}">${label}</button>`;
 const sw = (on, a, v, label) => `<button class="sw" role="switch" aria-checked="${!!on}" aria-label="${esc(label)}" data-a="${a}" data-v="${esc(v)}"></button>`;
 const DRAFT = '<span class="draft">Draft pending contract</span>';
+const PROPOSED = '<span class="proposed">Proposed default, owner to confirm</span>';
+const PROVISIONAL = '<span class="draft">Provisional, pending content review</span>';
 const V2 = '<span class="v2tag">V2</span>';
 const DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 
@@ -264,7 +270,9 @@ const S0 = () => ({
   intensity: 'Balanced', cats: {movement:true, eye:true, hydration:true}, autoPresent: true, camHint: false,
   server: 'paired', lastSync: '11:40', sharing: {hydration:false, outcomes:false, sessions:false, phone:false, camera:false}, pending: {},
   dismissals: 0, mode: 'idle', focusLeft: 0, paused: false, meeting: false,
-  pomo: null, pomoAuto: false, phone: [], recovery: null,
+  pomo: null, pomoAuto: false, phone: [], recovery: null, recDraft: null,
+  afternoonAt: '15:00', mvDefault: 'Ask each time', sugApplied: {}, sugPrev: {}, sugHidden: {},
+  longDay: true, longDayHrs: 9, presenting: false, tombstones: [], del: null, restore: null,
   camera: 'off', medTime: null, setupStep: 0, connChoice: 'local', slipOutcome: 'ok', reviewVariant: 'strong', monthVariant: 'normal', monthMetric: 'water', monthTable: false, monthBase: true,
   mv: null, flow: null,
 });
@@ -374,6 +382,7 @@ function placePet(){
 /* ---------- bubble (pet-led UI) ---------- */
 let bubbleExpanded = false;
 function say(html, {wide = false, expanded = false, close = true} = {}){
+  if (S.presenting) return; /* proposed default: during a presentation no bubble is shown at all */
   const b = $('#bubble');
   b.className = 'show' + (wide ? ' wide' : '');
   b.innerHTML = (close ? `<button class="bx" data-a="closeBubble" aria-label="Close (Escape)">&#x2715;</button>` : '') + html;
@@ -398,8 +407,35 @@ function openWin(title, html){
   $('#ledger').classList.add('inactive');
 }
 function closeWin(){ $('#hyWin').style.display = 'none'; $('#ledger').classList.remove('inactive'); }
-function modal(html){ $('#modal').innerHTML = html; $('#modalWrap').classList.add('show'); const f = $('#modal button'); if (f) f.focus(); }
-function closeModal(){ $('#modalWrap').classList.remove('show'); }
+/* Modal: focus moves in, Tab/Shift+Tab stay inside, Escape or Cancel closes and focus returns to the invoking control.
+   (A browser page can only simulate this; real Windows focus behaviour is a build acceptance test, architecture A8.) */
+let modalOpener = null;
+const modalOpen = () => $('#modalWrap').classList.contains('show');
+function modalFocusables(){
+  const seen = new Set();
+  return [...document.querySelectorAll('#modal :is(button,input,select,textarea,a[href],[tabindex]):not([disabled]):not([tabindex="-1"])')].filter(e => {
+    if (e.offsetParent === null) return false;
+    if (e.type === 'radio'){ if (seen.has(e.name)) return false; const g = [...document.querySelectorAll(`#modal input[type=radio][name="${e.name}"]`)]; if ((g.find(r => r.checked) || g[0]) !== e) return false; seen.add(e.name); }
+    return true;
+  });
+}
+function modal(html){
+  if (!modalOpen()){ const ae = document.activeElement; modalOpener = ae && ae !== document.body ? {el: ae, a: ae.dataset && ae.dataset.a, v: ae.dataset && ae.dataset.v} : null; }
+  const m = $('#modal'); m.innerHTML = html;
+  const h = m.querySelector('h2'); if (h){ h.id = 'modalTitle'; m.setAttribute('aria-labelledby', 'modalTitle'); }
+  $('#modalWrap').classList.add('show');
+  const f = modalFocusables()[0] || m; f.focus();
+}
+function closeModal(){
+  if (!modalOpen()) return;
+  $('#modalWrap').classList.remove('show');
+  const o = modalOpener; modalOpener = null; let el = null;
+  if (o){
+    if (o.el && o.el.isConnected && o.el.offsetParent !== null) el = o.el;
+    else if (o.a) el = [...document.querySelectorAll(`[data-a="${o.a}"]`)].find(x => x.offsetParent !== null && x.dataset.v === o.v);
+  }
+  (el || $('#workSurface')).focus();
+}
 function setClock(t){ S.clock = t; $('#clock').textContent = t; }
 let capState = {title:'', step:'', ids:''};
 function cap(step, ids){ if (ids !== undefined) capState.ids = ids; capState.step = step; renderCap(); }
@@ -465,6 +501,17 @@ function renderRev(){
 
 /* ---------- pet menu (expanded bubble) ---------- */
 function waterTotal(){ return S.water.reduce((s, w) => s + w.ml, 0); }
+const goalReached = () => waterTotal() >= S.waterGoal;
+const toMin = t => { const [h, m] = String(t).split(':').map(Number); return h * 60 + (m || 0); };
+/* Pace model (sample, linear): the user's own goal spread evenly across their own work hours. A rough guide, not a target. */
+function paceExpected(){
+  const now = toMin(S.clock.slice(4)), a = toMin(S.hours[0]), b = toMin(S.hours[1]);
+  const frac = Math.max(0, Math.min(1, (now - a) / Math.max(1, b - a)));
+  return Math.round(S.waterGoal * frac / 10) * 10;
+}
+/* behind current-time pace: logged is at least 100 ml under the expected-by-now amount, and the goal is not yet reached */
+const behindPace = () => !goalReached() && paceExpected() - waterTotal() >= 100;
+const GOAL_MSG = 'Your logging goal is reached; hydration reminders are paused. Manual logging stays available.';
 function petMenu(){
   if (S.mode === 'pomodoro' && S.pomo) return pomoControls();
   if (S.server === 'offline' && S.mode === 'offline') return offlineBubble();
@@ -487,7 +534,7 @@ function settings(tab = 'pet'){
   openWin('HealthierYou - Settings', `<nav aria-label="Settings sections">${nav}<hr style="border:0;border-top:1px solid var(--line)"><button data-a="openReview">Weekly review</button><button data-a="openMonth">Monthly progress</button></nav><div class="content">${TAB[tab]()}</div>`);
 }
 const TAB = {};
-TAB.pet = () => `<h2>Pet</h2><p class="muted">Ten pets share one set of actions. Four are drawn as placeholders here; six show where art is pending the visual-direction decision.</p>
+TAB.pet = () => `<h2>Pet</h2><div class="note"><b>Two separate decisions.</b> (1) <b>Visual-family approval:</b> do these flat two-colour placeholders point the right way? (2) <b>The ten finished pets:</b> 4 are drawn here and 6 are art pending until (1) is approved. Approving the family does not approve any of the ten as finished.</div><p class="muted">Ten pets share one set of actions.</p>
   <div class="grid5">${PETS.map(p => `<button class="petcard ${S.pet === p.id ? 'on' : ''}" data-a="pickPet" data-v="${p.id}" aria-pressed="${S.pet === p.id}">${petSVG(p.id, p.id === S.pet ? S.colour : 0)}<br>${p.name}${p.colours ? '' : '<br><span class="muted small">art pending</span>'}</button>`).join('')}</div>
   <div class="row" style="align-items:flex-start;margin-top:10px">
    <div style="flex:1"><label class="fld" for="petName">Name</label><input type="text" id="petName" data-in="petName" value="${esc(S.petName)}" maxlength="20">
@@ -504,9 +551,12 @@ TAB.reminders = () => `<h2>Reminders</h2>
   <h3>What I remind you about</h3>
   ${[['movement','Movement breaks'],['eye','Eye rest (look away)'],['hydration','Water pacing']].map(([k, l]) => `<div class="toggle">${sw(S.cats[k], 'cat', k, l)}<span>${l}</span></div>`).join('')}
   <h3>When I stay quiet</h3>
-  <div class="toggle">${sw(true, 'flip', '', 'Outside work hours')}<span>Outside work hours (${S.hours[0]}-${S.hours[1]}) and on non-workdays</span></div>
-  <div class="toggle">${sw(S.autoPresent, 'autoPresent', '', 'Presentations and full screen')}<span>During presentations and full-screen apps <span class="muted small">(automatic; may not detect every meeting)</span></span></div>
+  <div class="toggle"><button class="sw" role="switch" aria-checked="true" disabled aria-label="Outside work hours (always on)"></button><span>Outside work hours (${S.hours[0]}-${S.hours[1]}) and on non-workdays <span class="muted small">(always on)</span></span></div>
+  <div class="toggle">${sw(S.autoPresent, 'autoPresent', '', 'Presentations and full screen')}<span>During presentations and full-screen apps <span class="muted small">(automatic; may not detect every meeting)</span><br>${PROPOSED} <span class="small">The pet and all bubbles are hidden completely, the tray icon stays, and nothing is replayed afterwards.</span></span></div>
   <div class="toggle">${sw(S.camHint, 'camHint', '', 'Camera or mic in use')}<span>When the camera or microphone is in use <span class="muted small">(experimental hint, off by default)</span></span></div>
+  <h3>Timing and check-ins</h3>
+  <p class="small" id="afternoonLine">Afternoon reminders start at <b>${S.afternoonAt}</b>.</p>
+  <div class="toggle">${sw(S.longDay, 'longDay', '', 'Long-day check-in')}<span>Offer a deadline-day check-in after about <select data-in="longDayHrs" aria-label="Hours of PC activity">${[8, 9, 10].map(h => `<option ${S.longDayHrs === h ? 'selected' : ''}>${h}</option>`).join('')}</select> hours of PC activity today. Optional and configurable. ${PROPOSED}<br><span class="small muted">Hours of activity are an estimate from this PC. They are not evidence of stress or tiredness.</span></span></div>
   <p class="small muted">You can always use "I'm in a meeting" on the pet. Reminders missed while quiet are not replayed.</p>`;
 TAB.goals = () => `<h2>Water & workweek</h2>
   <label class="fld" for="goal">Daily water goal (ml)</label><input type="number" id="goal" data-in="goal" value="${S.waterGoal}" step="100" min="500" max="5000">
@@ -514,7 +564,7 @@ TAB.goals = () => `<h2>Water & workweek</h2>
   <label class="fld">Serving buttons</label>${S.servings.map(s => `<span class="chip">${s} ml</span>`).join('')}<button class="chip" data-a="noop">+ Add</button>
   <div class="toggle">${sw(S.waterOn, 'waterOn', '', 'Water pacing reminders')}<span>Water pacing reminders within work hours</span></div>
   <h3>Workweek</h3>${DAYS.map((d, i) => `<button class="chip ${S.workDays[i] ? 'on' : ''}" data-a="day" data-v="${i}" aria-pressed="${!!S.workDays[i]}">${d}${i === 6 ? ' (optional)' : ''}</button>`).join('')}
-  <div class="row"><label class="fld">Hours <input type="time" value="${S.hours[0]}"> to <input type="time" value="${S.hours[1]}"></label><label class="fld">Weekly review <select><option>${S.reviewAt}</option><option>Fri 18:00</option></select></label><label class="fld">Time zone <select><option>Asia/Kolkata (IST)</option></select></label></div>
+  <div class="row"><label class="fld">Hours <input type="time" data-in="hoursStart" value="${S.hours[0]}" aria-label="Work hours start"> to <input type="time" data-in="hoursEnd" value="${S.hours[1]}" aria-label="Work hours end"></label><label class="fld">Weekly review <select data-in="reviewAt">${['Sat 17:00', 'Fri 18:00'].map(o => `<option ${S.reviewAt === o ? 'selected' : ''}>${o}</option>`).join('')}</select></label><label class="fld">Time zone <select><option>Asia/Kolkata (IST)</option></select></label></div>
   <p class="small muted">Goal changes apply from today; past weeks are judged against the goal you had then.</p>`;
 const PROGRAMME = [
   ['Mon','Neck, shoulders, upper back',['Slow, comfortable neck turns','Shoulder rolls, backwards','Chest opening: hands behind head, elbows wide']],
@@ -524,9 +574,9 @@ const PROGRAMME = [
   ['Fri','Hands, wrists, forearms',['Open and close your fingers','Supported wrist bends (forearm on desk)','Shake out your hands loosely']],
   ['Sat','Whole-body change of position',['Stand and reach up comfortably','March on the spot or seated','Repeat a movement you liked this week']],
 ];
-TAB.movement = () => `<h2>Movement programme</h2><div class="warn">Placeholder content for layout only. Final routines, sources and illustrations follow the separate content review. Not a treatment or exercise prescription.</div>
+TAB.movement = () => `<h2>Movement programme ${PROVISIONAL}</h2><div class="warn">Provisional content, for layout only, pending the separate content review. Final routines, sources and illustrations follow that review. This is not a treatment or an exercise prescription.</div>
   <table class="t"><tr><th>Day</th><th>Focus</th><th>Steps (about 2 min)</th></tr>${PROGRAMME.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2].join('; ')}</td></tr>`).join('')}<tr><td>Sun</td><td colspan="2" class="muted">Optional / recovery. No catch-up for missed days.</td></tr></table>
-  <label class="fld">Default version</label><button class="chip on">Ask each time</button><button class="chip">Seated</button><button class="chip">Standing</button>
+  <label class="fld">Default version</label>${['Ask each time', 'Seated', 'Standing'].map(o => `<button class="chip ${S.mvDefault === o ? 'on' : ''}" data-a="mvDefault" data-v="${o}" aria-pressed="${S.mvDefault === o}">${o}</button>`).join('')}
   <p class="small muted">Every step has Skip and Stop. Completion is self-reported.</p>`;
 TAB.focus = () => `<h2>Focus & Pomodoro</h2><h3>Quiet focus</h3><p>Presets 30, 60, 90 min or custom. Pauses reminders; nothing is replayed afterwards.</p>
   <h3>Pomodoro</h3><p>Off until you press Start on the pet. Presets 25/5, 50/10 or custom.</p>
@@ -535,11 +585,27 @@ TAB.focus = () => `<h2>Focus & Pomodoro</h2><h3>Quiet focus</h3><p>Presets 30, 6
 const SHARE_CATS = [
   ['hydration','Hydration summary','{date, ml logged, your goal, number of entries}', '2026-10-20 · 750 ml · goal 2000 ml · 3 entries'],
   ['outcomes','Reminder & exercise outcomes','{date, reminders offered/done/snoozed, routine done/partial/skipped}', '2026-10-20 · offered 4 · done 2 · snoozed 1 · routine: partial'],
-  ['sessions','Work-session summary','{date, this PC, estimated active minutes, focus & Pomodoro counts}', '2026-10-20 · Desk A · about 212 active min (estimate) · focus 1 · Pomodoro 0'],
+  ['sessions','Work-session summary','{date, origin device, estimated active minutes, longest block estimate, focus and Pomodoro counts}; no within-day timing', '2026-10-20 · device Desk A · about 212 active min (estimate) · longest block about 95 min (estimate) · focus 1 · Pomodoro 0'],
   ['phone','Phone self-report counts','{date, count by label: work/personal/unsure}', '2026-10-20 · work 1 · personal 0 · unsure 1'],
   ['camera','Posture check summary (V2)','{date, camera-on minutes, usable coverage, episode count}', '2026-10-20 · camera on 95 min · coverage 78% · 2 episodes'],
 ];
+const PERDEV = 'Summaries are kept per device. If you use two PCs, each sends its own, and durations are never added together across PCs. No within-day timing is shared in any category.';
 const AUDIENCE = 'Who can see this: you, in HealthierYou. The app has no manager charts, but someone with admin access to the server PC could technically open the unencrypted shared summaries.';
+const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const TODAY_ISO = '2026-10-20';
+const fmtD = iso => { const [y, m, d] = iso.split('-').map(Number); return `${d} ${MON[m - 1]} ${y}`; };
+const blockedToday = k => S.tombstones.some(t => t.k === k && t.today);
+const rangeText = d => d.mode === 'all' ? 'all dates' : d.from === d.to ? `${fmtD(d.from)} only` : `${fmtD(d.from)} to ${fmtD(d.to)}`;
+const catName = k => SHARE_CATS.find(c => c[0] === k)[1];
+function tombList(){
+  if (!S.tombstones.length) return '';
+  return `<h3>Dates you deleted (never uploaded again)</h3><ul class="small" id="tombList">${S.tombstones.map(t => `<li>${catName(t.k)}: ${rangeText(t)}${t.queued ? ' (queued, waiting for the server)' : ''}${t.today ? ' &middot; includes today, so nothing more is uploaded for today' : ''}</li>`).join('')}</ul>`;
+}
+function restoreNote(){
+  if (S.restore === 'closed') return `<div class="err" id="restoreNote"><b>Server was restored without proof that its history is complete.</b> Shared history on the server was discarded, this PC was disconnected, and every category is off. Pair again with a new slip, then switch sharing on; it restarts from the restore date. Your own data on this PC is unaffected. ${DRAFT}</div>`;
+  if (S.restore === 'proved') return `<div class="ok" id="restoreNote"><b>Server was restored and its history was verified.</b> A current control log held outside the restored backup set proved that every deletion, switch-off and revocation was replayed first. ${DRAFT}</div>`;
+  return '';
+}
 TAB.sharing = () => {
   const paired = S.server !== 'none';
   const status = S.server === 'paired' ? `${icon('dot')} Connected to <b>office server (simulated)</b> &middot; last sync ${S.lastSync}` : S.server === 'offline' ? `${icon('plug')} <b>Can't reach the office server</b> since 10:05 &middot; retrying every few minutes` : 'Not paired. Everything works on this PC; nothing is sent.';
@@ -550,7 +616,8 @@ TAB.sharing = () => {
   <h3>Optional sharing (all off unless you switch them on)</h3>
   ${SHARE_CATS.filter(c => S.version === 'V2' || c[0] !== 'camera').map(([k, l]) => `<div class="toggle">${sw(S.sharing[k], 'shToggle', k, l)}<span style="flex:1">${l}${S.pending[k] ? ` <span class="small muted">(${S.pending[k]} waiting)</span>` : ''}</span>${btn('Preview', 'shPreview', k, 'link')}${btn('Delete what I shared...', 'shDelete', k, 'link')}</div>`).join('')}
   <p class="small muted">Details (meditation, recovery plans, reflections, individual events, camera images) are never sent.</p>
-  <h3>Always sent while paired (not health data)</h3><p class="small">Device ID, display alias, app version, Windows build, last seen, pairing state, sharing-settings version. Needed to keep the connection working.</p>
+  <h3>Always sent while paired (not health data)</h3><p class="small">Device ID, display alias, app version, Windows build, last seen, pairing state, policy sequence number. Needed to keep the connection working.</p><p class="small muted">${PERDEV}</p>
+  ${restoreNote()}${tombList()}
   <div class="row">${paired ? btn('Sync now', 'shSync') + btn('Unpair this PC...', 'unpair', '', 'danger') : ''}${btn('Show conflict example', 'shStale', '', 'link')}</div>`;
 };
 TAB.backup = () => `<h2>Backup & update ${DRAFT}</h2>
@@ -560,7 +627,7 @@ TAB.backup = () => `<h2>Backup & update ${DRAFT}</h2>
   <p class="small muted">Version 0.0.0-prototype (simulated). Uninstall keeps your data unless you tick "Delete my local data".</p>`;
 TAB.camera = () => `<h2>Posture check ${V2}</h2><p>Status: <b>${({off:'Off', on:'On', noread:'On - no reading', suspect:'Paused - camera moved?', denied:'Blocked by Windows', busy:'Camera in use by another app'})[S.camera] || 'Off'}</b></p>
   ${S.camera === 'off' ? btn('Set up posture check...', 'camConsent', '', 'primary') : btn('Turn camera off', 'camOff', '', 'primary') + btn('Recalibrate', 'calibrate')}
-  <div class="note">Uses your own comfortable position as the reference. Not a medical or posture-quality score. Frames stay in memory and are never saved or sent. Cues at most every 30 min.</div>`;
+  <p class="small">Cue wording: <b>neutral</b> ("Your position has changed from your calibration. Would you like a short movement break?") ${PROPOSED}<br><span class="muted">Directional wording is unavailable until the detector passes a quality gate.</span></p><div class="note">Uses your own comfortable position as the reference. Not a medical or posture-quality score. Frames stay in memory and are never saved or sent. Cues at most every 30 min.</div>`;
 TAB.meditation = () => `<h2>Meditation pause ${V2}</h2><p>One optional daily invitation. Off until you pick a time.</p>
   <div class="row"><label class="fld">Invite me at <select data-in="medTime"><option value="">Off</option>${['11:00','15:30','17:00'].map(t => `<option ${S.medTime === t ? 'selected' : ''}>${t}</option>`).join('')}</select></label></div>
   <p class="small muted">Text guidance only (2, 5 or 10 min), with eyes-open and non-breath options. No sound. Missed invitations are skipped, never stacked. Kept on this PC only.</p>`;
@@ -575,6 +642,8 @@ TAB.v3 = () => '';
 /* ---------- flows ---------- */
 const F = {};
 function startFlow(id, title, ids){
+  if (S.restore === 'closed') S.server = 'paired';
+  S.restore = null; S.recDraft = null; S.tombstones = []; S.del = null; S.presenting = false; S.pending = {};
   closeBubble(); closeWin(); closeModal(); clearTimers(); $('#adminWin').style.display = 'none'; $('#gallery').classList.remove('show'); $('#trayMenu')?.remove();
   S.flow = id; capState = {title, step:'', ids: ids || ''}; renderRev();
   if (S.server === 'offline' && id !== 'offline') S.server = 'paired';
@@ -617,8 +686,8 @@ function connectStep(){
   let pair = '';
   if (c === 'lan' && S.server === 'paired') pair = `<div class="ok"><b>Paired with officepc (simulated).</b> While paired, this PC sends only connection details (device ID, alias, app version, Windows build, last seen). Health summaries are sent only for categories you choose in the Sharing step.</div>`;
   else if (c === 'lan') pair = `<label class="fld" for="slip">Pairing slip from your administrator ${DRAFT}</label>
-    <input class="slip" id="slip" type="text" value="hy1-officepc-8443-SAMPLEFINGERPRINTBASE32XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX-SAMPLESECRET0000">
-    <p class="small muted">Paste it, or type it from the printed slip. Single use, valid 24 hours. It holds the server's full certificate fingerprint, so a fake server is refused before anything is sent.</p>
+    <input class="slip" id="slip" type="text" value="hy1-officepc-8443-SAMPLEFINGERPRINTBASE32XXXXXXXXXXXXXXXXXXXXXXXXXXXXX-SAMPLESECRET0000">
+    <p class="small muted">Paste it, or type it from the printed slip. Single use, valid 24 hours. It holds the server's full certificate fingerprint, which the app checks completely, so a fake server is refused before the secret is sent.</p>
     <div class="sim" style="background:#262b48;color:#eef0ff;border-radius:6px;padding:6px 8px;font-size:12px">Reviewer: simulate result ${['ok','mismatch','used','unreachable','malformed'].map(o => `<button class="chip ${S.slipOutcome === o ? 'on' : ''}" data-a="slipOutcome" data-v="${o}">${o}</button>`).join('')}</div>
     <div id="slipResult"></div>${btn('Check slip', 'suCheck', '', 'primary')}`;
   return `<h2>Connect (optional)</h2><p class="muted">You can skip this. The pet, reminders, logging and reviews all work on this PC alone.</p>
@@ -628,8 +697,9 @@ function connectStep(){
     ${pair}<div class="row" style="margin-top:16px">${btn('Back', 'suBack')}${btn(c === 'lan' && S.server !== 'paired' ? 'Skip pairing for now' : 'Next', 'suNext', '', c === 'lan' && S.server !== 'paired' ? '' : 'primary')}</div>`;
 }
 const SLIP = {
-  ok: `<div class="ok"><b>Server found: officepc (simulated).</b> Check these 6 words match the ones on your slip or the admin screen:<br><b class="mono">amber &middot; cedar &middot; lotus &middot; river &middot; maple &middot; quartz</b><br>${btn('They match - pair', 'suPaired', '', 'primary')}${btn("They don't match", 'suNoMatch')}</div>`,
-  mismatch: `<div class="err"><b>Stopped: the server's certificate doesn't match your slip.</b> Nothing was sent. This can mean the wrong server or someone in between. Ask your administrator for a new slip.</div>`,
+  ok: `<div class="ok"><b>Server found: officepc (simulated).</b> The server's <b>full certificate fingerprint matched</b> the one on your slip. This full check is the authoritative one, and it ran before anything was sent.<br><span class="small">Auxiliary aid only: both screens also show six words taken from the start of the fingerprint. They help people compare and are not the verification: <b class="mono">amber &middot; cedar &middot; lotus &middot; river &middot; maple &middot; quartz</b></span><br>${btn('Pair this PC', 'suPaired', '', 'primary')}${btn('The words differ - stop', 'suNoMatch', '', 'link')}</div>`,
+  wordsDiffer: `<div class="err"><b>Stopped.</b> The six auxiliary words differ from the admin screen. Do not continue: ask your administrator. The full fingerprint check remains the authority; the words are only a cue for people.</div>`,
+  mismatch: `<div class="err"><b>Stopped: the server's full certificate fingerprint doesn't match the slip.</b> The app ended the connection before sending the slip's secret, so nothing was sent. This can mean the wrong server or someone in between. Ask your administrator for a new slip.</div>`,
   used: `<div class="err"><b>This slip has already been used or has expired.</b> Slips work once and only for 24 hours. Ask your administrator for a new one.</div>`,
   unreachable: `<div class="warn"><b>Can't reach officepc:8443.</b> The slip looks valid. Check you're on the office network, or finish setup now and pair later in Settings. ${btn('Retry', 'suCheck')}</div>`,
   malformed: `<div class="err"><b>That doesn't look like a pairing slip.</b> It starts with <code>hy1-</code> and has five parts separated by dashes.</div>`,
@@ -647,14 +717,17 @@ F.states = () => {
 };
 
 /* 4. combined reminder */
-F.reminder = () => { startFlow('reminder', 'Combined reminder', 'RHY-02, RHY-03, WAT-02; reminder rules section 6'); S.dismissals = 0; setClock('Tue 11:15'); showReminder(); };
+F.reminder = () => { startFlow('reminder', 'Combined reminder', 'RHY-02, RHY-03, WAT-02; reminder rules section 6'); S.dismissals = 0; setClock('Tue 11:15'); S.water = [{id: 1, t: '09:50', ml: 250}]; S.wid = 2; showReminder(); };
+let remWaterText = null;
 function showReminder(waterDone = false){
   setPet('reminder');
-  say(`<h4>Time for a short break?</h4><ul class="reason"><li>48 min of work since your last break</li><li>Eye rest due - folded into this break</li><li class="${waterDone ? 'doneLine' : ''}">Water: 1 serving behind your own pace</li></ul>
-    <div class="row" style="gap:0">${btn('Start 2-min movement', 'moveIntro', '', 'primary')}${waterDone ? '' : btn('Log 250 ml', 'remWater')}${btn('Already did it', 'remDone')}</div>
+  if (!waterDone) remWaterText = behindPace() ? `Water: ${paceExpected() - waterTotal()} ml behind your own pace (about ${paceExpected()} ml expected by now, ${waterTotal()} ml logged)` : null;
+  const n = 2 + (remWaterText ? 1 : 0);
+  say(`<h4>Time for a short break?</h4><ul class="reason"><li>48 min of work since your last break</li><li>Eye rest due - folded into this break</li>${remWaterText ? `<li class="${waterDone ? 'doneLine' : ''}">${remWaterText}</li>` : ''}</ul>
+    <div class="row" style="gap:0">${btn('Start 2-min movement', 'moveIntro', '', 'primary')}${waterDone || !remWaterText ? '' : btn('Log 250 ml', 'remWater')}${btn('Already did it', 'remDone')}</div>
     <div class="row" style="gap:0">${btn('Snooze 10 min', 'remSnooze')}${btn('Focus...', 'focusMenu')}${btn('Not now', 'remDismiss', '', 'link')}</div>
-    <p class="small muted" style="margin:4px 0 0">One reminder for all three. Snooze covers all of them.</p>`, {wide: true});
-  cap('One combined reminder with explicit reasons. Try each action. Reviewer: <button class="tgl" data-a="noResp">simulate 10 min, no response</button>');
+    <p class="small muted" style="margin:4px 0 0">One reminder for ${n === 3 ? 'all three' : 'both'}. Snooze covers ${n === 3 ? 'all of them' : 'both'}.${goalReached() ? ' Your logging goal is reached, so water is not listed.' : ''}</p>`, {wide: true});
+  cap('One combined reminder with explicit reasons. <b>Sample scenario:</b> 250 ml logged at 11:15 against about 390 ml expected by now (your goal spread evenly over your work hours); the water reason appears only when you are behind that pace. Reviewer: <button class="tgl" data-a="noResp">simulate 10 min, no response</button>');
 }
 
 /* 5. water */
@@ -665,10 +738,10 @@ function waterPanel(editId){
     ? `<tr><td>${w.t}</td><td><input type="number" id="wEdit" value="${w.ml}" step="50" style="width:80px"> ml</td><td>${btn('Save', 'wSave', w.id, 'primary')}</td></tr>`
     : `<tr><td>${w.t}</td><td>${w.ml} ml</td><td>${btn('Edit', 'wEdit', w.id, 'link')}${btn('Remove', 'wDel', w.id, 'link')}</td></tr>`).join('');
   say(`<h4>Water today</h4><div class="progress" role="img" aria-label="${tot} of ${S.waterGoal} ml"><i style="width:${pct}%"></i></div>
-    <p class="small" style="margin:0">${tot} / ${S.waterGoal} ml (your goal) ${tot >= S.waterGoal ? '&middot; <b>goal reached - nothing more needed</b>' : ''}</p>
+    <p class="small" style="margin:0">${tot} / ${S.waterGoal} ml (your goal)</p>${tot >= S.waterGoal ? `<p class="small" style="margin:2px 0"><b>${GOAL_MSG.split('; ')[0]}; ${GOAL_MSG.split('; ')[1]}</b></p>` : ''}
     <div class="row" style="gap:0">${S.servings.map(ml => btn(`+${ml}`, 'logW', ml)).join('')}<input type="number" id="wCustom" placeholder="ml" style="width:70px;margin:3px">${btn('Add', 'wCustom')}</div>
     <table class="t small">${rows || '<tr><td class="muted">No entries yet today. That means nothing logged, not zero water.</td></tr>'}</table>`, {wide: true, expanded: true});
-  cap('Quick log, custom amount, edit (correction) and remove. Totals recalculate. At the goal, no encouragement to keep drinking.');
+  cap('Quick log, custom amount, edit (correction) and remove. Totals recalculate. At the goal, hydration reminders pause and manual logging stays available.');
 }
 
 /* 6. movement */
@@ -679,9 +752,9 @@ function moveIntro(){
   if (di === 6) { say(`<h4>Sunday is optional</h4><p>No routine is scheduled. Pick one if you'd like.</p>${PROGRAMME.map((p, i) => btn(p[0], 'mvDay', i)).join('')}`); return; }
   const p = PROGRAMME[di]; S.mv = {day: di, step: 0, done: 0, skipped: 0, ver: null};
   setPet('exercise', 'Ready?');
-  say(`<h4>${p[0]}: ${p[1]}</h4><p class="small muted" style="margin:0">3 steps &middot; about 2 min &middot; placeholder content pending review</p>
+  say(`<h4>${p[0]}: ${p[1]}</h4><p class="small muted" style="margin:0">3 steps &middot; about 2 min &middot; provisional content, pending content review${S.mvDefault !== 'Ask each time' ? ` &middot; your default: ${S.mvDefault.toLowerCase()}` : ''}</p>
     <p class="small">Use a steady chair; if it has wheels, choose standing or lock them. Stop if anything feels uncomfortable - skipping is fine.</p>
-    <div class="row" style="gap:0">${btn('Seated', 'mvVer', 'seated', 'primary')}${btn('Standing', 'mvVer', 'standing')}${btn('Later', 'mvLater')}${btn('Skip today', 'mvSkipDay', '', 'link')}</div>
+    <div class="row" style="gap:0">${btn('Seated', 'mvVer', 'seated', S.mvDefault === 'Standing' ? '' : 'primary')}${btn('Standing', 'mvVer', 'standing', S.mvDefault === 'Standing' ? 'primary' : '')}${btn('Later', 'mvLater')}${btn('Skip today', 'mvSkipDay', '', 'link')}</div>
     <p class="small muted" style="margin:4px 0 0">Other days: ${PROGRAMME.map((q, i) => i === di ? '' : `<button class="btn link" data-a="mvDay" data-v="${i}">${q[0]}</button>`).join('')}</p>`, {wide: true, expanded: true});
   cap(`Today's routine (${p[0]}). Choose seated or standing, then do, skip or stop steps.`);
 }
@@ -716,13 +789,14 @@ function focusMenu(){
 }
 
 /* 8. recovery */
-F.recovery = () => { startFlow('recovery', 'Deadline day + recovery-day plan', 'REC-01'); setClock('Tue 19:40'); recCheckIn(); };
-function recCheckIn(){
+F.recovery = () => { startFlow('recovery', 'Deadline day + recovery-day plan', 'REC-01'); setClock('Tue 19:40'); recCheckIn(true); };
+function recCheckIn(auto){
   setPet('cue');
-  say(`<h4>Long day</h4><p>You've been active at the PC for over 9 hours today. Was today a deadline-heavy day?</p>
+  if (auto && !S.longDay){ say(`<h4>Long-day check-in is off</h4><p class="small">You switched the automatic check-in off in Settings &gt; Reminders. You can still tap <b>Deadline day</b> on the pet menu whenever you like.</p>${btn('OK', 'closeBubble', '', 'primary')}`); cap('Optional: with the automatic check-in off, nothing is offered after a long day.'); return; }
+  say(`<h4>${auto ? 'Long day?' : 'Deadline day?'} ${auto ? PROPOSED : ''}</h4><p>${auto ? `This PC has been active for about ${S.longDayHrs} hours today. That is an estimate of PC activity, not a sign of stress or tiredness. ` : ''}Would you like to mark today as a deadline-heavy day?</p>
     <div class="row" style="gap:0">${btn('Yes, it was', 'recYes', '', 'primary')}${btn('No', 'recNo')}${btn("Don't ask today", 'recNo', 'quiet', 'link')}</div>
-    <p class="small muted" style="margin:0">Only you decide. I don't infer stress or tiredness.</p>`);
-  cap('Neutral check-in after a long active day (or user taps "Deadline day" on the pet). The user confirms workload.');
+    <p class="small muted" style="margin:0">Only you decide. I don't infer stress or tiredness. You can switch this check-in off or change the hours in Settings &gt; Reminders.</p>`);
+  cap('Optional, configurable check-in after a long active day (hours are an estimate of PC activity), or the user taps "Deadline day". The user confirms workload.');
 }
 
 /* 9. pomodoro */
@@ -730,7 +804,7 @@ F.pomodoro = () => { startFlow('pomodoro', 'User-started Pomodoro', 'FOC-01'); s
 function pomoMenu(){
   if (S.mode === 'focus') { say(`<h4>Replace quiet focus?</h4><p>Starting a Pomodoro will end your quiet focus (${S.focusLeft} min left).</p>${btn('Replace focus with Pomodoro', 'pomoMenuForce', '', 'primary')}${btn('Cancel', 'closeBubble')}`); return; }
   if (S.paused) { say(`<h4>Coaching is paused</h4><p>Resume coaching for this Pomodoro session? Your pause ends now.</p>${btn('Resume for this session', 'pomoResumeCoach', '', 'primary')}${btn('Cancel', 'closeBubble')}`); return; }
-  say(`<h4>Pomodoro</h4><p class="small">Off until you press Start. Breaks suggest looking away, moving, and water only if you're behind your own goal.</p>
+  say(`<h4>Pomodoro</h4><p class="small">Off until you press Start. Breaks suggest looking away, moving, and water only if you are behind your own pace for this time of day.</p>
     <div class="row" style="gap:0">${btn('25 / 5', 'pomoStart', '25/5', 'primary')}${btn('50 / 10', 'pomoStart', '50/10')}${btn('Custom...', 'pomoStart', '40/8')}</div>
     <div class="toggle">${sw(S.pomoAuto, 'pomoAuto', '', 'Auto-start next round')}<span class="small">Auto-start next round (off)</span></div>`);
   cap('Pomodoro is opt-in per session. Reviewer: <button class="tgl" data-a="focusStart" data-v="60">start focus first</button> <button class="tgl" data-a="pauseStart" data-v="60">pause coaching first</button>');
@@ -760,11 +834,25 @@ F.phone = () => { startFlow('phone', 'Phone interruption self-report', 'DIS-01')
 F.weekly = () => { startFlow('weekly', 'Weekly review', 'REV-01; Weekly reflection journey'); setClock('Sat 17:00'); setPet('cue');
   say(`<h4>Your week in review is ready</h4><p class="small">About a minute. Optional.</p>${btn('Open', 'openReview', '', 'primary')}${btn('Later', 'wkLater')}${btn('Skip this week', 'wkSkip', '', 'link')}`);
   cap('Offered at the chosen week-end time. If skipped, offered once on the next workday, no nagging.'); };
+const clone = x => JSON.parse(JSON.stringify(x));
+const SUGS = {
+  keep: {text: 'Keep your current reminder timing. It suited you this week.', info: true},
+  afternoon: {text: 'Move afternoon reminders to 16:00?', get: () => S.afternoonAt, set: v => { S.afternoonAt = v; }, next: () => '16:00', show: v => `afternoon reminders start at ${v}`},
+  serving: {text: 'Add a 750 ml button so logging takes one tap?', get: () => S.servings.slice(), set: v => { S.servings = v.slice(); }, next: p => p.includes(750) ? p : [...p, 750], show: v => `serving buttons ${v.join(', ')} ml`},
+  seated: {text: 'Set the seated version as your default, so you skip one choice each time?', get: () => S.mvDefault, set: v => { S.mvDefault = v; }, next: () => 'Seated', show: v => `default movement version: ${v}`},
+};
+function renderSug(k){
+  const d = SUGS[k];
+  if (d.info) return '<span class="muted">No change needed</span>';
+  if (S.sugHidden[k]) return '<span class="muted">Hidden</span>';
+  if (S.sugApplied[k]) return `<b>Applied</b> &middot; <span class="small">${d.show(d.get())} (was ${d.show(S.sugPrev[k])})</span> ${btn('Undo', 'sugUndo', k, 'link')}`;
+  return btn('Apply', 'sug', k, 'primary') + btn('Not for me', 'sugNo', k);
+}
 const WEEK = {
-  strong: {t:'Strong week', cov:'Recorded on 6 of 6 workdays', good:['Movement routine done on 6 of 6 scheduled days (self-reported).','Water logged up to your goal on 5 of 6 workdays.','20 of 24 offered breaks marked done.'], miss:['Wednesday afternoon break: snoozed twice, not done.'], sug:['Keep your current reminder timing - it suited you this week.']},
-  mixed: {t:'Mixed week', cov:'Recorded on 6 of 6 workdays', good:['Movement routine done on 3 of 6 days; 1 more partial.','Longest observed work block shortened from 2 h 40 to 1 h 55 (estimate).'], miss:['Water logged on 2 of 6 days. On 2 days nothing was logged (no data, not zero).','9 of 21 breaks snoozed or set aside, mostly 15:00-17:00.'], sug:['Move afternoon reminders to 16:00?','Add a 500 ml button so logging takes one tap?','Try the seated version of Thursday’s routine?']},
+  strong: {t:'Strong week', cov:'Recorded on 6 of 6 workdays', good:['Movement routine done on 6 of 6 scheduled days (self-reported).','Water logged up to your goal on 5 of 6 workdays.','20 of 24 offered breaks marked done.'], miss:['Wednesday afternoon break: snoozed twice, not done.'], sug:['keep']},
+  mixed: {t:'Mixed week', cov:'Recorded on 6 of 6 workdays', good:['Movement routine done on 3 of 6 days; 1 more partial.','Longest observed work block shortened from 2 h 40 to 1 h 55 (estimate, this PC).'], miss:['Water logged on 2 of 6 days. On 2 days nothing was logged (no data, not zero).','9 of 21 breaks snoozed or set aside, mostly 15:00-17:00.'], sug:['afternoon','serving','seated']},
   missing: {t:'Not enough data', cov:'Recorded on 2 of 6 workdays (app not running on 4 days)', good:['2 movement routines done on the days recorded.'], miss:[], sug:[], none:'Not enough data for conclusions this week. Missing days are not counted as misses.'},
-  first: {t:'First week', cov:'3 days so far (started Wednesday)', good:['You set up your pet and logged water on all 3 days.','First routine completed on Thursday.'], miss:[], sug:['Pick your preferred routine version (seated or standing) to save a step?'], none:'Comparisons start after two full weeks.'},
+  first: {t:'First week', cov:'3 days so far (started Wednesday)', good:['You set up your pet and logged water on all 3 days.','First routine completed on Thursday.'], miss:[], sug:['seated'], none:'Comparisons start after two full weeks.'},
 };
 function reviewWin(){
   const v = WEEK[S.reviewVariant];
@@ -775,7 +863,7 @@ function reviewWin(){
     ${v.none ? `<div class="note">${v.none}</div>` : ''}
     <h3>${icon('star')} What went well</h3><ul>${v.good.map(g => `<li>${g}</li>`).join('')}</ul>
     ${v.miss.length ? `<h3>Planned but missed</h3><ul>${v.miss.map(g => `<li>${g}</li>`).join('')}</ul>` : ''}
-    ${v.sug.length ? `<h3>For next week (up to 3)</h3>${v.sug.map((s, i) => `<div class="card row"><span style="flex:1">${s}</span><span id="sug${i}">${btn('Apply', 'sug', i, 'primary')}${btn('Not for me', 'sugNo', i)}</span></div>`).join('')}` : ''}
+    ${v.sug.length ? `<h3>For next week (up to 3)</h3>${v.sug.map(k => `<div class="card row"><span style="flex:1">${SUGS[k].text}</span><span id="sug-${k}">${renderSug(k)}</span></div>`).join('')}` : ''}
     <h3>Phone interruptions <span class="small muted">(self-reported, not detected)</span></h3>
     <table class="t">${ph.map((p, i) => `<tr><td>${p.t}</td><td>${['work','personal','unsure'].map(l => `<button class="chip ${p.l === l ? 'on' : ''}" data-a="phoneFix" data-v="${i}:${l}">${l}</button>`).join('')}</td></tr>`).join('')}</table>
     <p class="small muted">How these are worked out: break follow-through = breaks you marked done / breaks offered; routine = days marked complete / scheduled days. Stays on this PC unless you share that category.</p></div>`);
@@ -811,12 +899,23 @@ function monthWin(){
 
 /* 13. sharing */
 F.sharing = () => { startFlow('sharing', 'Sharing preview, stop and delete', 'SHR-01, SHR-02; draft pending contract'); S.server = 'paired'; settings('sharing'); cap('Switch a category on: the preview appears first. Then try Sync now, switching it off, and Delete what I shared.'); };
+function shDelModal(){
+  const d = S.del, c = SHARE_CATS.find(x => x[0] === d.k);
+  modal(`<h2>Delete what I shared: ${c[1]} ${DRAFT}</h2>
+    <fieldset style="border:0;padding:0;margin:0"><legend class="fld">Which dates?</legend>
+    <label><input type="radio" name="rng" data-a="delMode" data-v="all" ${d.mode === 'all' ? 'checked' : ''}> All dates</label> <label><input type="radio" name="rng" data-a="delMode" data-v="range" ${d.mode === 'range' ? 'checked' : ''}> A date range</label></fieldset>
+    <div class="row" id="delRange" ${d.mode === 'range' ? '' : 'hidden'}><label class="fld" for="delFrom">From</label><input type="date" id="delFrom" data-in="delFrom" value="${d.from}" max="${TODAY_ISO}"><label class="fld" for="delTo">To</label><input type="date" id="delTo" data-in="delTo" value="${d.to}" max="${TODAY_ISO}"></div>
+    <div id="delErr" class="small" role="alert" style="color:#9b2c00;min-height:1em"></div>
+    <p>This removes the summaries from the server's active store. Server backups expire within 30 days. Your own data on this PC is not affected.</p>
+    <div class="note"><b>Deleted dates can never be uploaded again.</b> That also applies to today: if the dates include today, nothing more is uploaded for today and sharing continues from tomorrow.</div>
+    <div class="row">${btn('Review deletion...', 'shDelAsk', d.k, 'danger')}${btn('Cancel', 'closeModal')}</div>`);
+}
 function shPreview(k, confirm){
   const c = SHARE_CATS.find(x => x[0] === k);
   modal(`<h2>${confirm ? 'Start sharing' : 'Preview'}: ${c[1]} ${DRAFT}</h2>
-    <p>Sent to: <b>office server (simulated)</b>, once a day per category.</p>
-    <table class="t"><tr><th>Fields</th><td class="mono">${esc(c[2])}</td></tr><tr><th>Today's actual record</th><td class="mono">${c[3]}</td></tr><tr><th>Never sent</th><td>Individual entries, times, notes, camera images</td></tr></table>
-    <div class="note">${AUDIENCE}</div><p class="small muted">Sharing starts from today. You can stop at any time; deleting what was already shared is a separate step.</p>
+    <p>Sent to: <b>office server (simulated)</b>, once a day per category, as this PC's own summary.</p>
+    <table class="t"><tr><th>Fields</th><td class="mono">${esc(c[2])}</td></tr><tr><th>Today's actual record</th><td class="mono">${blockedToday(k) ? 'Not uploaded: you deleted today for this category' : c[3]}</td></tr><tr><th>Never sent</th><td>Individual entries, times, notes, camera images</td></tr></table>
+    <div class="note">${AUDIENCE}</div><p class="small muted">Sharing starts from today. ${PERDEV} You can stop at any time; deleting what was already shared is a separate step.</p>
     <div class="row">${confirm ? btn('Start sharing', 'shConfirm', k, 'primary') + btn('Cancel', 'closeModal') : btn('Close', 'closeModal', '', 'primary')}</div>`);
 }
 
@@ -845,11 +944,15 @@ function petPanel(){
 F.admin = () => { startFlow('admin', 'Admin status page (server PC)', 'PRD flow 12; LAN-01; no individual health analytics; draft pending contract'); adminWin(); };
 function adminWin(slip){
   $('#adminWin').style.display = 'flex';
-  const devs = [['Desk A','0.0.0','11:40','Paired'],['Desk B','0.0.0','yesterday 18:02','Paired'],['Desk C','-','-','Slip issued, not used']];
+  const rv = S.restore === 'closed', devs = [['Desk A','0.0.0','11:40', rv ? 'Revoked: must re-pair' : 'Paired'],['Desk B','0.0.0','yesterday 18:02', rv ? 'Revoked: must re-pair' : 'Paired'],['Desk C','-','-','Slip issued, not used']];
   $('#adminBody').innerHTML = `<h2>Server status ${DRAFT}</h2><div class="note"><b>No habit data or charts are available on this page.</b> It shows service health, devices, pairing and updates only.</div>
     <div class="row"><div class="card" style="flex:1">${icon('dot')} <b>Service running</b><br><span class="small muted">Up 3 d 4 h &middot; port 8443</span></div><div class="card" style="flex:1"><b>Last backup</b><br><span class="small muted">Today 13:00 &middot; 14 daily, 2 weekly kept</span></div><div class="card" style="flex:1"><b>Database</b><br><span class="small muted">2.1 MB &middot; journal 312 entries</span></div></div>
     <h3>Devices</h3><table class="t"><tr><th>Alias</th><th>App version</th><th>Last seen</th><th>State</th><th></th></tr>${devs.map(d => `<tr><td>${d[0]}</td><td>${d[1]}</td><td>${d[2]}</td><td>${d[3]}</td><td>${btn('Revoke', 'adRevoke', d[0], 'link')}</td></tr>`).join('')}</table>
-    ${btn('Create pairing slip...', 'adSlip', '', 'primary')}${slip ? `<div class="card"><b>Pairing slip for Desk C</b> <span class="small muted">(single use, expires in 24 h)</span><p class="mono small">hy1-officepc-8443-SAMPLEFINGERPRINTBASE32XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX-SAMPLESECRET0000</p><p class="small">Fingerprint words: <b>amber cedar lotus river maple quartz</b></p><p class="small muted">Sample values only. Copy for internal chat or print. ${btn('Copy', 'noop', '', 'link')}${btn('Print', 'noop', '', 'link')}</p></div>` : ''}
+    ${btn('Create pairing slip...', 'adSlip', '', 'primary')}${slip ? `<div class="card"><b>Pairing slip for Desk C</b> <span class="small muted">(single use, expires in 24 h)</span><p class="mono small">hy1-officepc-8443-SAMPLEFINGERPRINTBASE32XXXXXXXXXXXXXXXXXXXXXXXXXXXXX-SAMPLESECRET0000</p><p class="small">Full SHA-256 fingerprint: in the slip above (authoritative; the app checks all of it). Auxiliary words, not the verification: <b>amber cedar lotus river maple quartz</b></p><p class="small muted">Sample values only. Copy for internal chat or print. ${btn('Copy', 'noop', '', 'link')}${btn('Print', 'noop', '', 'link')}</p></div>` : ''}
+    <h3 id="restoreHead">Restore from backup (server recovery) ${DRAFT}</h3>
+    <p class="small"><b>Rule being added to architecture 5.3.</b> Restored shared history is released only if a demonstrably current control log that survived <i>outside the restored backup set</i> proves it is complete. Copies held by users' PCs are never used to release it. Otherwise the server fails closed: the restored shared history is discarded at once, every device must re-pair, and every category is switched off.</p>
+    <div class="sim" style="background:#262b48;color:#eef0ff;border-radius:6px;padding:6px 8px;font-size:12px">Reviewer: simulate a restore ${btn('current surviving control log found outside the backup set', 'adRestore', 'proved')}${btn('no such log, or it is incomplete or out of date', 'adRestore', 'closed')}</div>
+    ${S.restore === 'proved' ? `<div class="ok" id="restoreResult"><b>History released.</b> The surviving control log is current and complete, so every acknowledged deletion, switch-off and revocation was replayed before any upload or read was accepted.</div>` : ''}${S.restore === 'closed' ? `<div class="err" id="restoreResult"><b>Failed closed.</b> Completeness could not be proved, so all restored shared history was discarded immediately. Every device was revoked and must re-pair with a new slip. Every category is off; users switch sharing on again from the restore date. Personal data on each PC is unaffected.</div>` : ''}
     <h3>Updates</h3><p class="small">Channel: pilot &middot; current release 0.0.0 &middot; previous compatible release kept for rollback. ${btn('Upload release...', 'noop', '', 'link')}</p>
     <h3>Audit log</h3><table class="t small"><tr><td>Today 09:12</td><td>Slip created for Desk C</td></tr><tr><td>Yesterday 17:40</td><td>Backup completed</td></tr></table>
     <p class="small muted">Anyone with administrator access to this PC's operating system could technically open the unencrypted shared summaries; the app itself has no way to view them.</p>`;
@@ -913,7 +1016,7 @@ F.v3 = () => {};
 
 /* ---------- actions ---------- */
 const A = {
-  noop(){}, flip(v, t){ t.setAttribute('aria-checked', t.getAttribute('aria-checked') !== 'true'); }, flow(v){ (F[v] || F.reset)(); },
+  noop(){}, flow(v){ (F[v] || F.reset)(); },
   revMin(){ $('#rev').classList.toggle('min'); },
   version(v){ S.version = v; renderRev(); if (S.flow === 'camera' || S.flow === 'meditation') F.reset(); },
   closeBubble(){ closeBubble(); if (S.mode === 'reminder' || S.mode === 'cue') setPet(S.server === 'offline' ? 'offline' : 'idle'); $('#ledger').classList.remove('inactive'); },
@@ -925,7 +1028,7 @@ const A = {
     m.innerHTML = `<button data-a="trayDo" data-v="toggle">${$('#pet').style.display === 'none' ? 'Show pet' : 'Hide pet'}</button><button data-a="trayDo" data-v="panel">Open pet panel (Ctrl+Alt+H)</button><button data-a="trayDo" data-v="pause">Pause coaching...</button><button data-a="trayDo" data-v="settings">Settings</button><button data-a="trayDo" data-v="review">Reviews</button>`;
     $('#stage').appendChild(m);
   },
-  trayDo(v){ $('#trayMenu')?.remove(); if (v === 'toggle'){ const p = $('#pet'); p.style.display = p.style.display === 'none' ? '' : 'none'; closeBubble(); cap(p.style.display === 'none' ? 'Pet hidden. Reopen from the tray icon.' : 'Pet shown.'); }
+  trayDo(v){ $('#trayMenu')?.remove(); if (v === 'toggle' && S.presenting){ A.presentEnd(); return; } if (v === 'toggle'){ const p = $('#pet'); p.style.display = p.style.display === 'none' ? '' : 'none'; closeBubble(); cap(p.style.display === 'none' ? 'Pet hidden. Reopen from the tray icon.' : 'Pet shown.'); }
     else if (v === 'panel') petPanel(); else if (v === 'pause') A.pauseMenu(); else if (v === 'settings') settings('pet'); else reviewWin(); },
   /* setup */
   suNext(){ S.setupStep = Math.min(SETUP_STEPS.length - 1, S.setupStep + 1); setupStep(); },
@@ -934,7 +1037,7 @@ const A = {
   slipOutcome(v){ S.slipOutcome = v; setupStep(); },
   suCheck(){ $('#slipResult').innerHTML = `<p class="small muted">Checking...</p>`; later(() => { const r = $('#slipResult'); if (r) r.innerHTML = SLIP[S.slipOutcome]; cap(`Pairing result: ${S.slipOutcome}.`); }, 500); },
   suPaired(){ S.server = 'paired'; setupStep(); cap('Paired. Operational data disclosed separately from optional health sharing.'); },
-  suNoMatch(){ $('#slipResult').innerHTML = SLIP.mismatch; },
+  suNoMatch(){ $('#slipResult').innerHTML = SLIP.wordsDiffer; },
   pairStart(){ S.connChoice = 'lan'; S.setupStep = 1; S.flow = 'setup'; setupStep(); },
   suFinish(){ S.setupDone = true; closeWin(); $('#pet').style.display = ''; drawPet(); setPet('celebrate'); say(`<h4>All set</h4><p>I'll sit here at the edge. Click me any time, or press Ctrl+Alt+H.</p>`); later(() => { setPet('idle'); closeBubble(); }, 2600); cap('Setup finished. The pet appears at the chosen edge and returns to idle.'); },
   /* pet edits */
@@ -964,8 +1067,8 @@ const A = {
   /* water */
   logW(v, quiet){ const ml = +v; if (!ml || ml <= 0) return; S.water.push({id: S.wid++, t: S.clock.slice(4), ml}); if (quiet) return;
     const tot = waterTotal(); setPet(tot >= S.waterGoal ? 'celebrate' : 'idle');
-    say(`<p style="margin:0 24px 6px 0">Logged ${ml} ml &middot; ${tot} / ${S.waterGoal} ml${tot >= S.waterGoal ? '<br><b>Goal reached for today.</b> Nothing more needed.' : ''}</p>${btn('Undo', 'wUndo')}${btn('Details', 'waterPanel', '', 'link')}`);
-    cap(tot >= S.waterGoal ? 'Goal reached: a simple confirmation, no "keep drinking" encouragement.' : 'Quick log with Undo.'); },
+    say(`<p style="margin:0 24px 6px 0">Logged ${ml} ml &middot; ${tot} / ${S.waterGoal} ml${tot >= S.waterGoal ? '<br><b>Your logging goal is reached; hydration reminders are paused.</b> You can still log water by hand.' : ''}</p>${btn('Undo', 'wUndo')}${btn('Details', 'waterPanel', '', 'link')}`);
+    cap(tot >= S.waterGoal ? 'Logging goal reached: hydration reminders pause, manual logging stays available, no "keep drinking" encouragement.' : 'Quick log with Undo.'); },
   wUndo(){ const w = S.water.pop(); toastPet(`Removed ${w ? w.ml : 0} ml. Total ${waterTotal()} ml.`); setPet('idle'); },
   wCustom(){ const v = +($('#wCustom').value || 0); if (v > 0 && v <= 2000){ S.water.push({id: S.wid++, t: S.clock.slice(4), ml: v}); waterPanel(); } else { cap('Custom amount must be 1-2000 ml (validation example).'); } },
   wEdit(v){ waterPanel(+v); }, wSave(v){ const w = S.water.find(x => x.id === +v); const n = +$('#wEdit').value; if (w && n > 0) w.ml = n; waterPanel(); cap('Corrected entry saved as a correction; totals recalculated.'); },
@@ -982,25 +1085,27 @@ const A = {
   pauseStart(v){ S.paused = true; closeBubble(); setPet('paused', +v ? `Paused ${+v >= 600 ? 'today' : v + ' min'}` : 'Paused'); cap('Coaching paused (highest precedence). Click the pet to resume.'); },
   pauseEnd(){ S.paused = false; setPet('idle'); toastPet('Coaching resumed.'); },
   meeting(){ S.meeting = !S.meeting; closeBubble(); setPet(S.meeting ? 'meeting' : 'idle'); cap(S.meeting ? 'Manual "in a meeting": prompts held, pet dimmed with mute badge. Reminders are not replayed afterwards.' : 'Meeting over.'); },
-  simPresent(){ closeBubble(); $('#pet').style.display = 'none'; $('#trayTxt').textContent = 'HealthierYou (hidden: presentation)';
-    cap('Presentation/full-screen detected: pet hides itself and prompts pause. Detection is imperfect; the manual toggle always works. <button class="tgl" data-a="presentEnd">presentation ends</button>'); },
-  presentEnd(){ $('#pet').style.display = ''; $('#trayTxt').textContent = 'HealthierYou'; setPet('idle'); cap('Pet returns. No backlog of prompts.'); },
+  simPresent(){ S.presenting = true; closeBubble(); $('#pet').style.display = 'none'; $('#trayTxt').textContent = 'HealthierYou (hidden: presentation)';
+    cap('Presentation/full-screen detected: the pet and all bubbles are hidden completely and prompts pause; the tray icon stays. Nothing is replayed afterwards. <span class="proposed">Proposed default, owner to confirm</span> Detection is imperfect; the manual toggle always works. <button class="tgl" data-a="presentEnd">presentation ends</button>'); },
+  presentEnd(){ S.presenting = false; closeBubble(); $('#pet').style.display = ''; $('#trayTxt').textContent = 'HealthierYou'; setPet('idle'); cap('Pet returns quietly. No bubble, no replay burst, no backlog of prompts (proposed default, owner to confirm).'); },
   simQuiet(){ closeBubble(); setClock('Tue 19:10'); setPet('quiet'); cap('Outside work hours: moon badge, "Off hours" tag, no prompts. Logging still possible from the menu.'); },
   /* recovery */
-  recAsk(){ recCheckIn(); },
+  recAsk(){ recCheckIn(false); },
   recNo(v){ closeBubble(); setPet('idle'); toastPet(v === 'quiet' ? "OK, I won't ask again today." : 'OK. Normal breaks continue as usual.'); cap('Declined: nothing changes; no plan is created.'); },
   recYes(){ say(`<h4>Plan a gentler recovery day?</h4><p class="small">A personal routine: more short breaks, an optional walk and a calm finish. Not a leave request.</p>
     <div class="row" style="gap:0">${btn('Tomorrow (Wed 22 Oct)', 'recPlan', 'Wed 22 Oct', 'primary')}${btn('Choose a date', 'recDate')}${btn('Later', 'recLater')}${btn('No thanks', 'recNo', '', 'link')}</div>`); cap('Invitation: tomorrow, choose a date, later, or no.'); },
   recDate(){ say(`<h4>Choose a date</h4>${['Thu 23 Oct','Fri 24 Oct','Sat 25 Oct','Mon 27 Oct'].map(d => btn(d, 'recPlan', d)).join('')}`); },
   recLater(){ closeBubble(); setPet('idle'); toastPet("OK. You can plan it from the pet menu > Deadline day."); },
-  recPlan(v){ S.recovery = {date: v, walk: '16:00', interval: false, shutdown: '18:30'}; recWin(); },
-  recSave(){ closeWin(); setPet('celebrate'); say(`<h4>Recovery day planned</h4><p>${S.recovery.date}. I'll show it in the morning.</p>${btn('Reschedule', 'recDate')}${btn('Cancel plan', 'recCancel', '', 'link')}`); later(() => setPet('idle'), 1500);
+  recPlan(v){ S.recDraft = Object.assign(S.recDraft || recBase(), {date: v}); recWin(); },
+  recSw(v, t){ const d = S.recDraft; if (!d) return; d[v] = !d[v]; if (t) t.setAttribute('aria-checked', d[v]); },
+  recDiscard(){ S.recDraft = null; closeWin(); toastPet(S.recovery ? 'Changes discarded. Your saved plan is unchanged.' : 'No plan saved.'); },
+  recSave(){ if (!S.recDraft) return; S.recovery = clone(S.recDraft); S.recDraft = null; closeWin(); setPet('celebrate'); say(`<h4>Recovery day planned</h4><p>${S.recovery.date}. I'll show it in the morning.</p>${btn('Reschedule', 'recDate')}${btn('Cancel plan', 'recCancel', '', 'link')}`); later(() => setPet('idle'), 1500);
     cap('One pending plan. Reschedule or cancel freely. <button class="tgl" data-a="recDay">jump to the recovery day</button>'); },
-  recCancel(){ S.recovery = null; closeBubble(); setPet('idle'); toastPet('Recovery plan cancelled.'); },
-  recDay(){ setClock('Wed 09:35'); setPet('cue'); say(`<h4>Today is your recovery day</h4><ul class="reason"><li>Short breaks offered a little more often</li><li>Optional walk at ${S.recovery?.walk || '16:00'}</li><li>Your water goal stays ${S.waterGoal} ml</li><li>Lunch away from the screen if you can; finish around ${S.recovery?.shutdown || '18:30'}</li></ul>${btn('Sounds good', 'closeBubble', '', 'primary')}${btn('Edit plan', 'recWin')}${btn('Cancel for today', 'recCancel', '', 'link')}`, {wide: true});
-    cap('Recovery-day morning. <button class="tgl" data-a="recEnd">jump to end of day</button>'); },
+  recCancel(){ S.recovery = null; S.recDraft = null; closeWin(); closeBubble(); setPet('idle'); toastPet('Recovery plan cancelled.'); },
+  recDay(){ const r = S.recovery || recBase(); setClock('Wed 09:35'); setPet('cue'); say(`<h4>Today is your recovery day</h4><ul class="reason">${r.breaks ? '<li>Short breaks offered a little more often</li>' : ''}${r.walkOn ? `<li>Optional walk at ${r.walk}${r.repeat ? ', repeated every 90 min' : ''}</li>` : ''}<li>Your water goal stays ${S.waterGoal} ml</li>${r.lunch ? '<li>Lunch away from the screen if you can</li>' : ''}${r.calm ? '<li>One brief calming pause</li>' : ''}${r.shutOn ? `<li>Finish around ${r.shutdown}</li>` : ''}</ul>${btn('Sounds good', 'closeBubble', '', 'primary')}${btn('Edit plan', 'recWin')}${btn('Cancel for today', 'recCancel', '', 'link')}`, {wide: true});
+    cap('Recovery-day morning (lists only the items you saved). <button class="tgl" data-a="recEnd">jump to end of day</button>'); },
   recWin(){ recWin(); },
-  recEnd(){ setClock('Wed 18:30'); setPet('cue'); say(`<h4>End of your recovery day</h4><p>Did this routine feel helpful?</p>${['Yes','Somewhat','No'].map(r => btn(r, 'recReflect', r)).join('')}${btn('Skip', 'recReflect', 'skip', 'link')}<p class="small muted" style="margin:0">Stays on this PC.</p>`); },
+  recEnd(){ setClock('Wed 18:30'); setPet('cue'); if (S.recovery && !S.recovery.reflect){ S.recovery = null; say(`<h4>End of your recovery day</h4><p>Thanks for taking it gently. No question today, as you chose.</p>${btn('OK', 'closeBubble', '', 'primary')}`); return; } say(`<h4>End of your recovery day</h4><p>Did this routine feel helpful?</p>${['Yes','Somewhat','No'].map(r => btn(r, 'recReflect', r)).join('')}${btn('Skip', 'recReflect', 'skip', 'link')}<p class="small muted" style="margin:0">Stays on this PC.</p>`); },
   recReflect(v){ S.recovery = null; setPet('idle'); toastPet(v === 'skip' ? 'Skipped.' : 'Thanks. Noted privately.'); cap('One optional reflection, kept on this PC. Plan cleared.'); },
   /* pomodoro */
   pomoMenuForce(){ S.mode = 'idle'; S.focusLeft = 0; pomoMenu(); },
@@ -1010,8 +1115,8 @@ const A = {
   pomoResume(){ S.pomo.paused = false; pomoControls(); },
   pomoEnd(){ S.pomo = null; closeBubble(); setPet('idle'); toastPet('Pomodoro ended.'); cap('Ended. No timer runs until you press Start again.'); },
   pomoBreak(){ if (!S.pomo) return; S.pomo.phase = 'break'; S.pomo.left = S.pomo.brk * 60; S.pomo.paused = true; setPet('cue', 'Break time');
-    say(`<h4>Break &middot; ${S.pomo.brk} min</h4><ul class="reason"><li>Look away from the screen, blink naturally</li><li>Stand or move comfortably</li>${waterTotal() < S.waterGoal ? '<li>Water - you are behind your own pace</li>' : ''}</ul><p class="small">Feel free to leave the desk.</p>${btn('Start break', 'pomoBreakGo', '', 'primary')}${btn('Skip break', 'pomoBreakSkip')}${btn('End Pomodoro', 'pomoEnd', '', 'link')}`, {wide: true});
-    cap('Break suggestions are one combined card; regular reminders are folded in, not duplicated. Skipping is not completion.'); },
+    say(`<h4>Break &middot; ${S.pomo.brk} min</h4><ul class="reason"><li>Look away from the screen, blink naturally</li><li>Stand or move comfortably</li>${behindPace() ? `<li>Water: ${paceExpected() - waterTotal()} ml behind your own pace (about ${paceExpected()} ml expected by now, ${waterTotal()} ml logged)</li>` : ''}</ul><p class="small">Feel free to leave the desk. Pace is your own goal spread over your work hours: a rough guide, not a target.</p>${btn('Start break', 'pomoBreakGo', '', 'primary')}${btn('Skip break', 'pomoBreakSkip')}${btn('End Pomodoro', 'pomoEnd', '', 'link')}`, {wide: true});
+    cap(`Break suggestions are one combined card; regular reminders are folded in, not duplicated. Skipping is not completion. <b>Sample scenario:</b> ${waterTotal()} ml logged at ${S.clock.slice(4)}; ${paceExpected()} ml expected by now. A daily total below the goal is not the same as behind pace.`); },
   pomoBreakGo(){ S.pomo.paused = false; closeBubble(); setPet('pomodoro', `Break ${fmt(S.pomo.left)}`); later(() => { if (S.pomo && S.pomo.phase === 'break'){ S.pomo.left = 0; pomoBreakEnd(); } }, 2500); cap('Break running (shortened to 2.5 s in this prototype).'); },
   pomoBreakSkip(){ S.pomo.phase = 'break'; pomoBreakEnd(); cap('Break skipped: recorded as declined, not completed. No auto restart.'); },
   pomoLock(){ if (!S.pomo) return; S.pomo.paused = true; setPet('pomodoro', `Paused ${fmt(S.pomo.left)}`); say(`<h4>Pomodoro paused</h4><p>Your PC was locked. The timer waits until you resume. No catch-up rounds.</p>${btn('Resume', 'pomoResume', '', 'primary')}${btn('End', 'pomoEnd')}`); cap('Lock/sleep pauses the timer; explicit resume required.'); },
@@ -1025,8 +1130,11 @@ const A = {
   wkLater(){ closeBubble(); setPet('idle'); toastPet("OK, I'll offer it once on your next workday."); },
   wkSkip(){ closeBubble(); setPet('idle'); toastPet("Skipped. I won't ask again this week."); },
   wkVar(v){ S.reviewVariant = v; reviewWin(); },
-  sug(v){ $('#sug' + v).innerHTML = '<b>Applied</b> &middot; <button class="btn link" data-a="noop">Undo</button>'; cap('Suggestion applied to settings (reversible).'); },
-  sugNo(v){ $('#sug' + v).innerHTML = '<span class="muted">Hidden</span>'; },
+  sug(k){ const d = SUGS[k]; S.sugPrev[k] = clone(d.get()); d.set(d.next(clone(d.get()))); S.sugApplied[k] = true; $('#sug-' + k).innerHTML = renderSug(k); cap(`Suggestion applied to settings: ${d.show(d.get())}. Undo restores the previous value.`); },
+  sugUndo(k){ const d = SUGS[k]; d.set(clone(S.sugPrev[k])); S.sugApplied[k] = false; delete S.sugPrev[k]; $('#sug-' + k).innerHTML = renderSug(k); cap(`Undone: ${d.show(d.get())}.`); },
+  sugNo(k){ S.sugHidden[k] = true; $('#sug-' + k).innerHTML = renderSug(k); },
+  mvDefault(v){ S.mvDefault = v; rerenderTab(); },
+  longDay(){ S.longDay = !S.longDay; rerenderTab(); },
   moVar(v){ S.monthVariant = v; monthWin(); }, moMetric(v){ S.monthMetric = v; monthWin(); }, moTable(){ S.monthTable = !S.monthTable; monthWin(); }, moBase(){ S.monthBase = !S.monthBase; monthWin(); },
   /* sharing */
   shToggle(v){
@@ -1035,16 +1143,33 @@ const A = {
     modal(`<h2>Sharing stopped ${DRAFT}</h2><p>${SHARE_CATS.find(c => c[0] === v)[1]}: no more summaries will be sent.${n ? ` ${n} unsent summar${n > 1 ? 'ies were' : 'y was'} discarded.` : ''}</p><p>What you already shared stays on the server until you delete it.</p>${btn('Delete what I shared...', 'shDelete', v, 'primary')}${btn('Keep it', 'closeModal')}`);
     cap('Stop sharing is immediate (unsent queue discarded). Deletion of already-shared data is a separate step.'); },
   shPreview(v){ shPreview(v, false); },
-  shConfirm(v){ S.sharing[v] = true; S.pending[v] = 1; closeModal(); if (S.flow === 'setup') setupStep(); else rerenderTab(); cap('Sharing on from today. 1 summary waiting. Try <b>Sync now</b>.'); },
+  shConfirm(v){ S.sharing[v] = true; S.pending[v] = blockedToday(v) ? 0 : 1; closeModal(); if (S.flow === 'setup') setupStep(); else rerenderTab(); cap(blockedToday(v) ? 'Sharing on, but you deleted today for this category: nothing is uploaded for today. It continues from tomorrow.' : 'Sharing on from today. 1 summary waiting. Try <b>Sync now</b>.'); },
   shSync(){ if (S.server === 'offline'){ cap('Server unreachable: summaries stay queued and retry automatically.'); return; } S.pending = {}; S.lastSync = S.clock.slice(4); rerenderTab(); cap('Synced: only categories currently switched on were sent.'); },
-  shDelete(v){ const c = SHARE_CATS.find(x => x[0] === v);
-    modal(`<h2>Delete what I shared: ${c[1]} ${DRAFT}</h2><label class="fld">Which dates?</label><label><input type="radio" name="rng" checked> All dates</label> <label><input type="radio" name="rng"> A date range</label>
-      <p>This removes the summaries from the server's active store. Server backups expire within 30 days. Your own data on this PC is not affected.</p>
-      <div class="row">${btn('Delete from server', 'shDelGo', v, 'danger')}${btn('Cancel', 'closeModal')}</div>`); },
-  shDelGo(v){ if (S.server === 'offline'){ modal(`<h2>Deletion queued</h2><p>The server can't be reached. Your request is saved and will be sent automatically. Status: <b>waiting - retrying</b>.</p>${btn('OK', 'closeModal', '', 'primary')}`); return; }
+  shDelete(v){ S.del = {k: v, mode: 'all', from: '2026-10-14', to: TODAY_ISO}; shDelModal(); },
+  delMode(v){ if (!S.del) return; S.del.mode = v; const r = $('#delRange'); if (r) r.hidden = v !== 'range'; const e = $('#delErr'); if (e) e.textContent = ''; },
+  delBack(){ shDelModal(); },
+  shDelAsk(){
+    const d = S.del, e = $('#delErr');
+    if (d.mode === 'range'){
+      const bad = !d.from || !d.to ? 'Choose both a From and a To date.' : d.from > d.to ? 'The From date must not be after the To date.' : d.to > TODAY_ISO ? 'Dates in the future cannot be chosen. The latest date is 20 Oct 2026 (today).' : '';
+      if (bad){ if (e) e.textContent = bad; return; }
+    }
+    const todayIn = d.mode === 'all' || d.to >= TODAY_ISO;
+    modal(`<h2>Confirm deletion ${DRAFT}</h2><p>Delete <b>${catName(d.k)}</b> for <b id="delConfirmRange">${rangeText(d)}</b> from the server's active store?</p>
+      <div class="warn"><b>This cannot be undone, and the dates can never be uploaded again</b>, even if you switch sharing back on.${todayIn ? ' This includes <b>today (20 Oct 2026)</b>: nothing more will be uploaded for today, and sharing continues from tomorrow if it is on.' : ''}</div>
+      <p class="small muted">Your own data on this PC is not affected. Server backups expire within 30 days.</p>
+      <div class="row">${btn('Yes, delete', 'shDelGo', d.k, 'danger')}${btn('Change dates', 'delBack')}${btn('Cancel', 'closeModal')}</div>`); },
+  shDelGo(v){
+    const d = S.del; if (!d) return;
+    const todayIn = d.mode === 'all' || d.to >= TODAY_ISO, queued = S.server === 'offline', rt = rangeText(d);
+    S.tombstones.push({k: v, mode: d.mode, from: d.mode === 'all' ? null : d.from, to: d.mode === 'all' ? null : d.to, today: todayIn, queued});
+    if (todayIn) S.pending[v] = 0;
+    const note = `Those dates can never be uploaded again from any of your PCs.${todayIn ? ' Today is included, so nothing more is uploaded for today; sharing continues from tomorrow if it is on.' : ''}`;
+    if (queued){ modal(`<h2>Deletion queued ${DRAFT}</h2><p>The server can't be reached. Your request for <b>${catName(v)}, ${rt}</b> is saved and will be sent automatically. Status: <b>waiting - retrying</b>.</p><p class="small">${note} Uploads for these dates are already blocked on this PC.</p>${btn('OK', 'closeModal', '', 'primary')}`); rerenderTab(); return; }
     modal(`<h2>Sending deletion request...</h2><div class="progress"><i style="width:50%"></i></div>`);
-    later(() => modal(`<h2>Deleted from the server</h2><div class="ok">Receipt: ${SHARE_CATS.find(c => c[0] === v)[1]}, all dates, removed from the active store today at ${S.clock.slice(4)}.</div><p class="small">Server backups that may contain it expire within 30 days. Late uploads from your other PCs cannot bring it back.</p>${btn('Done', 'closeModal', '', 'primary')}`), 800);
-    cap('Deletion has acknowledgement/receipt status. Offline variant queues it.'); },
+    later(() => { const html = `<h2>Deleted from the server ${DRAFT}</h2><div class="ok" id="delReceipt">Receipt: ${catName(v)}, <b>${rt}</b>, removed from the active store today at ${S.clock.slice(4)}. ${note}</div><p class="small">Server backups that may contain it expire within 30 days.</p>${btn('Done', 'closeModal', '', 'primary')}`;
+      if (modalOpen()) modal(html); else toastPet(`Deleted: ${catName(v)}, ${rt}.`); rerenderTab(); }, 800);
+    cap('Deletion shows a confirmation, then a receipt that matches the chosen dates. Offline variant queues it. Deleted dates are never re-uploaded.'); },
   shStale(){ modal(`<h2>Switched off on another PC ${DRAFT}</h2><p>Hydration summary sharing was switched off on your other PC on 19 Oct. Switch it on again here?</p><p class="small muted">If you switch it on, sharing restarts from today. Earlier dates are not sent.</p>${btn('Switch on again', 'shConfirm', 'hydration', 'primary')}${btn('Leave it off', 'closeModal')}`); cap('Conflict: a stale enable from a second PC never silently re-enables sharing.'); },
   unpair(){ modal(`<h2>Unpair this PC?</h2><p>This PC stops syncing. Your local data stays. Summaries already on the server stay until you delete them per category.</p>${btn('Unpair', 'unpairGo', '', 'danger')}${btn('Cancel', 'closeModal')}`); },
   unpairGo(){ S.server = 'none'; Object.keys(S.sharing).forEach(k => S.sharing[k] = false); closeModal(); rerenderTab(); },
@@ -1065,7 +1190,8 @@ const A = {
   updGo(v){ modal(v === 'ok' ? `<h2>Signature verified</h2><div class="ok">Version 0.0.1 will install at the next quiet moment (never during a reminder or camera session). Your data is copied first.</div>${btn('OK', 'closeModal', '', 'primary')}` : `<h2>Update refused</h2><div class="err">The signature is missing or doesn't match. Nothing was installed. Ask your administrator for the original files.</div>${btn('OK', 'closeModal', '', 'primary')}`); },
   rollback(){ modal(`<h2>Install previous version</h2><div class="warn">Goes back one release. If the older version can't read your newer data, it restores the copy taken before the update, and anything recorded since then is lost. Consider exporting first.</div>${btn('Export first', 'exportStart')}${btn('Continue', 'updGo', 'ok', 'danger')}${btn('Cancel', 'closeModal')}`); },
   /* admin */
-  adSlip(){ adminWin(true); cap('Slip shows full fingerprint + single-use secret (sample values) and 6-word cross-check.'); },
+  adRestore(v){ S.restore = v; if (v === 'closed'){ S.server = 'none'; Object.keys(S.sharing).forEach(k => S.sharing[k] = false); S.pending = {}; } adminWin(); cap(v === 'closed' ? 'Fail closed: shared history discarded, all devices revoked, all categories off.' : 'History released only because a current control log from outside the restored backup set proved completeness.'); },
+  adSlip(){ adminWin(true); cap('Slip carries the full fingerprint (authoritative) + single-use secret (sample values); the 6 words are an auxiliary aid only.'); },
   adRevoke(v){ modal(`<h2>Revoke ${esc(v)}?</h2><p>That PC can no longer sync. Its user keeps their local data and can pair again with a new slip.</p>${btn('Revoke', 'closeModal', '', 'danger')}${btn('Cancel', 'closeModal')}`); },
   /* camera */
   camConsent(){ closeBubble(); camConsent(); },
@@ -1077,7 +1203,7 @@ const A = {
     setPet('idle'); cap(`Camera ${v}: explicit unavailable state, no score inferred, V1 continues.`); },
   calibrate(v){ calibrate(v || 'ok'); },
   camCue(){ if (S.camera === 'off') return; closeWin(); S.camera = 'on'; setPet('reminder', 'Camera on');
-    say(`<h4>Small reset?</h4><p>For a few minutes you've been leaning further forward than your usual position. A quick shoulder roll or sitting back might feel good.</p>${btn('Thanks', 'camThanks', '', 'primary')}${btn('Snooze 30 min', 'camThanks')}${btn('Turn camera off', 'camOff', '', 'link')}<p class="small muted" style="margin:0">Compared with your calibration, not a health score. Next cue no sooner than 30 min.</p>`, {wide: true});
+    say(`<h4>Small reset? ${PROPOSED}</h4><p>Your position has changed from your calibration. Would you like a short movement break?</p>${btn('Thanks', 'camThanks', '', 'primary')}${btn('Snooze 30 min', 'camThanks')}${btn('Turn camera off', 'camOff', '', 'link')}<p class="small muted" style="margin:0">Compared with your calibration, not a health score. Next cue no sooner than 30 min. Neutral wording is the default; directional detail (such as which way) is shown only after the detector passes a quality gate in desk testing.</p>`, {wide: true});
     cap('One cue after a sustained (60 s+) change. No per-frame nagging; 30-min cooldown.'); },
   camThanks(){ closeBubble(); setPet('camera'); },
   camNoRead(){ if (S.camera === 'off') return; closeWin(); closeBubble(); S.camera = 'noread'; setPet('camNo'); cap('No reading (away, dark, occluded or low confidence): shown as "no reading", no score inferred, no cues. <button class="tgl" data-a="camBack">reading returns</button>'); },
@@ -1098,18 +1224,21 @@ const A = {
   medMode(){ const m = S.med; medSession(m.min, m.mode === 'breath' ? 'open' : 'breath', m.i); },
   panel(){ petPanel(); },
 };
+const recBase = () => Object.assign({date: 'Wed 22 Oct', breaks: true, walkOn: true, walk: '16:00', repeat: false, lunch: true, calm: true, shutOn: true, shutdown: '18:30', reflect: true}, S.recovery ? clone(S.recovery) : {});
+/* The window edits a draft copy (S.recDraft). Save copies it into S.recovery; Discard drops it. Reopening reads S.recovery. */
 function recWin(){
-  const r = S.recovery || {date: 'Wed 22 Oct', walk: '16:00', interval: false, shutdown: '18:30'}; S.recovery = r;
+  if (!S.recDraft) S.recDraft = recBase();
+  const r = S.recDraft;
   openWin('HealthierYou - Recovery day', `<div class="content"><h2>Recovery day: ${r.date}</h2><p class="muted">A gentler routine you control. Not a leave request, and not a reason to work longer today.</p>
-    <div class="toggle">${sw(true, 'flip', '', 'More short breaks')}<span>Short movement and screen-free breaks offered a little more often</span></div>
-    <div class="toggle">${sw(true, 'flip', '', 'Optional walk')}<span>Optional comfortable 10-15 min walk at <input type="time" value="${r.walk}"> <label class="small"><input type="checkbox"> repeat every 90 min</label></span></div>
-    <div class="toggle">${sw(true, 'flip', '', 'Lunch away')}<span>Lunch away from the screen, if practical</span></div>
-    <div class="toggle">${sw(true, 'flip', '', 'Calm pause')}<span>One brief calming pause</span></div>
-    <div class="toggle">${sw(true, 'flip', '', 'Shutdown time')}<span>Finish work around <input type="time" value="${r.shutdown}"></span></div>
-    <div class="toggle">${sw(true, 'flip', '', 'Reflection')}<span>One end-of-day question: "Did this routine feel helpful?"</span></div>
+    <div class="toggle">${sw(r.breaks, 'recSw', 'breaks', 'More short breaks')}<span>Short movement and screen-free breaks offered a little more often</span></div>
+    <div class="toggle">${sw(r.walkOn, 'recSw', 'walkOn', 'Optional walk')}<span>Optional comfortable 10-15 min walk at <input type="time" id="recWalk" data-in="recWalk" value="${r.walk}" aria-label="Walk time"> <label class="small"><input type="checkbox" id="recRepeat" data-in="recRepeat" ${r.repeat ? 'checked' : ''}> repeat every 90 min</label></span></div>
+    <div class="toggle">${sw(r.lunch, 'recSw', 'lunch', 'Lunch away')}<span>Lunch away from the screen, if practical</span></div>
+    <div class="toggle">${sw(r.calm, 'recSw', 'calm', 'Calm pause')}<span>One brief calming pause</span></div>
+    <div class="toggle">${sw(r.shutOn, 'recSw', 'shutOn', 'Shutdown time')}<span>Finish work around <input type="time" id="recShut" data-in="recShut" value="${r.shutdown}" aria-label="Finish time"></span></div>
+    <div class="toggle">${sw(r.reflect, 'recSw', 'reflect', 'Reflection')}<span>One end-of-day question: "Did this routine feel helpful?"</span></div>
     <div class="note">Water stays at your own goal (${S.waterGoal} ml) - no catch-up. Today's normal movement routine is reused; nothing extra is owed.</div>
-    <div class="row">${btn('Save plan', 'recSave', '', 'primary')}${btn('Change date', 'recDate')}${btn('Cancel', 'recCancel', '', 'link')}</div></div>`);
-  cap('Recovery-day plan. Only one pending plan at a time.');
+    <div class="row">${btn('Save plan', 'recSave', '', 'primary')}${btn('Change date', 'recDate')}${btn('Discard changes', 'recDiscard')}${S.recovery ? btn('Cancel plan', 'recCancel', '', 'link') : ''}</div></div>`);
+  cap('Recovery-day plan. Switches, times and repeat are kept in memory when you Save; reopening shows the saved values. Only one pending plan at a time.');
 }
 function rerenderTab(){
   if (S.flow === 'setup' && $('#hyWin').style.display !== 'none' && $('#hyTitle').textContent.includes('Setup')) return setupStep();
@@ -1131,20 +1260,40 @@ document.addEventListener('click', e => {
   const fn = A[t.dataset.a];
   if (fn) fn(t.dataset.v, t); else console.warn('No action', t.dataset.a);
 });
-document.addEventListener('input', e => {
+function onField(e){
   const k = e.target.dataset?.in; if (!k) return;
-  if (k === 'petName'){ S.petName = e.target.value || petById(S.pet).def; setPet(S.mode); }
-  if (k === 'scale'){ S.scale = +e.target.value; $('#scaleLbl').textContent = S.scale + '%'; drawPet(); }
-  if (k === 'goal'){ const v = +e.target.value; if (v >= 500 && v <= 5000) S.waterGoal = v; }
-  if (k === 'medTime'){ S.medTime = e.target.value || null; }
-});
+  const v = e.target.value, d = S.recDraft;
+  if (k === 'petName'){ S.petName = v || petById(S.pet).def; setPet(S.mode); }
+  if (k === 'scale'){ S.scale = +v; $('#scaleLbl').textContent = S.scale + '%'; drawPet(); }
+  if (k === 'goal'){ const n = +v; if (n >= 500 && n <= 5000) S.waterGoal = n; }
+  if (k === 'medTime'){ S.medTime = v || null; }
+  if (k === 'hoursStart' && v) S.hours[0] = v;
+  if (k === 'hoursEnd' && v) S.hours[1] = v;
+  if (k === 'reviewAt') S.reviewAt = v;
+  if (k === 'longDayHrs') S.longDayHrs = +v;
+  if (k === 'recWalk' && d && v) d.walk = v;
+  if (k === 'recShut' && d && v) d.shutdown = v;
+  if (k === 'recRepeat' && d) d.repeat = e.target.checked;
+  if (S.del && k === 'delFrom') S.del.from = v;
+  if (S.del && k === 'delTo') S.del.to = v;
+}
+document.addEventListener('input', onField);
+document.addEventListener('change', onField);
+document.addEventListener('focusin', e => { if (modalOpen() && !$('#modal').contains(e.target)){ (modalFocusables()[0] || $('#modal')).focus(); } });
 document.addEventListener('keydown', e => {
-  if (e.ctrlKey && e.altKey && (e.key === 'h' || e.key === 'H')){ e.preventDefault(); petPanel(); return; }
+  if (e.key === 'Tab' && modalOpen()){
+    const f = modalFocusables(), i = f.indexOf(document.activeElement);
+    if (!f.length){ e.preventDefault(); $('#modal').focus(); return; }
+    if (e.shiftKey && i <= 0){ e.preventDefault(); f[f.length - 1].focus(); }
+    else if (!e.shiftKey && (i === -1 || i === f.length - 1)){ e.preventDefault(); f[0].focus(); }
+    return;
+  }
+  if (e.ctrlKey && e.altKey && (e.key === 'h' || e.key === 'H')){ e.preventDefault(); if (modalOpen()) return; petPanel(); return; }
   if (e.key === 'Escape'){
-    if ($('#modalWrap').classList.contains('show')) return closeModal();
+    if (modalOpen()){ e.preventDefault(); return closeModal(); }
     if ($('#gallery').classList.contains('show')) return A.closeGallery();
-    if ($('#bubble').classList.contains('show')){ const wasPanel = $('#bubble').dataset.panel; closeBubble(); delete $('#bubble').dataset.panel; $('#ledger').classList.remove('inactive');
-      if (wasPanel){ document.activeElement?.blur(); cap('Panel closed with Esc; focus returned to the spreadsheet.'); } return; }
+    if ($('#bubble').classList.contains('show')){ const b = $('#bubble'), had = b.dataset.panel || b.contains(document.activeElement); closeBubble(); delete b.dataset.panel; $('#ledger').classList.remove('inactive');
+      if (had){ $('#workSurface').focus(); cap('Panel closed with Esc; focus moved to the simulated spreadsheet (work surface). In the product, Windows returns focus to the previous app; that is a build acceptance test.'); } return; }
     if ($('#trayMenu')) return $('#trayMenu').remove();
   }
 });
