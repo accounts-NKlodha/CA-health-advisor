@@ -388,8 +388,16 @@ const SCOPE = '#bubble, #hyWin, #modalWrap.show #modal, #adminWin, #gallery.show
   await ev(() => window.__remObs.disconnect());
   await start('reminder'); await click('#bubble [data-a="moveFromRem"]'); await click('#bubble [data-a="mvVer"][data-v="seated"]');
   check('starting the routine from the movement card shows movement "In progress" only', await ev(() => S.acts.movement.status === 'active' && S.acts.eye.status === 'due' && S.acts.water.status === 'due'));
+  const since0 = await ev(() => S.acts.movement.since);
   await click('#bubble [data-a="mvStop"]');
-  check('stopping the routine records movement as partly done; eye rest and water untouched', await ev(() => S.acts.movement.status === 'partial' && S.acts.eye.status === 'due' && S.acts.water.status === 'due' && S.remActive === null));
+  check('immediate Stop from a reminder records none (not partial), keeps the movement clock; eye rest and water untouched', await ev(s0 => S.acts.movement.status === 'none' && S.acts.movement.since === s0 && S.acts.eye.status === 'due' && S.acts.water.status === 'due' && S.remActive === null && S.gapUntil > nowMin(), since0) && /Stopped, none recorded/.test(await bubbleText()));
+  const mvCase = async (seq) => { await start('reminder'); await click('#bubble [data-a="moveFromRem"]'); await click('#bubble [data-a="mvVer"][data-v="seated"]'); const s0 = await ev(() => S.acts.movement.since); await ev(() => { S._t0 = nowMin(); }); for (const a of seq) await click(`#bubble [data-a="${a}"]`); return { st: await ev(() => S.acts.movement.status), since: await ev(() => S.acts.movement.since), s0, now: await ev(() => nowMin()) }; };
+  let mc = await mvCase(['mvSkip', 'mvSkip', 'mvSkip']);
+  check('all three skipped from a reminder records none and does not reset the movement clock', mc.st === 'none' && mc.since === mc.s0);
+  mc = await mvCase(['mvDone', 'mvStop']);
+  check('one Done then Stop records partial and resets the movement clock', mc.st === 'partial' && mc.since === mc.now);
+  mc = await mvCase(['mvDone', 'mvDone', 'mvDone']);
+  check('all three Done records done and resets the movement clock', mc.st === 'done' && mc.since === mc.now);
   check('Reminders tab explains one reminder at a time with a calm gap', await (async () => { await ev(() => settings('reminders')); return /One reminder at a time/.test(await ev(() => document.querySelector('#hyBody').innerText)); })());
 
   // ---- 9. Item 3: movement routine says WHAT to do
@@ -436,7 +444,7 @@ const SCOPE = '#bubble, #hyWin, #modalWrap.show #modal, #adminWin, #gallery.show
   check('"no data" ring segments are hatched with a dashed edge', /^url\(#h-/.test(nd.nFill || '') && !!nd.nDash, JSON.stringify(nd));
   check('a measured 0 is drawn differently: white segment with a coloured outline', nd.zFill === '#fff' && /^#/.test(nd.zStroke || '') && nd.zFill !== nd.nFill);
   check('week strip: no data shows "–" on hatching, 0 shows "0" on plain white', nd.mnTxt === '–' && nd.mzTxt === '0' && /repeating-linear-gradient/.test(nd.mnBg) && nd.mzBg === 'none');
-  check('legend explains no data (app not running) vs 0 (app running)', /no data: app not running/.test(nd.legend) && /0: app running, not done/.test(nd.legend));
+  check('legend explains no data (app not running) vs 0 (app running)', /no data: app not running/.test(nd.legend) && /0: none recorded/.test(nd.legend) && !/not done/.test(nd.legend));
   await click('#hyBody [data-a="wkVar"][data-v="mixed"]');
   await click('#hyBody [data-a="sug"][data-v="afternoon"]');
   check('suggestion Apply still bound to state in the new layout (afternoon 16:00)', await ev(() => S.afternoonAt === '16:00' && /Applied/.test(document.querySelector('#sug-afternoon').innerText)));

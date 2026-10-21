@@ -1038,6 +1038,7 @@ function remStrip(){
       case 'done': return ['done', `Done ${hhmm(a.at)}, next ${hhmm(a.due)}`];
       case 'partial': return ['part', `Partly done ${hhmm(a.at)}`];
       case 'skipped': return ['skip', `Skipped ${hhmm(a.at)} (not done)`];
+      case 'none': return ['skip', `Stopped ${hhmm(a.at)}, none recorded`];
       case 'noresp': return ['skip', 'No response (not done)'];
       case 'notdue': return ['ok', 'On your pace, not due'];
       case 'goal': return ['done', 'Goal reached, paused'];
@@ -1072,11 +1073,12 @@ function remRecord(k, kind){
   const n = nowMin();
   if (kind === 'done'){ a.status = 'done'; a.at = n; a.due = n + ACTS[k].every; if (k === 'movement') a.since = n; }
   else if (kind === 'partial'){ a.status = 'partial'; a.at = n; a.due = n + ACTS[k].every; if (k === 'movement') a.since = n; }
+  else if (kind === 'none'){ a.status = 'none'; a.at = n; a.due = n + ACTS[k].every; } /* stopped or skipped with nothing done: quiet gap kept, movement clock (a.since) NOT reset */
   else if (kind === 'snooze'){ a.status = 'snoozed'; a.due = n + SNOOZE; }
   else if (kind === 'skip'){ a.status = 'skipped'; a.at = n; a.due = n + ACTS[k].every; S.dismissals++; }
   if (S.remActive === k) S.remActive = null;
   S.gapUntil = n + GAP;
-  remLog(`${ACTS[k].name}: ${({done: 'done', partial: 'partly done', snooze: `snoozed to ${hhmm(a.due)}`, skip: 'skipped (not done)'})[kind]}. Others unchanged.`);
+  remLog(`${ACTS[k].name}: ${({done: 'done', partial: 'partly done', none: 'stopped, none recorded', snooze: `snoozed to ${hhmm(a.due)}`, skip: 'skipped (not done)'})[kind]}. Others unchanged.`);
   renderRemRev();
 }
 function renderRemRev(){
@@ -1129,13 +1131,14 @@ function moveStep(){
     <p class="small muted" style="margin:2px 0">Move gently, within a comfortable range. Stop if anything hurts or feels wrong.</p>
     <div class="row" style="gap:0">${btn(m.step + 1 < keys.length ? 'Done, next movement' : 'Done, finish', 'mvDone', '', 'primary')}${btn('Skip this movement', 'mvSkip')}${btn('Stop routine', 'mvStop')}</div>
     <div class="mvDots" aria-hidden="true">${keys.map((_, i) => `<i class="${i <= m.step ? 'on' : ''}"></i>`).join('')}</div></div>`, {wide: 'x', expanded: true});
-  cap(`Movement ${m.step + 1}: ${r.name}. Done / Skip this movement / Stop routine. Skips and stops are recorded as partial, never as complete. Reduced motion shows the still start and target poses.`);
+  cap(`Movement ${m.step + 1}: ${r.name}. Done / Skip this movement / Stop routine. Some done is recorded as partial; none done is recorded as none, never as partial or complete. Reduced motion shows the still start and target poses.`);
 }
 function moveEnd(stopped){
-  const m = S.mv, n = PROGRAMME[m.day][1].length, full = m.done === n && !stopped;
+  const m = S.mv, n = PROGRAMME[m.day][1].length, full = m.done === n && !stopped, none = m.done === 0;
   setPet(full ? 'celebrate' : 'idle');
-  if (m.fromRem) remRecord('movement', full ? 'done' : 'partial');
+  if (m.fromRem) remRecord('movement', full ? 'done' : none ? 'none' : 'partial');
   say(full ? `<h4>Routine complete</h4><p>All ${n} movements done. Saved as <b>self-reported</b>.</p>`
+    : none ? `<h4>Stopped, none recorded</h4><p>No movements were marked done${m.skipped ? ` (${m.skipped} skipped)` : ''}. Nothing is counted as movement and your movement timer is not reset. No catch-up needed.</p>${btn('Try again later today', 'mvLater')}`
     : `<h4>Saved as partial</h4><p>${m.done} of ${n} movements done${m.skipped ? `, ${m.skipped} skipped` : ''}${stopped ? ', stopped early' : ''}. Recorded as partial (self-reported), not complete. No catch-up needed.</p>${btn('Try again later today', 'mvLater')}`);
   cap(full ? 'Complete: celebration state, self-reported label.' : 'Partial outcome shown honestly.');
   if (S.flow === 'reminder') renderRemRev();
@@ -1210,7 +1213,7 @@ function renderSug(k){
   if (S.sugApplied[k]) return `<b>Applied</b> &middot; <span class="small">${d.show(d.get())} (was ${d.show(S.sugPrev[k])})</span> ${btn('Undo', 'sugUndo', k, 'link')}`;
   return btn('Apply', 'sug', k, 'primary') + btn('Not for me', 'sugNo', k);
 }
-/* Per-day codes, Mon..Sun: d done/met, p partly, z 0 (app running, not done), n no data (app not running), o day off, s before you started, t today (in progress) */
+/* Per-day codes, Mon..Sun: d done/met, p partly, z 0 (app running, no completion logged), n no data (app not running), o day off, s before you started, t today (in progress) */
 const WEEK = {
   strong: {t:'Strong week', cov:'Recorded on 6 of 6 workdays', days:{move:'ddddddo', breaks:'ddpdppo', water:'ddddpdo'}, breaks:[20, 24],
     good:['Movement routine done on 6 of 6 scheduled days (self-reported).','Water logged up to your goal on 5 of 6 workdays.','20 of 24 offered breaks marked done.'], miss:['Wednesday afternoon break: snoozed twice, not done.'], sug:['keep'],
@@ -1226,7 +1229,7 @@ const WEEK = {
     hi:[['3 days', 'of water logging since you started', 'drop'], ['Thu', 'first routine completed', 'move']]},
 };
 const WK_ACTS = [['move', 'Movement', 'Movement routine', 'move', '#009E73', '#fff', 'days done'], ['breaks', 'Breaks', 'Breaks taken', 'bell', '#E69F00', '#1f2a30', 'breaks taken'], ['water', 'Water', 'Water goal', 'drop', '#0072B2', '#fff', 'goal days']];
-const MK = {d:['&#10003;', 'done'], p:['&#9680;', 'partly'], z:['0', '0 (app running, not done)'], n:['&ndash;', 'no data (app not running)'], o:['off', 'day off'], s:['&middot;', 'before you started'], t:['&middot;', 'today, in progress']};
+const MK = {d:['&#10003;', 'done'], p:['&#9680;', 'partly'], z:['0', '0 (none recorded)'], n:['&ndash;', 'no data (app not running)'], o:['off', 'day off'], s:['&middot;', 'before you started'], t:['&middot;', 'today, in progress']};
 const MKWORD = {d:'done', p:'partly', z:'0', n:'no data', o:'off', s:'not started', t:'today'};
 function wkCount(codes){ const c = {d:0, p:0, z:0, n:0}; codes.slice(0, 6).split('').forEach(x => { if (x in c) c[x]++; }); return c; }
 function wkCenter(act, v){ const c = wkCount(v.days[act]); return act === 'breaks' ? `${v.breaks[0]}/${v.breaks[1]}` : `${c.d}/${c.d + c.p + c.z}`; }
@@ -1256,7 +1259,7 @@ function reviewWin(){
   const visual = `<div class="wkRings">${WK_ACTS.map(([k, , label, ic, col, , unit]) => `<div class="wkRing" data-act="${k}">${ringSVG(k, label, col, unit, v)}<div><div class="nm" style="color:${col === '#E69F00' ? '#8a5a00' : col}">${icon(ic)} ${label}</div><div class="sub">${wkSub(k, v)}</div></div></div>`).join('')}</div>
     <div class="wkStrip" role="table" aria-label="Week strip, one column per day"><div role="row" style="display:contents"><div></div>${WK_DAYS.map(d => `<div class="dh" role="columnheader">${d}</div>`).join('')}</div>
     ${WK_ACTS.map(([k, short, label, ic, col, ct]) => `<div role="row" style="display:contents"><div class="rl" role="rowheader">${icon(ic, 14)} ${short}</div>${v.days[k].split('').map((x, i) => `<div class="mk ${x}" role="cell" data-code="${x}" style="--c:${col};--ct:${ct};animation-delay:${200 + i * 50}ms" title="${WK_DAYS[i]}: ${MK[x][1]}" aria-label="${label}, ${WK_DAYS[i]}: ${MK[x][1]}">${MK[x][0]}</div>`).join('')}</div>`).join('')}</div>
-    <div class="wkLegend" id="wkLegend"><span><i class="mk d">&#10003;</i>done</span><span><i class="mk p">&#9680;</i>partly</span><span><i class="mk z">0</i>0: app running, not done</span><span><i class="mk n">&ndash;</i>no data: app not running</span><span><i class="mk o">off</i>day off</span><span><i class="mk s">&middot;</i>not started / today</span></div>`;
+    <div class="wkLegend" id="wkLegend"><span><i class="mk d">&#10003;</i>done</span><span><i class="mk p">&#9680;</i>partly</span><span><i class="mk z">0</i>0: none recorded</span><span><i class="mk n">&ndash;</i>no data: app not running</span><span><i class="mk o">off</i>day off</span><span><i class="mk s">&middot;</i>not started / today</span></div>`;
   const table = `<div class="wkPlainView"><table class="t" id="wkTable"><tr><th>Activity</th>${WK_DAYS.map(d => `<th>${d}</th>`).join('')}<th>Summary</th></tr>${WK_ACTS.map(([k, , label]) => `<tr><td>${label}</td>${v.days[k].split('').map(x => `<td>${MKWORD[x]}</td>`).join('')}<td>${wkCenter(k, v)} ${WK_ACTS.find(a => a[0] === k)[6]}</td></tr>`).join('')}</table>
     <p class="small muted">"0" means the app was running and nothing was done or logged. "No data" means the app was not running; those days are not counted as misses.</p>
     <h3>What went well</h3><ul>${v.good.map(g => `<li>${g}</li>`).join('')}</ul>${v.miss.length ? `<h3>Planned but missed</h3><ul>${v.miss.map(g => `<li>${g}</li>`).join('')}</ul>` : ''}</div>`;
