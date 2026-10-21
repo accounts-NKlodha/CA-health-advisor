@@ -25,3 +25,12 @@
 | DEC19 | Batch 1 provisionally accepted by Codex on the owner-approved 8 GB Windows 11 laptop, with qualifications: not independently verified, not 4 GB validated, Windows 10 camera unproven, open items in Blockers.md | Codex review 20 Oct | Architecture may proceed; soak test and second webcam before UAT/pilot |
 
 PRD.md is the consolidated proposal. Research notes may discuss alternatives; they do not override the approved requirement baseline.
+
+## Update 21 October 2026
+
+| ID | Decision | Authority / state | Reason |
+|---|---|---|---|
+| DEC20 | Server restore resets only the absent user; maximum wait 7 days; time never counts as proof (architecture Q9) | Owner decision 21 Oct | Per-user restore rule in architecture revision 5 |
+| DEC21 | Prototype approved with three defaults: hide the pet during presentations, optional nine-hour check-in, neutral posture wording | Owner approval 21 Oct | Prototype PR #4 after three revisions |
+| DEC22 | Prototype verification gate closed by Codex (independent 24/24 harness on routine logic); V1/V2 build authorised in reviewed slices, starting with V1-0 | Codex review 21 Oct, within owner-approved scope | Pairing/security sign-off still required before V1-5 |
+| DEC23 | Architecture PR #3 (revision 5) has Codex conditional design acceptance; not unconditional | Codex review 21 Oct | Pairing security gate open |

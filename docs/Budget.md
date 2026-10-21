@@ -24,3 +24,7 @@ Ceiling $200: planning recorded as its own line; feasibility batch 1 cap $20 (st
 | 2026-10-18 to 20 | Coordination test HY-COORD-TEST-1 | $1 | Under $1 | Documentation-only |
 
 Rohit's balance readings did not move while the meters rose, so all figures above are estimates. Remaining V1/V2 work is not yet costed; estimates come with the architecture proposal.
+
+## Update 21 October 2026
+
+No spend figures were provided for 21 Oct; none are recorded here. Slice estimates, if any, come from the architecture and are not observed spend. Balance readings stay with the owner.

@@ -23,3 +23,14 @@ No approval to purchase services or store memberships is implied. No automated C
 | B10 | Camera compatibility | Only one working webcam proven; Windows 10 camera operation unproven | Second working webcam check, ideally on Windows 10 | Before UAT/pilot |
 
 B04 (Fossil and Samsung integrations) and B03 (Apple integration) are deferred with V3 and no longer gate V1/V2 architecture.
+
+## Update 21 October 2026: gates before UAT/pilot
+
+| ID | Affected work | Issue | Next action | Latest useful time |
+|---|---|---|---|---|
+| B11 | Pairing security | Pairing security gate not signed off (architecture PR #3 revision 5 has conditional acceptance only) | Obtain pairing/security sign-off | Before slice V1-5 |
+| B12 | Exercise content | Illustrated movement routines not content-reviewed | Exercise-content review | Before UAT/pilot |
+| B13 | Pet art | Art review of the remaining six pet designs not done | Art review | Before UAT/pilot |
+| B14 | Verification and pilot | Independent testing, UAT and three-user pilot not started; Claude-reported 178/178 browser checks are not independent | Independent testing, then UAT, then pilot | After V1/V2 slices; pilot forecast V1 about 19 Nov, V2 about 27 Nov (not a deadline) |
+
+B06 to B10 remain open. No wearable, V3 or V4 work is in progress.

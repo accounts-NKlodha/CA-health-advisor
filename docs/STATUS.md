@@ -1,5 +1,16 @@
 # Project status
 
+## Update 21 October 2026
+
+- Architecture (PR #3): revised to revision 5, adding the per-user server-restore rule, after Codex reviews. Codex gave conditional design acceptance. The pairing security gate is not signed off and is required before slice V1-5.
+- Owner decision (21 Oct), architecture Q9: server restore resets only the absent user, with a 7-day maximum wait; time never counts as proof (DEC20).
+- Prototype (PR #4): revised three times. (1) Codex review fixes. (2) Owner feedback: more transparent pet, one reminder at a time with independent responses, illustrated movement routines, visual weekly review, pet size control 75 to 150%, "Bring pet above clock". (3) Codex follow-up fixes to routine outcomes. Claude reported 178 of 178 browser state checks (self-reported).
+- Owner approval (21 Oct): prototype approved together with three defaults: hide the pet during presentations, optional nine-hour check-in, neutral posture wording (DEC21).
+- Codex closed the prototype verification gate on 21 Oct (independent 24/24 harness on routine logic). The agreed V1/V2 build is authorised in reviewed slices, starting with V1-0 (in progress) (DEC22).
+- Still required: pairing/security sign-off before V1-5, exercise-content review, art review of the remaining six pet designs, independent testing, UAT, three-user pilot (Blockers.md B11 to B14).
+- Not in scope now: wearable work, V3, V4.
+- Forecast (not a deadline), unchanged from the architecture: V1 pilot about 19 Nov 2026, V2 pilot about 27 Nov 2026.
+
 ## Update 20 October 2026
 
 - Direction confirmed by owner (Rohit, 20 Oct, via Codex review on PR #1): complete V1 and V2 first, then wearable feasibility. V3 (hosted, wearables, rankings, groups) is deferred, not removed. Wearable feasibility no longer blocks V1/V2 architecture; no wearable research is being done now.
