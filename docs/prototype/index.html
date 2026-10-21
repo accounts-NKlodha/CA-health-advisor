@@ -1014,7 +1014,7 @@ function remTick(){
   if (!S.acts) return;
   const n = nowMin();
   ACT_ORDER.forEach(k => { const a = S.acts[k];
-    if (['done', 'skipped', 'partial', 'noresp', 'snoozed', 'notdue'].includes(a.status) && n >= a.due){ a.status = 'due'; if (k === 'water') { a.status = 'notdue'; a.due = n - 1; remWaterCheck(); } }
+    if (['done', 'skipped', 'partial', 'none', 'noresp', 'snoozed', 'notdue'].includes(a.status) && n >= a.due){ a.status = 'due'; if (k === 'water') { a.status = 'notdue'; a.due = n - 1; remWaterCheck(); } }
     if (k === 'water' && ['due', 'notdue', 'goal'].includes(a.status)) remWaterCheck(); });
   if (S.remActive){
     const a = S.acts[S.remActive], k = S.remActive;
@@ -1261,7 +1261,7 @@ function reviewWin(){
     ${WK_ACTS.map(([k, short, label, ic, col, ct]) => `<div role="row" style="display:contents"><div class="rl" role="rowheader">${icon(ic, 14)} ${short}</div>${v.days[k].split('').map((x, i) => `<div class="mk ${x}" role="cell" data-code="${x}" style="--c:${col};--ct:${ct};animation-delay:${200 + i * 50}ms" title="${WK_DAYS[i]}: ${MK[x][1]}" aria-label="${label}, ${WK_DAYS[i]}: ${MK[x][1]}">${MK[x][0]}</div>`).join('')}</div>`).join('')}</div>
     <div class="wkLegend" id="wkLegend"><span><i class="mk d">&#10003;</i>done</span><span><i class="mk p">&#9680;</i>partly</span><span><i class="mk z">0</i>0: none recorded</span><span><i class="mk n">&ndash;</i>no data: app not running</span><span><i class="mk o">off</i>day off</span><span><i class="mk s">&middot;</i>not started / today</span></div>`;
   const table = `<div class="wkPlainView"><table class="t" id="wkTable"><tr><th>Activity</th>${WK_DAYS.map(d => `<th>${d}</th>`).join('')}<th>Summary</th></tr>${WK_ACTS.map(([k, , label]) => `<tr><td>${label}</td>${v.days[k].split('').map(x => `<td>${MKWORD[x]}</td>`).join('')}<td>${wkCenter(k, v)} ${WK_ACTS.find(a => a[0] === k)[6]}</td></tr>`).join('')}</table>
-    <p class="small muted">"0" means the app was running and nothing was done or logged. "No data" means the app was not running; those days are not counted as misses.</p>
+    <p class="small muted">"0" means the app was running and no completion or amount was logged. "No data" means the app was not running; those days are not counted as misses.</p>
     <h3>What went well</h3><ul>${v.good.map(g => `<li>${g}</li>`).join('')}</ul>${v.miss.length ? `<h3>Planned but missed</h3><ul>${v.miss.map(g => `<li>${g}</li>`).join('')}</ul>` : ''}</div>`;
   const his = `<h3>Highlights</h3>${v.hi.map(([big, tx, ic, tone], i) => `<div class="hi ${tone || ''}" style="animation-delay:${400 + i * 90}ms"><span class="big">${big}</span><span class="tx">${icon(ic, 13)} ${tx}</span></div>`).join('')}`;
   const sugs = v.sug.length ? `<h3>Try next week</h3>${v.sug.map((k, i) => `<div class="sugc" style="animation-delay:${500 + i * 90}ms"><span class="ic">${icon(k === 'keep' ? 'check' : k === 'serving' ? 'drop' : k === 'seated' ? 'move' : 'clock', 15)}</span><span class="tx">${SUGS[k].text}</span><span class="ctl" id="sug-${k}">${renderSug(k)}</span></div>`).join('')}` : `<h3>Try next week</h3><p class="small muted">No suggestions until there is enough data.</p>`;

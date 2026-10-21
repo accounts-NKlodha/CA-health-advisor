@@ -392,6 +392,11 @@ const SCOPE = '#bubble, #hyWin, #modalWrap.show #modal, #adminWin, #gallery.show
   await click('#bubble [data-a="mvStop"]');
   check('immediate Stop from a reminder records none (not partial), keeps the movement clock; eye rest and water untouched', await ev(s0 => S.acts.movement.status === 'none' && S.acts.movement.since === s0 && S.acts.eye.status === 'due' && S.acts.water.status === 'due' && S.remActive === null && S.gapUntil > nowMin(), since0) && /Stopped, none recorded/.test(await bubbleText()));
   const mvCase = async (seq) => { await start('reminder'); await click('#bubble [data-a="moveFromRem"]'); await click('#bubble [data-a="mvVer"][data-v="seated"]'); const s0 = await ev(() => S.acts.movement.since); await ev(() => { S._t0 = nowMin(); }); for (const a of seq) await click(`#bubble [data-a="${a}"]`); return { st: await ev(() => S.acts.movement.status), since: await ev(() => S.acts.movement.since), s0, now: await ev(() => nowMin()) }; };
+  const nd0 = await ev(() => ({ due: S.acts.movement.due, since: S.acts.movement.since, gap: S.gapUntil }));
+  check('after none, no movement reminder returns inside the 5-minute calm gap', await ev(() => { A.remAdv(4); return S.remActive !== 'movement' && S.acts.movement.status === 'none'; }));
+  check('after none, advancing past the next due time brings the movement reminder back; a.since still unchanged', await ev(d => { A.remAdv(Math.max(1, d.due - nowMin() + 1)); for (let i = 0; i < 30 && S.remActive !== 'movement'; i++) { if (S.remActive) remRecord(S.remActive, 'snooze'); A.remAdv(1); } return (S.acts.movement.status === 'showing' || S.remActive === 'movement') && S.acts.movement.since === d.since; }, nd0) && await ev(() => !!document.querySelector('#bubble [data-rem="movement"]')));
+  await click('#bubble [data-a="remResp"][data-v="movement:done"]');
+  check('a.since changes only on self-reported movement (Already moved)', await ev(d => S.acts.movement.since !== d.since && S.acts.movement.status === 'done', nd0));
   let mc = await mvCase(['mvSkip', 'mvSkip', 'mvSkip']);
   check('all three skipped from a reminder records none and does not reset the movement clock', mc.st === 'none' && mc.since === mc.s0);
   mc = await mvCase(['mvDone', 'mvStop']);
@@ -445,6 +450,7 @@ const SCOPE = '#bubble, #hyWin, #modalWrap.show #modal, #adminWin, #gallery.show
   check('a measured 0 is drawn differently: white segment with a coloured outline', nd.zFill === '#fff' && /^#/.test(nd.zStroke || '') && nd.zFill !== nd.nFill);
   check('week strip: no data shows "–" on hatching, 0 shows "0" on plain white', nd.mnTxt === '–' && nd.mzTxt === '0' && /repeating-linear-gradient/.test(nd.mnBg) && nd.mzBg === 'none');
   check('legend explains no data (app not running) vs 0 (app running)', /no data: app not running/.test(nd.legend) && /0: none recorded/.test(nd.legend) && !/not done/.test(nd.legend));
+  check('table view copy says no completion or amount was logged', await ev(() => /no completion or amount was logged/.test(document.documentElement.innerHTML) && !/nothing was done or logged/.test(document.documentElement.innerHTML)));
   await click('#hyBody [data-a="wkVar"][data-v="mixed"]');
   await click('#hyBody [data-a="sug"][data-v="afternoon"]');
   check('suggestion Apply still bound to state in the new layout (afternoon 16:00)', await ev(() => S.afternoonAt === '16:00' && /Applied/.test(document.querySelector('#sug-afternoon').innerText)));
