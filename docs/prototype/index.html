@@ -401,7 +401,7 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':
 const btn = (label, a, v = '', cls = '') => `<button class="btn ${cls}" data-a="${a}" data-v="${esc(v)}">${label}</button>`;
 const sw = (on, a, v, label) => `<button class="sw" role="switch" aria-checked="${!!on}" aria-label="${esc(label)}" data-a="${a}" data-v="${esc(v)}"></button>`;
 const DRAFT = '<span class="draft">Draft pending contract</span>';
-const PROPOSED = '<span class="proposed">Proposed default, owner to confirm</span>';
+const PROPOSED = '<span class="proposed">Owner approved default (21 Oct)</span>';
 const PROVISIONAL = '<span class="draft">Provisional: pending content review</span>';
 const REQUIRED = '<span class="req">Required in the live product (owner, 21 Oct)</span>';
 const V2 = '<span class="v2tag">V2</span>';
@@ -548,7 +548,7 @@ function placePet(){
    It reads the CURRENT work area (after any display or taskbar change) and clamps the pet inside it. */
 function bringPet(from){
   const pet = $('#pet');
-  if (S.presenting){ cap('A presentation is running, so the pet stays hidden (proposed default, owner to confirm). It comes back when the presentation ends.'); return; }
+  if (S.presenting){ cap('A presentation is running, so the pet stays hidden (owner approved default, 21 Oct). It comes back when the presentation ends.'); return; }
   pet.style.display = '';
   const desk = $('#desk'), W = desk.clientWidth, H = desk.clientHeight, w = pet.offsetWidth || petPx();
   S.edge = 'right';
@@ -1512,8 +1512,8 @@ const A = {
   pauseEnd(){ S.paused = false; setPet('idle'); toastPet('Coaching resumed.'); },
   meeting(){ S.meeting = !S.meeting; closeBubble(); setPet(S.meeting ? 'meeting' : 'idle'); cap(S.meeting ? 'Manual "in a meeting": prompts held, pet dimmed with mute badge. Reminders are not replayed afterwards.' : 'Meeting over.'); },
   simPresent(){ S.presenting = true; closeBubble(); $('#pet').style.display = 'none'; $('#trayTxt').textContent = 'HealthierYou (hidden: presentation)';
-    cap('Presentation/full-screen detected: the pet and all bubbles are hidden completely and prompts pause; the tray icon stays. Nothing is replayed afterwards. <span class="proposed">Proposed default, owner to confirm</span> Detection is imperfect; the manual toggle always works. <button class="tgl" data-a="presentEnd">presentation ends</button>'); },
-  presentEnd(){ S.presenting = false; closeBubble(); $('#pet').style.display = ''; $('#trayTxt').textContent = 'HealthierYou'; setPet('idle'); cap('Pet returns quietly. No bubble, no replay burst, no backlog of prompts (proposed default, owner to confirm).'); },
+    cap('Presentation/full-screen detected: the pet and all bubbles are hidden completely and prompts pause; the tray icon stays. Nothing is replayed afterwards. <span class="proposed">Owner approved default (21 Oct)</span> Detection is imperfect; the manual toggle always works. <button class="tgl" data-a="presentEnd">presentation ends</button>'); },
+  presentEnd(){ S.presenting = false; closeBubble(); $('#pet').style.display = ''; $('#trayTxt').textContent = 'HealthierYou'; setPet('idle'); cap('Pet returns quietly. No bubble, no replay burst, no backlog of prompts (owner approved default, 21 Oct).'); },
   simQuiet(){ closeBubble(); setClock('Tue 19:10'); setPet('quiet'); cap('Outside work hours: moon badge, "Off hours" tag, no prompts. Logging still possible from the menu.'); },
   /* recovery */
   recAsk(){ recCheckIn(false); },

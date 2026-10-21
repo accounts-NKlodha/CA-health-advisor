@@ -1,6 +1,6 @@
 # HealthierYou wireframes: V1 and V2
 
-Status: **draft for design review**, revision 3 (21 Oct 2026). Revision 3 answers the owner's prototype feedback of 21 Oct 2026 (section 10). Revision 2 answered Codex's review of PR #4. Revision 1 was 20 Oct 2026. For Codex review and then the owner's explicit approval. **Not approved. Product development is not approved.** Nothing here is product code. The owner has accepted the pet concept and the deadline and recovery-day flow. The owner has **not** given prototype approval or build approval. The revised screens below await owner review.
+Status: **approved by the owner on 21 Oct 2026**, revision 3. Revision 3 answers the owner's prototype feedback of 21 Oct 2026 (section 10); revision 2 answered Codex's review of PR #4; revision 1 was 20 Oct 2026. The owner approved the prototype and the three defaults. The agreed V1/V2 build may start after Codex closes the remaining prototype verification. Nothing here is product code. Movement content and the six remaining pet designs still go through their content and art reviews.
 
 - **Clickable prototype:** [`docs/prototype/index.html`](prototype/index.html). It is one self-contained file: open it from disk in any current browser. It makes no network calls, saves nothing to disk (changes live in memory only and are lost on reload), and never uses the camera. A banner on every screen says: *"Simulated prototype for design review. Not the product. No data is saved or sent."*
 - **Screenshots** (1366x768): [`docs/prototype/screens/`](prototype/screens/).
@@ -8,7 +8,7 @@ Status: **draft for design review**, revision 3 (21 Oct 2026). Revision 3 answer
 - **Baseline:** the approved PRD 0.3 ([`PRD_0.3.md`](PRD_0.3.md)) and the architecture proposal, revision 5 ([`Architecture_V1_V2.md`](Architecture_V1_V2.md)).
 - **Scope:** V1 and V2 only. V3 (hosted accounts, watches, avatars, groups and rankings) is deferred. It appears only as greyed "coming later" items: the hosted option in setup, a disabled settings tab and a disabled entry in the flow index. V4 sound, headphone and colour sessions are not shown.
 - **Draft pending contract:** a parallel revision is still finalising the sharing, deletion, recovery, pairing and backup contracts. Every screen that depends on them carries a **Draft pending contract** label, both here and in the prototype. Their wording and fields can change without changing the layout. Revision 2 reconciles these screens with architecture revision 3 (full certificate fingerprint check is authoritative, six words are auxiliary; per-device summaries with no within-day timing; fail-closed server recovery) but they stay labelled Draft until the contract text is final.
-- **Proposed defaults:** a few defaults come from the reviewer's recommendations. They are **not owner answers**. Each one is labelled **Proposed default, owner to confirm** in the prototype and listed in section 8. The three earlier proposed defaults (hide the pet during presentations, optional 9-hour check-in, neutral posture copy) **remain pending owner confirmation**. The owner's 21 Oct feedback did not confirm them.
+- **Defaults:** the three reviewer-recommended defaults (hide the pet during presentations, optional 9-hour check-in, neutral posture copy) were **approved by the owner on 21 Oct 2026**, together with the prototype. Each is labelled **Owner approved default, 21 Oct** in the prototype and listed in section 8.
 
 ## 1. Design rules
 
@@ -83,7 +83,7 @@ Common states, which apply wherever relevant:
   - A drag moves the pet. It snaps to the nearest left or right edge, or stays where dropped if the edge is set to "where I drop it".
   - **Size (owner item 6):** the pet's size is set in Settings, Pet (W3). Bubbles are placed so they stay inside the work area at every size.
   - **Lost pet (owner item 7):** if the pet is off-screen, hidden behind other windows or hard to find, **Bring pet above clock** returns it (see T1 and W3).
-  - The pet and all bubbles hide completely during presentations and full-screen apps, the tray stays, and the pet is restored quietly (**Proposed default, owner to confirm**).
+  - The pet and all bubbles hide completely during presentations and full-screen apps, the tray stays, and the pet is restored quietly (**Owner approved default, 21 Oct**).
 - **States:** see section 4.
 - **Error states:** if the pet's window would be off-screen after a monitor is unplugged or a display setting changes, it is repositioned inside the visible work area, at the bottom-right above the Windows clock (PET-04).
 
@@ -160,7 +160,7 @@ All movement content is **provisional, pending the planned content review**. Pla
 - **Focus:** 30, 60 or 90 min or custom. The pet's eyes close and its tag shows the time left. When focus ends, nothing is replayed.
 - **Pause:** 30 min, 1 hour, rest of today or until I resume. Pause has the highest precedence.
 - **Meeting:** a manual toggle. The pet dims and shows a mute badge with a "Meeting - paused" tag.
-- **Presentation or full screen** (**Proposed default, owner to confirm**): detection hides the pet **and every bubble** completely. The tray icon stays, and the tray's "Show pet" ends the hidden state. When the presentation ends nothing is replayed: no burst of held reminders and no bubble. The prototype states that detection is imperfect.
+- **Presentation or full screen** (**Owner approved default, 21 Oct**): detection hides the pet **and every bubble** completely. The tray icon stays, and the tray's "Show pet" ends the hidden state. When the presentation ends nothing is replayed: no burst of held reminders and no bubble. The prototype states that detection is imperfect.
 
 ### B6 Pomodoro
 
@@ -174,7 +174,7 @@ All movement content is **provisional, pending the planned content review**. Pla
 
 ### B7 Recovery day
 
-- **Check-in** (**Proposed default, owner to confirm**: optional and configurable, 9 hours by default): "This PC has been active for about 9 hours today. That is an estimate of PC activity, not a sign of stress or tiredness. Would you like to mark today as a deadline-heavy day?" Options: Yes, No, Don't ask today. Settings, Reminders has a switch and an hours choice (8, 9 or 10). With the switch off, nothing is offered automatically and "Deadline day" on the pet menu still works. The app does not infer stress.
+- **Check-in** (**Owner approved default, 21 Oct**: optional and configurable, 9 hours by default): "This PC has been active for about 9 hours today. That is an estimate of PC activity, not a sign of stress or tiredness. Would you like to mark today as a deadline-heavy day?" Options: Yes, No, Don't ask today. Settings, Reminders has a switch and an hours choice (8, 9 or 10). With the switch off, nothing is offered automatically and "Deadline day" on the pet menu still works. The app does not infer stress.
 - **Invitation:** Tomorrow, Choose a date, Later, No thanks. It says the plan is not a leave request.
 - **Recovery morning:** the day's plan, with "Your water goal stays 2000 ml".
 - **End of day:** "Did this routine feel helpful?" Yes, Somewhat, No or Skip. The answer stays on this PC.
@@ -185,7 +185,7 @@ All movement content is **provisional, pending the planned content review**. Pla
 - **B9 Review offer:** Open, Later (offered once on the next workday), Skip this week.
 - **B10 Offline:** "Can't reach the office server since 10:05. Reminders, logging and reviews keep working. 3 summaries waiting; sent when it's back, only for categories you still share." Actions: Details (W8), OK.
 - **B11 (V2):**
-  - **Cue** (**Proposed default, owner to confirm**): "Your position has changed from your calibration. Would you like a short movement break?" with Thanks, Snooze 30 min, Turn camera off. It adds "compared with your calibration, not a health score". The wording is neutral by default. Directional detail (for example which way) is shown only after the detector passes a quality gate in desk testing.
+  - **Cue** (**Owner approved default, 21 Oct**): "Your position has changed from your calibration. Would you like a short movement break?" with Thanks, Snooze 30 min, Turn camera off. It adds "compared with your calibration, not a health score". The wording is neutral by default. Directional detail (for example which way) is shown only after the detector passes a quality gate in desk testing.
   - **"Did the camera move?":** cues are paused; Recalibrate now, Later, Off.
   - **Recalibrate request:** asked once.
   - **Camera taken by another app:** posture check is paused and V1 continues.
@@ -233,8 +233,8 @@ All movement content is **provisional, pending the planned content review**. Pla
 - **W4 Reminders:**
   - intensity: Light, Balanced or More often, with the Balanced values shown as "starting values to test, not medical advice";
   - category switches: movement, eye rest, water;
-  - quiet rules: off-hours (always on, shown as a fixed switch), presentation and full screen (on, "may not detect every meeting"; **Proposed default, owner to confirm:** pet and bubbles hidden completely, tray stays, no replay), camera or microphone in use (experimental, off);
-  - the afternoon reminder time (changed by a weekly-review suggestion) and the optional long-day check-in switch and hours (**Proposed default, owner to confirm**).
+  - quiet rules: off-hours (always on, shown as a fixed switch), presentation and full screen (on, "may not detect every meeting"; **Owner approved default (21 Oct):** pet and bubbles hidden completely, tray stays, no replay), camera or microphone in use (experimental, off);
+  - the afternoon reminder time (changed by a weekly-review suggestion) and the optional long-day check-in switch and hours (**Owner approved default, 21 Oct**).
 - **W5 Water and workweek:** goal, serving buttons, pacing switch, workdays, hours, review time and time zone. The hours and review time are bound to the in-memory state: reopening the tab shows the saved values. "Goal changes apply from today; past weeks are judged against the goal you had then."
 - **W6 Movement:** the Monday to Saturday matrix (**provisional content, pending content review**, labelled so on the tab, in the bubble and in the coverage table), Sunday optional, and the default version (ask, seated or standing), which a weekly-review suggestion can change and Undo restores.
 - **W7 Focus and Pomodoro:** a description of the presets and the auto-restart switch (off).
@@ -359,7 +359,7 @@ Every pet supports the same states. Each has an icon badge and a text tag, so no
 | Pomodoro | Timer running | Clock, "Work 24:59" or "Break 04:10" | Eyes closed | Pause, Resume, End |
 | Quiet hours | Outside work hours or on a non-workday | Moon, "Off hours" | Dimmed, eyes closed | B1 (logging still allowed) |
 | Meeting or suppressed | Manual meeting toggle | Mute, "Meeting - paused" | Dimmed | Meeting over |
-| Presentation or full screen | Detected | Pet and every bubble hidden; tray text shows "hidden: presentation" (**Proposed default, owner to confirm**) | n/a | Tray "Show pet"; nothing is replayed |
+| Presentation or full screen | Detected | Pet and every bubble hidden; tray text shows "hidden: presentation" (**Owner approved default, 21 Oct**) | n/a | Tray "Show pet"; nothing is replayed |
 | Paused | User paused coaching | Pause, "Paused 1 h" | Dimmed, eyes closed | Resume coaching |
 | Disconnected | Server unreachable (paired users only) | Plug, "Offline - still works" | Desaturated | B10, then B1 |
 | Camera on (V2) | Posture check active | "CAM" plus dot (top left), "Camera on" | Idle | B1 (with "Camera off") |
@@ -501,18 +501,18 @@ Further flows in the prototype:
 
 ## 8. Open design questions
 
-**Proposed defaults.** Items 1, 3, 7, 9 and 10 below come with a proposed default from the review. Each is labelled **Proposed default, owner to confirm** in the prototype. **They are not owner answers.** The owner's 21 Oct feedback did not confirm any of them. Items 3 (presentation hiding), 7 (optional 9-hour check-in) and 10 (neutral posture copy) remain pending.
+**Proposed defaults.** Items 1, 3, 7, 9 and 10 below come with a proposed default from the review. Each is labelled **Owner approved default, 21 Oct** in the prototype. Items 3 (presentation hiding), 7 (optional 9-hour check-in) and 10 (neutral posture copy) were approved by the owner on 21 Oct 2026.
 
 1. **Pet visual family:** do the flat two-colour SVG placeholders point in the right direction? This is the *visual-family approval*, and it is separate from the *ten finished pets* (4 drawn, 6 art pending). Approving the family does not approve any pet as finished. The remaining six need art once the direction is approved.
 2. **Hotkey:** Ctrl+Alt+H can clash with AltGr keyboard layouts and with other office tools. Confirm the default, or ship with no default and set it in setup.
-3. **Presentations:** should the pet hide completely (as prototyped) or shrink to a tray badge? *Proposed default, owner to confirm:* the pet and all bubbles are hidden completely, the tray icon stays, and nothing is replayed afterwards.
+3. **Presentations:** should the pet hide completely (as prototyped) or shrink to a tray badge? *Owner approved default (21 Oct):* the pet and all bubbles are hidden completely, the tray icon stays, and nothing is replayed afterwards.
 4. **No-response collapse:** after 10 minutes, is a "1" badge on the pet enough, or should the tray icon also show it?
 5. **Pairing entry:** pasting an 80-character slip versus typing it in groups from print (architecture A14). The final format follows the pairing contract.
 6. **Deletion scope:** "all dates" plus a date range, or per-month choices only? This follows the sharing contract.
-7. **Recovery check-in:** confirm the 9-hour active threshold and the check-in wording. *Proposed default, owner to confirm:* the check-in is optional and configurable (switch plus 8, 9 or 10 hours), and PC activity time is labelled an estimate, not evidence of stress.
+7. **Recovery check-in:** confirm the 9-hour active threshold and the check-in wording. *Owner approved default (21 Oct):* the check-in is optional and configurable (switch plus 8, 9 or 10 hours), and PC activity time is labelled an estimate, not evidence of stress.
 8. **Weekly review:** hide the phone section entirely for users who never log phone interruptions? The proposal is to hide it.
 9. **Movement illustrations:** a neutral human figure (as prototyped) or the pet demonstrating? The proposal is the human figure, for clarity. All movement content is **provisional, pending the content review**.
-10. **Posture cue wording:** name the direction ("leaning further forward") or stay neutral? *Proposed default, owner to confirm:* neutral, "Your position has changed from your calibration. Would you like a short movement break?" Directional detail only after the detector passes a quality gate in the desk test.
+10. **Posture cue wording:** name the direction ("leaning further forward") or stay neutral? *Owner approved default (21 Oct):* neutral, "Your position has changed from your calibration. Would you like a short movement break?" Directional detail only after the detector passes a quality gate in the desk test.
 11. **Water wording at the goal:** "Your logging goal is reached; hydration reminders are paused", with manual logging still available. Confirm the wording.
 12. **Pace guide:** the prototype spreads the user's own goal evenly over the user's own work hours and calls a user "behind" only when the logged amount is at least 100 ml under the amount expected by now. Confirm this sample rule, or choose another.
 13. **One-at-a-time reminder (owner item 2):** confirm the working interpretation (one of movement, eye rest or water at a time, a separate response for each, independent status, no burst). Confirm the gap between two reminders.
@@ -551,8 +551,7 @@ Further flows in the prototype:
 **What the owner has and has not decided.**
 
 - The owner **accepted the pet concept** and **accepted the deadline and recovery-day flow** (item 4).
-- The owner has **not given prototype approval and has not given build approval**. The feedback asks for a revised prototype. It is not authorization to start product development.
-- The three earlier proposed defaults remain **pending owner confirmation**: hiding the pet during presentations, the optional 9-hour check-in, and the neutral posture copy. They are not recorded as approved.
+- **Update, 21 Oct 2026 (later):** the owner approved the prototype and the three defaults (hide the pet during presentations, optional nine-hour check-in, neutral posture wording). The agreed V1/V2 build may start after Codex closes the remaining prototype verification. Movement content and the six remaining pet designs still go through their content and art reviews.
 - The per-user 7-day restore rule (A1, architecture Q9) is **the owner's 21 Oct decision**. It is unchanged.
 
 ### 10.1 Traceability

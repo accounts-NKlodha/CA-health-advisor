@@ -296,10 +296,10 @@ const SCOPE = '#bubble, #hyWin, #modalWrap.show #modal, #adminWin, #gallery.show
   check('below daily total (1400 of 2000) but ahead of pace is NOT called behind', await ev(() => waterTotal() < S.waterGoal && behindPace() === false) && !/behind your own pace|Water:/.test(await bubbleText()));
   check('break card labels the sample scenario in the caption', /Sample scenario/.test(await ev(() => document.querySelector('#capBox').innerText)));
 
-  // ---- Proposed defaults (all labelled, none are owner answers)
+  // ---- Defaults approved by the owner on 21 Oct (labelled)
   G('6 proposed defaults');
   await reset(); await ev(() => settings('reminders'));
-  check('presentation default carries the Proposed default label', await ev(() => /Proposed default, owner to confirm/.test(document.querySelector('#hyBody').innerText) && /hidden completely/.test(document.querySelector('#hyBody').innerText) && /tray icon stays/.test(document.querySelector('#hyBody').innerText)));
+  check('presentation default carries the owner-approved label', await ev(() => /Owner approved default \(21 Oct\)/.test(document.querySelector('#hyBody').innerText) && /hidden completely/.test(document.querySelector('#hyBody').innerText) && /tray icon stays/.test(document.querySelector('#hyBody').innerText)));
   await start('focus'); await ev(() => A.simPresent());
   check('presentation: pet hidden, no bubble, tray stays', await ev(() => document.querySelector('#pet').style.display === 'none' && !document.querySelector('#bubble').classList.contains('show') && document.querySelector('#trayHY').offsetParent !== null));
   await ev(() => say('<p>test</p>'));
@@ -537,8 +537,8 @@ const SCOPE = '#bubble, #hyWin, #modalWrap.show #modal, #adminWin, #gallery.show
   await reset(); await ev(() => settings('reminders'));
   const prop = [await ev(() => document.querySelectorAll('#hyBody .proposed').length)];
   await ev(() => settings('camera')); prop.push(await ev(() => document.querySelectorAll('#hyBody .proposed').length));
-  check('the three "Proposed default, owner to confirm" labels are still shown (2 on Reminders, 1 on Posture check)', prop[0] === 2 && prop[1] === 1 && (src.match(/Proposed default, owner to confirm/g) || []).length >= 2);
-  check('no proposed default is recorded as approved', !/(Proposed default|proposed default)[^<]{0,40}approved/i.test(src) && !/owner approved/i.test(src));
+  check('the three owner-approved default labels are shown (2 on Reminders, 1 on Posture check)', prop[0] === 2 && prop[1] === 1 && (src.match(/Owner approved default \(21 Oct\)/g) || []).length >= 2 && !/Proposed default, owner to confirm/.test(src));
+  check('approved defaults are labelled as the owner decision of 21 Oct, with no pending label left', /Owner approved default \(21 Oct\)/.test(src) && !/owner to confirm/i.test(src.replace(/7 days[^<]{0,80}/g, '')));
   await start('admin');
   check('per-user restore rule with the 7-day maximum is unchanged (owner decision)', /7 days is the maximum wait \(owner decision, 21 Oct\)/.test(await ev(() => document.querySelector('#adminBody').innerText)));
   await start('recovery');
