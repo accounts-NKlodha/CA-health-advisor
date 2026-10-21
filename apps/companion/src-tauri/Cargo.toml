@@ -1,0 +1,20 @@
+[package]
+name = "hy-companion"
+description = "HealthierYou desktop companion (Tauri 2 + fixed WebView2; skeleton in V1-0)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[build-dependencies]
+# Versions proven by feasibility batch 1 (spike/batch1, build 6ef6eb3).
+tauri-build = { version = "=2.7.3", features = [] }
+
+[dependencies]
+hy-core.workspace = true
+tauri = { version = "=2.12.4", features = [] }
+
+[lints]
+workspace = true

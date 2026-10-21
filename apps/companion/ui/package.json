@@ -1,0 +1,24 @@
+{
+  "name": "hy-companion-ui",
+  "private": true,
+  "version": "0.1.0",
+  "description": "HealthierYou companion pages: the pet (plain TypeScript) and the screens (Preact)",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "preact": "10.29.8"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.3",
+    "typescript": "5.9.3",
+    "vite": "7.3.7"
+  }
+}

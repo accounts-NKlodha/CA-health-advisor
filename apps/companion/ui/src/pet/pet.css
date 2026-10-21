@@ -1,0 +1,13 @@
+:root {
+  color-scheme: light dark;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+}
+html,
+body {
+  margin: 0;
+  background: transparent;
+}
+#pet {
+  padding: 8px;
+  font-size: 12px;
+}
