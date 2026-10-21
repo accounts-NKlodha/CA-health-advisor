@@ -600,3 +600,12 @@ These apply to the live product, not to the prototype. They do not start the bui
 
 1. No movement routine ships until the content review passes.
 2. The weekly review always offers a table alternative and a still, no-animation version. Missing days are never drawn or counted as zero.
+
+### 10.1 Prototype revision 3 notes
+
+- **Reviewer flow 2b** ("Pet size, look + bring above clock") demonstrates items 1, 6 and 7. Reminder, movement and weekly-review changes are in flows 1, 4, 6 and 11.
+- **Screenshots:** `prototype/screens/09-reminder-water-own-turn.png` to `22-bring-pet-taskbar-right.png` show the revised reminder, movement routine, weekly review, size control, pet look and lost-pet recovery.
+- **Taskbar on the right or top:** the pet cannot sit directly above the clock because that space is the taskbar. "Bring pet above clock" then places the pet at the bottom-right corner of the work area, beside the clock, and says so.
+- **Display change:** the simulation deliberately leaves the pet stranded (a missed display-change event) so the button's recovery is visible. Automatic clamping to the work area on display change remains a build acceptance item.
+- **Pomodoro break card:** it still lists look away, move and water together as suggestions, because it is a break the user started, not a due reminder. Owner to say if it should follow the one-at-a-time rule too.
+- **Evidence:** 171 of 171 state assertions pass (Claude-reported), 0 console errors, 0 network requests.
