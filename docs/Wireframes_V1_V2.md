@@ -1,6 +1,6 @@
 # HealthierYou wireframes: V1 and V2
 
-Status: **draft for design review**, revision 2 (21 Oct 2026). It answers Codex's review of PR #4. Revision 1 was 20 Oct 2026. For Codex review and then the owner's explicit approval. **Not approved. Product development is not approved.** Nothing here is product code.
+Status: **draft for design review**, revision 3 (21 Oct 2026). Revision 3 answers the owner's prototype feedback of 21 Oct 2026 (section 10). Revision 2 answered Codex's review of PR #4. Revision 1 was 20 Oct 2026. For Codex review and then the owner's explicit approval. **Not approved. Product development is not approved.** Nothing here is product code. The owner has accepted the pet concept and the deadline and recovery-day flow. The owner has **not** given prototype approval or build approval. The revised screens below await owner review.
 
 - **Clickable prototype:** [`docs/prototype/index.html`](prototype/index.html). It is one self-contained file: open it from disk in any current browser. It makes no network calls, saves nothing to disk (changes live in memory only and are lost on reload), and never uses the camera. A banner on every screen says: *"Simulated prototype for design review. Not the product. No data is saved or sent."*
 - **Screenshots** (1366x768): [`docs/prototype/screens/`](prototype/screens/).
@@ -8,12 +8,12 @@ Status: **draft for design review**, revision 2 (21 Oct 2026). It answers Codex'
 - **Baseline:** the approved PRD 0.3 ([`PRD_0.3.md`](PRD_0.3.md)) and the architecture proposal, revision 5 ([`Architecture_V1_V2.md`](Architecture_V1_V2.md)).
 - **Scope:** V1 and V2 only. V3 (hosted accounts, watches, avatars, groups and rankings) is deferred. It appears only as greyed "coming later" items: the hosted option in setup, a disabled settings tab and a disabled entry in the flow index. V4 sound, headphone and colour sessions are not shown.
 - **Draft pending contract:** a parallel revision is still finalising the sharing, deletion, recovery, pairing and backup contracts. Every screen that depends on them carries a **Draft pending contract** label, both here and in the prototype. Their wording and fields can change without changing the layout. Revision 2 reconciles these screens with architecture revision 3 (full certificate fingerprint check is authoritative, six words are auxiliary; per-device summaries with no within-day timing; fail-closed server recovery) but they stay labelled Draft until the contract text is final.
-- **Proposed defaults:** a few defaults come from the reviewer's recommendations. They are **not owner answers**. Each one is labelled **Proposed default, owner to confirm** in the prototype and listed in section 8.
+- **Proposed defaults:** a few defaults come from the reviewer's recommendations. They are **not owner answers**. Each one is labelled **Proposed default, owner to confirm** in the prototype and listed in section 8. The three earlier proposed defaults (hide the pet during presentations, optional 9-hour check-in, neutral posture copy) **remain pending owner confirmation**. The owner's 21 Oct feedback did not confirm them.
 
 ## 1. Design rules
 
-1. **The pet comes first.** The pet is a window of about 128 px (scalable from 75 to 150%). It is transparent, always on top and **never takes keyboard focus** (`WS_EX_NOACTIVATE`). Everyday actions (water, movement, focus, Pomodoro, snooze, phone note) happen in **one bubble** next to the pet. Ordinary windows are only for setup, settings, goals, sharing, backup and reviews.
-2. **One bubble at a time.** Due needs are combined into one reminder that states its reasons (RHY-02). A snooze covers the whole reminder.
+1. **The pet comes first.** The pet is a window of about 128 px (scalable from 75 to 150%). It is transparent, always on top and **never takes keyboard focus** (`WS_EX_NOACTIVATE`). The pet art is drawn a little see-through so it covers less of the work underneath. Bubbles, buttons and text are never see-through. Everyday actions (water, movement, focus, Pomodoro, snooze, phone note) happen in **one bubble** next to the pet. Ordinary windows are only for setup, settings, goals, sharing, backup and reviews.
+2. **One bubble, one activity at a time.** A reminder shows one of movement, eye rest or water (RHY-02, owner feedback item 2). Each activity has its own response and its own status. A response to one never marks another as done. There is never a burst of pop-ups.
 3. **The user is always in control.** Every prompt has a quiet way out (Snooze, Not now, Skip, Stop). A dismissal never counts as completion. There is no guilt, no sad pet and no streak punishment. After three dismissals in a day, the app offers fewer reminders.
 4. **Honest data.** Labels such as *self-reported*, *estimate*, *no data* and *measured zero* are visible wherever figures appear. Missing days never look like zero.
 5. **Status never depends on colour alone.** Every pet state has an icon badge and a text tag. Charts use the Okabe-Ito palette together with patterns (hatched means no data, dashed means partial or in progress).
@@ -25,13 +25,13 @@ Surfaces: **P** = pet window, **B** = bubble beside the pet, **W** = HealthierYo
 
 | ID | Surface and screen | Purpose | PRD IDs | Prototype flow (index no.) |
 | --- | --- | --- | --- | --- |
-| P0 | Pet window (eight states plus suppression states) | Always-present companion; status at a glance | PET-01 to PET-04, RHY-03 | 2, 3 |
-| T1 | Tray menu | Show or hide the pet, pet panel, pause, settings, reviews | PET-04, RHY-03 | 2 (tray icon) |
+| P0 | Pet window (eight states plus suppression states), revised: more transparent art, size control | Always-present companion; status at a glance | PET-01 to PET-04, RHY-03 | 2, 3 |
+| T1 | Tray menu, revised: adds **Bring pet above clock** | Show or hide the pet, bring the pet back, pet panel, pause, settings, reviews | PET-04, RHY-03 | 2 (tray icon), 21 |
 | B1 | Pet menu (expanded bubble) | Hub for all everyday actions | PET-03, WAT-01, MOV-02, RHY-03, FOC-01, DIS-01, REC-01 | 2 |
 | K1 | Pet panel (keyboard path, Ctrl+Alt+H) | Same as B1, but takes focus on purpose; Esc returns focus | PET-04 | 16 |
-| B2 | Combined reminder card | One prompt with explicit reasons; done, water, snooze, dismiss, focus | RHY-02, RHY-03, WAT-02 | 4 |
+| B2 | Reminder card, revised: one activity at a time (movement, eye rest or water) with its own response and status | One prompt for one activity; separate responses; no burst | RHY-02, RHY-03, WAT-02 | 4 |
 | B3 | Water confirmation and water panel | Quick and custom log, undo, edit, remove | WAT-01, WAT-02 | 5 |
-| B4 | Movement guide (intro, step, result) | Day's routine, seated or standing, step done, skip, stop, partial | MOV-01, MOV-02 | 6 |
+| B4 | Movement guide (intro, step, result), revised: named movement, illustration or animation, short steps, duration and reps, seated alternative | Day's routine, seated or standing, step done, skip, stop, partial | MOV-01, MOV-02 | 6 |
 | B5 | Focus chooser, pause chooser, meeting toggle | Suppress prompts on request | RHY-03, RHY-04 | 7 |
 | B6 | Pomodoro chooser, controls, break card | User-started timer with combined break | FOC-01 | 9 |
 | B7 | Deadline check-in, recovery invitation, recovery morning, reflection | Recovery-day journey | REC-01 | 8 |
@@ -42,7 +42,7 @@ Surfaces: **P** = pet window, **B** = bubble beside the pet, **W** = HealthierYo
 | B12 | Meditation invitation and session (V2) | Text-guided pause | CAL-01 | 19 |
 | W1 | Setup wizard (8 steps) | First run | First-use journey; PET-01/02, WAT-01, RHY-03, SHR-01 | 1 |
 | W2 | Pairing (setup step 2; also opened from W8) **Draft pending contract** | Optional LAN pairing with a slip | LAN-01 | 1 |
-| W3 | Settings: Pet | Ten-pet library; name, colour, size, edge, tone, motion; reset | PET-01, PET-02 | 2 |
+| W3 | Settings: Pet, revised: size control and **Bring pet above clock** button | Ten-pet library; name, colour, size, transparency preview, edge, tone, motion; reset | PET-01, PET-02, PET-04 | 2, 21 |
 | W4 | Settings: Reminders | Intensity, categories, quiet rules, meeting detection | RHY-02 to RHY-04 | 7 |
 | W5 | Settings: Water and workweek (goals) | Water goal, serving buttons, workdays, hours, review time, time zone | WAT-01, WAT-02, MOV-01, REV-01 | 1, 16 |
 | W6 | Settings: Movement programme | Monday to Saturday matrix (provisional content, pending content review), default version | MOV-01 | 6 |
@@ -52,7 +52,7 @@ Surfaces: **P** = pet window, **B** = bubble beside the pet, **W** = HealthierYo
 | W10 | Settings: Posture check (V2) | Status, set up, recalibrate, off | CAM-01, CAM-02 | 18 |
 | W11 | Settings: Meditation (V2) | Invitation time (off until set) | CAL-01 | 19 |
 | W12 | Settings: Accessibility | Text size, reduced motion, contrast, keyboard map | PET-04 | 16 |
-| W13 | Weekly review | Successes, missed plans, coverage, up to 3 suggestions, phone self-reports | REV-01, DIS-01 | 11 |
+| W13 | Weekly review, redesigned as a visual review | Progress graphics, short highlights, up to 3 short suggestions, phone self-reports, data table alternative | REV-01, DIS-01 | 11 |
 | W14 | Monthly progress | Monthly rates with coverage, baseline, day strip, table alternative | REV-02 | 12 |
 | W15 | Recovery-day plan | Plan items; water unchanged; save, change date, cancel | REC-01 | 8 |
 | W16 | Posture check consent and calibration window (V2) | Consent, access outcomes, calibration quality, saved | CAM-01 | 18 |
@@ -77,13 +77,21 @@ Common states, which apply wherever relevant:
 
 ### P0 Pet window
 
-- **Content:** the pet's art (a data-only pack; the prototype draws 4 placeholder SVG pets), a top-right **icon badge** and a bottom **text tag**. In V2, a "CAM" badge appears at top left while the camera is on.
+- **Content:** the pet's art (a data-only pack; the prototype draws 4 placeholder SVG pets), a top-right **icon badge** and a bottom **text tag**. **Revised (owner item 1):** the art is a little more transparent than before (the prototype uses about 85% opacity as a review value). The badge, the tag, bubbles and every control stay fully opaque and keep readable contrast on any background. The prototype shows the revised pet over the fake spreadsheet for owner review. In V2, a "CAM" badge appears at top left while the camera is on.
 - **Interaction:**
   - A click opens the bubble without taking focus.
   - A drag moves the pet. It snaps to the nearest left or right edge, or stays where dropped if the edge is set to "where I drop it".
+  - **Size (owner item 6):** the pet's size is set in Settings, Pet (W3). Bubbles are placed so they stay inside the work area at every size.
+  - **Lost pet (owner item 7):** if the pet is off-screen, hidden behind other windows or hard to find, **Bring pet above clock** returns it (see T1 and W3).
   - The pet and all bubbles hide completely during presentations and full-screen apps, the tray stays, and the pet is restored quietly (**Proposed default, owner to confirm**).
 - **States:** see section 4.
-- **Error states:** if the pet's window would be off-screen after a monitor is unplugged, it is repositioned to the primary monitor's default edge (PET-04).
+- **Error states:** if the pet's window would be off-screen after a monitor is unplugged or a display setting changes, it is repositioned inside the visible work area, at the bottom-right above the Windows clock (PET-04).
+
+### T1 Tray menu (revised)
+
+- **Items:** Show or hide pet, **Bring pet above clock**, Open pet panel, Pause..., Settings, Reviews, Quit.
+- **Bring pet above clock (owner item 7):** one click, no confirmation. It works even when the pet is hidden or lost, because it does not depend on the pet. It shows the pet if hidden, then moves it to the bottom-right corner of the visible work area, immediately above the Windows clock (above the taskbar), at the current pet size. A short bubble says "Your pet is back above the clock" and nothing else.
+- **Prototype:** the simulated tray has the item. The reviewer can first move the pet off-screen or to a far corner, then use the item and see the result. A caption button simulates a display change to show that the pet stays inside the work area.
 
 ### B1 Pet menu and K1 pet panel
 
@@ -97,15 +105,28 @@ Common states, which apply wherever relevant:
 - **States:** paused gives a short "Resume coaching" bubble first. Focus shows the time left and "End focus". Offline shows B10 first, with "Open pet menu". A running Pomodoro shows the B6 controls.
 - **K1:** Ctrl+Alt+H (configurable) opens the same content with keyboard focus on the first action. Tab moves between actions. Esc closes the panel and focus returns to the previous app.
 
-### B2 Combined reminder card
+### B2 Reminder card (revised, owner item 2)
 
-- **Content:** a title and a reasons list, for example: "48 min of work since your last break", "Eye rest due, folded into this break", "Water: 140 ml behind your own pace (about 390 ml expected by now)". The water reason appears only when the logged amount is at least 100 ml below the amount expected by now (the user's own goal spread evenly over the user's own work hours). The prototype states its sample scenario in the caption: 250 ml logged at 11:15 against about 390 ml expected. A footnote says that one snooze covers all of them.
-- **Actions:** Start 2-min movement (primary), Log 250 ml (strikes through the water reason), Already did it, Snooze 10 min, Focus..., Not now.
+**Working interpretation, to be confirmed by the owner through the demo:** the owner said the reminder "has to show one of 3 and user should be able to respond to each reminder". The prototype reads this as: show one of movement, eye rest or water at a time, with a separate response for each. It is not one bundled response that completes all three. If the owner means something else, the screen changes and this section is revised.
+
+- **Content:**
+  - a title naming the one activity now offered, with its reason in one line. Examples: "Movement: 48 min of work since your last break", "Eye rest: look away for 20 seconds", "Water: 140 ml behind your own pace (about 390 ml expected by now)";
+  - a small row of three status chips, Movement, Eye rest and Water. Each chip shows its own status in words and an icon: *due*, *done (self-reported)*, *snoozed*, *skipped*, *not due*. The chip of the offered activity is highlighted. Status never depends on colour alone;
+  - the water reason appears only when the logged amount is at least 100 ml below the amount expected by now (the user's own goal spread evenly over the user's own work hours). The prototype states its sample scenario in the caption: 250 ml logged at 11:15 against about 390 ml expected.
+- **Actions (for the activity shown):**
+  - **Movement:** Start movement (opens B4), Already did it, Snooze 10 min, Not now.
+  - **Eye rest:** Start 20 s eye rest, Already did it, Snooze 10 min, Not now.
+  - **Water:** Log 250 ml, Already did it (opens the water panel), Snooze 10 min, Not now.
+  - **Focus...** stays available on every card.
+- **Independence rules:**
+  - A response applies to the shown activity only. Done, snooze, skip or dismiss on one never changes the status of the other two.
+  - Another activity that is also due waits. It is shown only as "also due" on its chip. It is offered after the user has responded and after the normal gap between reminders. There is **no burst of consecutive pop-ups**, and at most one reminder is visible at any time.
+  - A snooze applies to the shown activity only and returns that activity once.
 - **States:**
-  - **No response for 10 min:** collapses to a "1" badge and is logged as *offered, no response*.
-  - **After snooze:** the same single card returns once.
-  - **Third dismissal:** offers to switch to Light.
-  - **Category switched off:** that reason is never listed.
+  - **No response for 10 min:** the card collapses to a "1" badge and is logged as *offered, no response* for that activity only.
+  - **Third dismissal in a day:** offers to switch to Light.
+  - **Category switched off:** that activity is never offered and its chip shows "off".
+- **Prototype:** a reviewer strip steps through the cases: movement offered, then the user responds, then eye rest offered later, then water. It shows the chips changing one at a time.
 
 ### B3 Water
 
@@ -115,15 +136,20 @@ Common states, which apply wherever relevant:
   - **Empty:** "No entries yet today. That means nothing logged, not zero water."
   - **Goal reached:** "Your logging goal is reached; hydration reminders are paused." Manual logging stays available (serving buttons, custom amount, Undo and Details remain). There is no further encouragement (WAT-01).
 
-### B4 Movement guide
+### B4 Movement guide (revised, owner item 3)
+
+All movement content is **provisional, pending the planned content review**. Placeholder art alone is not enough: the owner needs to see what movement to do. Every screen carries the notice "Provisional content, pending content review".
 
 - **Intro:**
-  - the day and its body region, with "3 steps, about 2 min";
-  - a notice that the content is provisional, pending content review;
+  - the movement's **name** (for example "Shoulder rolls") and the day's body region;
+  - a small **illustration or animation** of the movement, with seated and standing variants, and a text equivalent;
+  - **short steps** (3 to 4 lines, one action each);
+  - the **duration and repetitions** for the routine shown (for example "5 slow rolls forward, 5 back, about 1 min");
   - a seating check ("if your chair has wheels, choose standing or lock them");
   - stop and skip wording;
   - buttons: Seated, Standing, Later, Skip today, plus links to other days.
-- **Step:** a neutral human illustration with seated and standing variants, the step text, Done, Skip step and Stop.
+- **Step:** the step's name, the illustration or animation for that step, the step text, its repetitions or seconds, a **seated alternative** shown beside the standing version where it applies, and the buttons Done, Skip step and Stop. Skip and Stop are always visible and never count as done.
+- **Reduced motion:** the animation becomes a still illustration with numbered pose captions. The steps text carries the full instruction on its own.
 - **Result:**
   - "Routine complete, self-reported", or
   - "Saved as partial: 2 of 3 steps, 1 skipped", which is never counted as complete. There is no catch-up.
@@ -196,11 +222,14 @@ Common states, which apply wherever relevant:
 
 - **W3 Pet:**
   - a 5x2 library grid; the 6 pets without art are marked "art pending". A note separates two decisions: **visual-family approval** (do the placeholders point the right way?) and **the ten finished pets** (4 drawn, 6 art pending). Approving the family does not approve any pet as finished;
-  - name (up to 20 characters), colour variants (3 per pet), size 75 to 150%;
+  - name (up to 20 characters), colour variants (3 per pet);
+  - **size control (owner item 6, required in the live product):** a slider or stepped choice from 75 to 150% with a live preview of the pet and a text value. The chosen size is kept and applied at the next start. The pet stays inside the work area at every size;
+  - **Bring pet above clock** button (owner item 7): same action as the tray item, in the Settings window so it is reachable without the pet. A note says what it does;
   - edge: left, right, or where I drop it;
   - tone: Gentle, Plain or Cheerful;
   - a Motion switch and Reset to defaults.
   - Edits apply instantly.
+  - The Pet tab shows the revised, more transparent pet next to a plain light and a plain dark background so the owner can judge legibility.
 - **W4 Reminders:**
   - intensity: Light, Balanced or More often, with the Balanced values shown as "starting values to test, not medical advice";
   - category switches: movement, eye rest, water;
@@ -231,20 +260,25 @@ Common states, which apply wherever relevant:
 
 - Cards for Export my data, Import a backup, Install update from file, and Install previous version. Each card says what is included and what is not; pairing is excluded from backups.
 
-### W13 Weekly review
+### W13 Weekly review (redesigned, owner item 5)
 
-- **Content:**
-  - the week and its coverage ("Recorded on 6 of 6 workdays");
-  - What went well;
-  - Planned but missed;
-  - For next week: up to 3 suggestions, each with Apply or Not for me. **Apply really changes the setting** in the prototype's state (afternoon reminder time, a 750 ml serving button, or the default movement version). The row then reads "Applied" with what changed, and **Undo restores the exact prior value**;
-  - phone interruptions (self-reported, editable labels);
-  - a "how these are worked out" definition line.
+The owner found the old review text-heavy and asked for a "stunning and jazzy" review. The redesign is a polished visual page. Text is kept short.
+
+- **Layout, top to bottom:**
+  - **Hero band:** the week's date range and the pet, with one short headline sentence. The coverage line sits here ("Recorded on 6 of 6 workdays").
+  - **Progress graphics:** large rings or bars for water goal days, routines completed and break follow-through, each with its value and a detail such as "4 of 6 days". A day strip for the week uses one symbol per day: goal met, some logged, 0 logged (measured zero), no data, off. Use the Okabe-Ito palette with patterns.
+  - **Highlights:** up to 3 short cards, for example "Water goal on 4 days" and "Longest break-free block: 70 min (estimate)". One line each.
+  - **For next week:** up to 3 short, actionable suggestions, each one line with Apply or Not for me. **Apply really changes the setting** in the prototype's state (afternoon reminder time, a 750 ml serving button, or the default movement version). The row then reads "Applied" with what changed, and **Undo restores the exact prior value**.
+  - **Phone interruptions:** self-reported counts with editable labels (hidden for users who never log them, see section 8).
+  - A one-line "how these are worked out" definition, expandable.
+- **Missing data is not zero:** a day with no data is drawn as a hatched cell labelled "no data". A measured zero is drawn as an outline at 0 with the words "0 logged". A ring or bar never treats missing days as misses.
+- **Motion and readability:** the graphics may animate once on opening. With reduced motion (Windows setting or the in-app switch) they appear in their final state with no animation. A **Show as table** control gives every figure as plain text, and screen readers get the same table. Text and graphics keep readable contrast and do not depend on colour alone.
 - **Variants:**
   - **Strong week**;
-  - **Mixed week:** "On 2 days nothing was logged (no data, not zero)";
-  - **Not enough data:** "Missing days are not counted as misses", and no suggestions;
+  - **Mixed week:** "On 2 days nothing was logged (no data, not zero)", shown as hatched cells;
+  - **Not enough data:** "Missing days are not counted as misses", graphics show hatched placeholders, and no suggestions;
   - **First week:** "Comparisons start after two full weeks".
+- **Review status:** the visual treatment is new and awaits owner review.
 
 ### W14 Monthly progress
 
@@ -331,14 +365,14 @@ Every pet supports the same states. Each has an icon badge and a text tag, so no
 | Camera on (V2) | Posture check active | "CAM" plus dot (top left), "Camera on" | Idle | B1 (with "Camera off") |
 | Camera: no reading (V2) | Away, dark, occluded, low confidence or suspect | "CAM", "Cam: no reading" or "Cam: cues paused" | Idle | Recalibrate request if suspect |
 
-**Snooze and dismiss:** a snooze covers the whole combined reminder and returns it once. A dismissal is logged as dismissed, never as done. After three dismissals the app offers Light intensity.
+**Snooze and dismiss:** a snooze covers the one activity shown and returns it once. A dismissal is logged as dismissed for that activity, never as done. After three dismissals the app offers Light intensity.
 
 **Precedence** (architecture 4.3):
 
 1. pause, lock, sleep or off-hours;
 2. focus, presentation or meeting;
 3. an active exercise, break or Pomodoro;
-4. one combined reminder.
+4. one reminder, for one activity.
 
 ## 5. Key flows
 
@@ -356,12 +390,12 @@ Each flow can be started from the prototype's flow index. Step references use th
    8. Try a reminder, then Finish. The pet appears at the right edge and celebrates once.
 2. **Hydration log:** click the pet, then +250 ml. The confirmation shows the total and Undo. Water... opens the panel for a custom amount, Edit (correction) or Remove. At the goal: "Your logging goal is reached; hydration reminders are paused", and manual logging stays available.
 3. **Movement session (six-day programme):**
-   1. Pet menu, then Today's movement (or Start 2-min movement from B2).
-   2. The intro shows the day's region and the seating check.
-   3. Choose Seated or Standing.
+   1. Pet menu, then Today's movement (or Start movement from B2 when movement is the activity offered).
+   2. The intro shows the movement's name, an illustration or animation, short steps, duration and repetitions, and the seating check. It is marked provisional, pending content review.
+   3. Choose Seated or Standing (the seated alternative is shown).
    4. Each step: Done, Skip step or Stop.
    5. Result: complete (self-reported; celebration) or partial (counted separately, no catch-up). Skip today records a skip. Other days can be chosen from the intro, and Sunday is optional.
-4. **Recovery-day plan:**
+4. **Recovery-day plan** (accepted by the owner on 21 Oct 2026; direction unchanged):
    1. A long day triggers a check-in, or the user taps "Deadline day".
    2. Yes leads to the invitation. Choosing Tomorrow or a date opens W15.
    3. Adjust the items, then Save. The pet confirms and offers Reschedule or Cancel plan.
@@ -376,7 +410,7 @@ Each flow can be started from the prototype's flow index. Step references use th
    5. A lock pauses the timer until Resume.
 6. **Weekly and monthly review:**
    1. At Sat 17:00 the pet offers the review: Open, Later or Skip.
-   2. W13 shows successes, misses, coverage and up to 3 suggestions (Apply or Not for me). Phone labels can be corrected there.
+   2. W13 shows the visual review: progress graphics, short highlights, coverage and up to 3 short suggestions (Apply or Not for me). Missing days are hatched, not zero. Show as table is available. Phone labels can be corrected there.
    3. Monthly progress (W14): metric chips, chart, baseline toggle, and Show as table.
    - **Empty variant:** "first chart after two weeks".
 7. **Sharing preview, stop and delete** **Draft pending contract**:
@@ -409,7 +443,8 @@ Each flow can be started from the prototype's flow index. Step references use th
 Further flows in the prototype:
 
 - **Pet on the desktop:** menu, drag and snap, edits.
-- **Combined reminder:** every action, no-response collapse, snooze return and the third-dismissal offer.
+- **One-at-a-time reminder:** movement, eye rest and water offered one at a time, a separate response for each, independent chips, no-response collapse, snooze return and the third-dismissal offer.
+- **Lost pet (flow 21):** move the pet away, then Bring pet above clock from the tray menu and from Settings, Pet. A caption button simulates a display change.
 - **Focus, pause, meeting, presentation and quiet hours.**
 - **Phone interruption** self-report and correction.
 - **Server unreachable:** B10, waiting summaries, "back online, sent n".
@@ -450,23 +485,23 @@ Further flows in the prototype:
 | 1. Installation and pairing: LAN, hosted, server unavailable, invalid pairing | W1 step 2, W2 | Hosted is greyed (V3 deferred). The installer itself is not simulated |
 | 2. Initial setup: water, workweek, reminders, ten-pet selector | W1, W3 | 4 drawn pets plus 6 "art pending" placeholders. Visual-family approval is a separate decision from the ten finished pets |
 | 3. Desktop context: pet over spreadsheet, compact and expanded, position and size | P0, B1, W3 | Fake spreadsheet window behind |
-| 4. Combined reminder: completion, water, snooze, dismiss, focus | B2 | Includes the no-response and third-dismissal states |
-| 5. Six-day exercise: instructions, adaptation, partial, skip | B4, W6 | Content is provisional, pending content review |
+| 4. Reminder: completion, water, snooze, dismiss, focus | B2 | Revised 21 Oct: one activity at a time, separate responses. Includes the no-response and third-dismissal states. Interpretation awaits owner confirmation |
+| 5. Six-day exercise: instructions, adaptation, partial, skip | B4, W6 | Revised 21 Oct: named movement, illustration, steps, reps, seated alternative. Content is provisional, pending content review |
 | 6. Settings and sharing: toggles, preview, pending sync, revoke, delete | W8, M1 to M3 | Draft pending contract |
-| 7. Weekly reflection: strong, mixed, missing data, first week | W13 | Four variants |
+| 7. Weekly reflection: strong, mixed, missing data, first week | W13 | Four variants. Redesigned 21 Oct as a visual review |
 | 8. Monthly progress: coverage, baseline, empty, accessible alternative | W14 | |
 | 9. V2 calibration and check-in, camera conflict, low confidence, immediate off | W16, B11 | Simulated silhouette only |
 | 10. V3 device paths | Not prototyped | V3 deferred by the owner (20 Oct); greyed placeholder only |
 | 11. Phone self-report and correction; experimental states visibly separate | B8, W13 | No automatic phone detection is shown (DIS-02 stays an experiment) |
 | 12. Administrator status, pairing and update view without health analytics | A1 | Draft pending contract |
-| Addendum: recovery-day invitation and planning, deadline-day decline | B7, W15 | |
+| Addendum: recovery-day invitation and planning, deadline-day decline | B7, W15 | Accepted by the owner on 21 Oct, unchanged |
 | Addendum: Pomodoro controls and combined break | B6, W7 | |
 | Addendum: simple V2 meditation timer | B12, W11 | |
 | Addendum: avatar sync, groups, rankings, scores | Not prototyped | V3, deferred |
 
 ## 8. Open design questions
 
-**Proposed defaults.** Items 1, 3, 7, 9 and 10 below come with a proposed default from the review. Each is labelled **Proposed default, owner to confirm** in the prototype. **They are not owner answers.**
+**Proposed defaults.** Items 1, 3, 7, 9 and 10 below come with a proposed default from the review. Each is labelled **Proposed default, owner to confirm** in the prototype. **They are not owner answers.** The owner's 21 Oct feedback did not confirm any of them. Items 3 (presentation hiding), 7 (optional 9-hour check-in) and 10 (neutral posture copy) remain pending.
 
 1. **Pet visual family:** do the flat two-colour SVG placeholders point in the right direction? This is the *visual-family approval*, and it is separate from the *ten finished pets* (4 drawn, 6 art pending). Approving the family does not approve any pet as finished. The remaining six need art once the direction is approved.
 2. **Hotkey:** Ctrl+Alt+H can clash with AltGr keyboard layouts and with other office tools. Confirm the default, or ship with no default and set it in setup.
@@ -480,7 +515,10 @@ Further flows in the prototype:
 10. **Posture cue wording:** name the direction ("leaning further forward") or stay neutral? *Proposed default, owner to confirm:* neutral, "Your position has changed from your calibration. Would you like a short movement break?" Directional detail only after the detector passes a quality gate in the desk test.
 11. **Water wording at the goal:** "Your logging goal is reached; hydration reminders are paused", with manual logging still available. Confirm the wording.
 12. **Pace guide:** the prototype spreads the user's own goal evenly over the user's own work hours and calls a user "behind" only when the logged amount is at least 100 ml under the amount expected by now. Confirm this sample rule, or choose another.
-13. **Server recovery wording (Draft):** the recovery rule (release restored history only on proof from a surviving control log outside the restored backup set; otherwise fail closed) is in architecture 5.3 revision 5 (per-user isolation). The owner chose per-user reset with a 7-day maximum wait on 21 Oct (architecture Q9).
+13. **One-at-a-time reminder (owner item 2):** confirm the working interpretation (one of movement, eye rest or water at a time, a separate response for each, independent status, no burst). Confirm the gap between two reminders.
+14. **Pet transparency level (owner item 1):** the prototype uses about 85% opacity as a review value. Confirm it or ask for more or less.
+15. **Movement content (owner item 3):** names, illustrations and steps are provisional until the content review passes.
+16. **Server recovery wording (Draft):** the recovery rule (release restored history only on proof from a surviving control log outside the restored backup set; otherwise fail closed) is in architecture 5.3 revision 5 (per-user isolation). The owner chose per-user reset with a 7-day maximum wait on 21 Oct (architecture Q9).
 
 ## 9. Prototype notes and verification
 
@@ -507,3 +545,58 @@ Further flows in the prototype:
     - `06-camera-calibration.png` (unchanged)
     - `07-delete-range-receipt.png` (range deletion receipt)
     - `08-admin-restore-fail-closed.png` (server recovery, fail closed)
+
+## 10. Owner feedback, 21 Oct 2026
+
+**What the owner has and has not decided.**
+
+- The owner **accepted the pet concept** and **accepted the deadline and recovery-day flow** (item 4).
+- The owner has **not given prototype approval and has not given build approval**. The feedback asks for a revised prototype. It is not authorization to start product development.
+- The three earlier proposed defaults remain **pending owner confirmation**: hiding the pet during presentations, the optional 9-hour check-in, and the neutral posture copy. They are not recorded as approved.
+- The per-user 7-day restore rule (A1, architecture Q9) is **the owner's 21 Oct decision**. It is unchanged.
+
+### 10.1 Traceability
+
+| Item | Owner feedback | Wireframe or flow section | Prototype change | Status |
+| --- | --- | --- | --- | --- |
+| 1 | Pet a little more transparent; messages and controls stay legible | P0, W3, section 1 rule 1 | Pet art drawn at about 85% opacity; bubbles, badge, tag and controls opaque; legibility preview in Settings, Pet | Revised, awaiting owner review |
+| 2 | Show one of movement, eye rest or water at a time; separate response for each; independent status; no burst (working interpretation, to be confirmed through the demo) | B2, section 4 (snooze and precedence), flow "One-at-a-time reminder", section 8 item 13 | Reminder card shows one activity with its own actions and a three-chip status row; responses never change another chip; reviewer strip steps through the cases | Revised, awaiting owner review |
+| 3 | Movement must explain what to do: name, illustration or animation, short steps, duration and reps, seated alternative, skip and stop; content provisional pending review | B4, W6, flow 3, section 8 item 15 | Named routine, illustration with seated variant, 3 to 4 short steps, reps and duration, Skip and Stop on every screen, provisional notice | Revised, awaiting owner review |
+| 4 | Deadline and recovery-day flow looks fine; keep direction | B7, W15, flow 4 | None | Accepted by owner, unchanged |
+| 5 | Weekly review text-heavy; make it visual, "stunning and jazzy"; progress graphics, concise highlights, short suggestions; missing data not zero; reduced-motion alternative | W13, flow 6 | Hero band, progress rings or bars, day strip, up to 3 highlight cards, short suggestions, hatched no-data cells, Show as table, no animation with reduced motion | Revised, awaiting owner review |
+| 6 | Size control required in the live product | W3, P0, acceptance criteria 10.2 | Size control with live preview in Settings, Pet; pet and bubbles stay inside the work area at each size | Revised, awaiting owner review |
+| 7 | Bring pet above clock button, reachable from tray menu and Settings, returns pet to bottom-right above the Windows clock inside the work area, handles display changes | T1, W3, P0, flow 21, acceptance criteria 10.2 | Tray item and Settings button; result shown after moving the pet away; display-change simulation | Revised, awaiting owner review |
+
+### 10.2 Implementation acceptance criteria
+
+These apply to the live product, not to the prototype. They do not start the build.
+
+**Item 6, pet size control**
+
+1. The live product has a pet size control in Settings, Pet.
+2. The chosen size is kept across restarts.
+3. At every offered size (75 to 150%) the pet window and its bubbles stay fully inside the visible work area.
+4. A size change takes effect at once and does not move the pet outside the work area.
+5. The control works by keyboard and is readable at 100, 125, 150 and 200% Windows scaling.
+
+**Item 7, Bring pet above clock**
+
+1. The action is reachable from the tray menu and from Settings, Pet, without using the pet. It works when the pet is hidden, off-screen or behind other windows.
+2. It places the pet at the bottom-right of the visible work area, immediately above the Windows clock, at the current pet size.
+3. The result is correct across display changes: monitor unplugged or added, resolution change, Windows scaling (DPI) change, taskbar moved, resized or auto-hidden, and a different taskbar size.
+4. The pet is never placed outside the visible work area.
+5. It is tested on the office PCs, not only on a development machine.
+6. It does not take keyboard focus away from the user's current app.
+
+**Item 2, one-at-a-time reminder**
+
+1. No activity is marked done by another activity's response. Movement, eye rest and water each keep their own status.
+2. At most one reminder is visible at any time. Other due activities wait and are never shown as a burst of consecutive pop-ups.
+3. A snooze, skip or dismissal applies to the shown activity only.
+4. Each activity's outcome is recorded separately (done, snoozed, skipped, dismissed, offered with no response).
+5. This depends on the owner confirming the working interpretation of item 2.
+
+**Items 3 and 5**
+
+1. No movement routine ships until the content review passes.
+2. The weekly review always offers a table alternative and a still, no-animation version. Missing days are never drawn or counted as zero.
