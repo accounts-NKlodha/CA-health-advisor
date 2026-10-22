@@ -67,6 +67,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/0002_coach.sql"),
         compat: Compat::Expand,
     },
+    Migration {
+        version: 3,
+        name: "movement_routine",
+        sql: include_str!("../migrations/0003_movement_routine.sql"),
+        compat: Compat::Expand,
+    },
 ];
 
 /// The schema version this build writes.
@@ -327,6 +333,8 @@ mod tests {
     /// add a new migration instead.
     const V1_CHECKSUM: &str = "94477528e439b81e";
     const V2_CHECKSUM: &str = "6d0b8382cc44f5c6";
+    /// v3 (slice V1-3) is frozen once released.
+    const V3_CHECKSUM: &str = "bdee60776c4c2f38";
 
     fn mem() -> Connection {
         Connection::open_in_memory().unwrap()
@@ -388,6 +396,8 @@ mod tests {
         assert_eq!(MIGRATIONS[0].checksum(), V1_CHECKSUM);
         assert_eq!(MIGRATIONS[1].checksum(), V2_CHECKSUM);
         assert_eq!(MIGRATIONS[1].compat, Compat::Expand);
+        assert_eq!(MIGRATIONS[2].checksum(), V3_CHECKSUM);
+        assert_eq!(MIGRATIONS[2].compat, Compat::Expand);
     }
 
     #[test]

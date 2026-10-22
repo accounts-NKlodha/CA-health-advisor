@@ -413,6 +413,201 @@ body {
 
 /* --------------------------------------------------- high contrast: all solid */
 
+/* ------------------------------------------- the movement guide (wireframe B4) */
+
+.guide {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin: 4px 0 8px;
+}
+
+.fig {
+  flex: none;
+  width: 132px;
+  margin: 0;
+  padding: 6px 6px 4px;
+  border-radius: 10px;
+  background: #eef4f4;
+  text-align: center;
+}
+
+.fig-svg {
+  display: block;
+  width: 120px;
+  height: 120px;
+  margin: 0 auto;
+}
+
+.fig figcaption {
+  color: #44525c;
+  font-size: 10.5px;
+  line-height: 1.25;
+}
+
+.steps {
+  margin: 0;
+  padding-left: 20px;
+  line-height: 1.4;
+}
+
+.steps li {
+  margin: 0 0 4px;
+}
+
+.note {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-style: italic;
+}
+
+.fig-gh {
+  fill: none;
+  stroke: #2d6a6e;
+  stroke-width: 2;
+  stroke-dasharray: 4 3;
+  opacity: 0.6;
+}
+.fig-ar {
+  fill: none;
+  stroke: #b86e00;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+}
+.fig-arh {
+  fill: #b86e00;
+}
+
+.fig-tilt {
+  transform-origin: 60px 66px;
+  animation: fig-tilt 6s ease-in-out infinite;
+}
+.fig-roll {
+  animation: fig-roll 2.4s ease-in-out infinite;
+}
+.fig-spin {
+  transform-origin: 50px 47px;
+  animation: fig-spin 2.4s linear infinite;
+}
+.fig-twist {
+  transform-origin: 60px 66px;
+  animation: fig-twist 6s ease-in-out infinite;
+}
+.fig-rise {
+  animation: fig-rise 2.6s ease-in-out infinite;
+}
+.fig-rise5 {
+  animation: fig-rise5 2.6s ease-in-out infinite;
+}
+.fig-heel {
+  animation: fig-heel 2.6s ease-in-out infinite;
+}
+.fig-heel-calf {
+  transform-origin: 70px 113px;
+}
+.fig-heel-seated {
+  transform-origin: 97px 113px;
+}
+
+@keyframes fig-tilt {
+  0%,
+  8%,
+  52%,
+  58%,
+  100% {
+    transform: rotate(0);
+  }
+  22%,
+  40% {
+    transform: rotate(-24deg);
+  }
+  72%,
+  90% {
+    transform: rotate(24deg);
+  }
+}
+@keyframes fig-roll {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  25% {
+    transform: translate(1px, -7px);
+  }
+  50% {
+    transform: translate(-5px, -4px);
+  }
+  75% {
+    transform: translate(-2px, 1px);
+  }
+}
+@keyframes fig-spin {
+  to {
+    transform: rotate(-360deg);
+  }
+}
+@keyframes fig-twist {
+  0%,
+  8%,
+  52%,
+  58%,
+  100% {
+    transform: rotate(0);
+  }
+  22%,
+  40% {
+    transform: rotate(35deg);
+  }
+  72%,
+  90% {
+    transform: rotate(-35deg);
+  }
+}
+@keyframes fig-rise {
+  0%,
+  15%,
+  85%,
+  100% {
+    transform: translateY(0);
+  }
+  40%,
+  60% {
+    transform: translateY(-7px);
+  }
+}
+@keyframes fig-rise5 {
+  0%,
+  15%,
+  85%,
+  100% {
+    transform: translateY(0);
+  }
+  40%,
+  60% {
+    transform: translateY(-5px);
+  }
+}
+@keyframes fig-heel {
+  0%,
+  15%,
+  85%,
+  100% {
+    transform: rotate(0);
+  }
+  40%,
+  60% {
+    transform: rotate(22deg);
+  }
+}
+
+/* Reduced motion: still poses (solid start, dashed target, arrow) explain the movement. */
+@media (prefers-reduced-motion: reduce) {
+  .fig-svg * {
+    animation: none !important;
+  }
+}
+
 @media (forced-colors: active) {
   :root {
     --art-opacity: 1;

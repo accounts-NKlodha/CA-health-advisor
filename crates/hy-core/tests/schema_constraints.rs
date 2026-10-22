@@ -235,6 +235,56 @@ fn an_event_is_superseded_at_most_once() {
 }
 
 #[test]
+fn a_guided_routine_has_one_result_and_each_step_once_before_it() {
+    let conn = db();
+    let step = |id, i: u32, session: &str| {
+        Ev {
+        id,
+        type_name: "movement.step",
+        payload: Box::leak(
+            format!(
+                r#"{{"session_id":"{session}","routine_id":"tue","routine_version":1,"variant":"seated","step_index":{i},"steps_total":3,"outcome":"done"}}"#
+            )
+            .into_boxed_str(),
+        ),
+        ..Ev::default()
+    }
+    };
+    let result = |id, session: &str, supersedes| {
+        Ev {
+        id,
+        type_name: "movement.session",
+        supersedes,
+        payload: Box::leak(
+            format!(
+                r#"{{"session_id":"{session}","routine_id":"tue","routine_version":1,"variant":"seated","outcome":"partial","steps_done":1,"steps_skipped":0,"steps_total":3}}"#
+            )
+            .into_boxed_str(),
+        ),
+        ..Ev::default()
+    }
+    };
+    const S1: &str = "0199f0a0-0000-7000-8000-0000000000b1";
+    const S2: &str = "0199f0a0-0000-7000-8000-0000000000b2";
+    let id = |n: u8| -> &'static str {
+        Box::leak(format!("0199f0a0-0000-7000-8000-0000000000{n:02x}").into_boxed_str())
+    };
+    insert_event(&conn, &step(id(1), 0, S1)).unwrap();
+    // The same step twice.
+    assert!(insert_event(&conn, &step(id(2), 0, S1)).is_err());
+    insert_event(&conn, &step(id(3), 1, S1)).unwrap();
+    insert_event(&conn, &result(id(4), S1, None)).unwrap();
+    // A second result, and a step after the result.
+    assert!(insert_event(&conn, &result(id(5), S1, None)).is_err());
+    assert!(insert_event(&conn, &step(id(6), 2, S1)).is_err());
+    // A correction (an event superseding the result) is not a second result.
+    insert_event(&conn, &result(id(7), S1, Some(id(4)))).unwrap();
+    // Another routine is independent.
+    insert_event(&conn, &step(id(8), 0, S2)).unwrap();
+    insert_event(&conn, &result(id(9), S2, None)).unwrap();
+}
+
+#[test]
 fn deleting_a_superseded_event_clears_the_link_only() {
     let conn = db();
     insert_event(&conn, &Ev::default()).unwrap();

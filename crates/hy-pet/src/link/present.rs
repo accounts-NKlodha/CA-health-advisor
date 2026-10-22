@@ -8,14 +8,18 @@
 
 use std::time::Duration;
 
-use hy_core::coach::{
-    Bubble as CoachBubble, Chip, ChipStatus, CoachView, PetMode, PomodoroPause, PomodoroPhase,
-    PomodoroView, ReminderReason,
+use chrono::{NaiveDate, Weekday};
+use hy_core::coach::movement::{
+    INTRO_SAFETY, PROVISIONAL, PROVISIONAL_NOTICE, STEP_SAFETY, routine_for,
 };
-use hy_core::schema::{Activity, SessionState};
+use hy_core::coach::{
+    Bubble as CoachBubble, Chip, ChipStatus, CoachView, GuideStage, GuideView, PetMode,
+    PomodoroPause, PomodoroPhase, PomodoroView, RecoveryPlan, ReminderReason,
+};
+use hy_core::schema::{Activity, RoutineOutcome, SessionState};
 use uuid::Uuid;
 
-use crate::shell::{ActionStyle, Bubble, BubbleAction, BubbleChip, MenuAction};
+use crate::shell::{ActionStyle, Bubble, BubbleAction, BubbleChip, BubbleFigure, MenuAction};
 use crate::state::PetState;
 
 /// The serving logged by "Log 250 ml" and "+250 ml water" (wireframe B2 and B1).
@@ -56,6 +60,50 @@ pub mod action {
     pub const USE_LIGHT: &str = "use_light";
     /// "Keep current".
     pub const KEEP_INTENSITY: &str = "keep";
+    // Movement guide (B4).
+    /// "Seated" on the routine's first screen.
+    pub const SEATED: &str = "seated";
+    /// "Standing" on the routine's first screen.
+    pub const STANDING: &str = "standing";
+    /// "Done" on a movement.
+    pub const STEP_DONE: &str = "step_done";
+    /// "Skip this movement".
+    pub const STEP_SKIP: &str = "step_skip";
+    /// "Stop routine".
+    pub const STOP: &str = "stop";
+    /// "Later" (also on the recovery invitation).
+    pub const LATER: &str = "later";
+    /// "Skip today".
+    pub const SKIP_TODAY: &str = "skip_today";
+    /// "Other day".
+    pub const OTHER_DAY: &str = "other_day";
+    /// "Back" from the day chooser.
+    pub const BACK: &str = "back";
+    /// Prefix of a day's routine: `day_mon` to `day_sat`.
+    pub const DAY_PREFIX: &str = "day_";
+    /// "OK" (the routine's result, the planned day).
+    pub const OK: &str = "ok";
+    // Deadline day and recovery day (B7, flow 4).
+    /// Prefix of "Tomorrow" and the date choices: `plan_2026-10-21`.
+    pub const PLAN_PREFIX: &str = "plan_";
+    /// "Choose a date" or "Reschedule".
+    pub const CHOOSE_DATE: &str = "choose_date";
+    /// "No thanks".
+    pub const NO_THANKS: &str = "no_thanks";
+    /// "Cancel plan" or "Cancel for today".
+    pub const CANCEL_PLAN: &str = "cancel_plan";
+    /// "Going now" on the walk suggestion.
+    pub const WALK_NOW: &str = "walk_now";
+    /// "Not now" on the walk suggestion.
+    pub const WALK_NOT_NOW: &str = "walk_not_now";
+    /// "Yes" to "Did this routine feel helpful?".
+    pub const REFLECT_YES: &str = "reflect_yes";
+    /// "Somewhat".
+    pub const REFLECT_SOMEWHAT: &str = "reflect_somewhat";
+    /// "No".
+    pub const REFLECT_NO: &str = "reflect_no";
+    /// "Skip" (nothing is recorded).
+    pub const REFLECT_SKIP: &str = "reflect_skip";
 
     // Pet menu, keyboard panel and tray (B1, B5, B6, T1).
     /// "Show waiting reminder" or "Show Pomodoro card".
@@ -70,6 +118,10 @@ pub mod action {
     pub const MOVEMENT_PARTIAL: &str = "movement_partial";
     /// "Stopped, none done".
     pub const MOVEMENT_STOP: &str = "movement_stop";
+    /// "Deadline day" or "Plan a recovery day".
+    pub const DEADLINE_DAY: &str = "deadline_day";
+    /// "Recovery day: Thu 22 Oct".
+    pub const RECOVERY_SHOW: &str = "recovery_show";
     /// "Mark a break".
     pub const BREAK: &str = "break";
     /// "End focus".
@@ -126,6 +178,22 @@ pub enum BubbleKind {
     CheckIn,
     /// "Fewer reminders?"
     Lighter,
+    /// The guided movement routine.
+    MovementGuide,
+    /// "Deadline day?" from the pet menu.
+    DeadlineDay,
+    /// "Plan a gentler recovery day?"
+    RecoveryInvite,
+    /// "Choose a date".
+    RecoveryDates,
+    /// "Recovery day planned".
+    RecoveryPlanned,
+    /// The recovery day's morning card.
+    RecoveryMorning,
+    /// The optional walk suggestion.
+    RecoveryWalk,
+    /// "Did this routine feel helpful?"
+    RecoveryReflection,
 }
 
 impl BubbleKind {
@@ -139,17 +207,41 @@ impl BubbleKind {
             CoachBubble::PomodoroPausedByLock => Self::PomodoroPaused,
             CoachBubble::LongDayCheckIn { .. } => Self::CheckIn,
             CoachBubble::LighterSchedule => Self::Lighter,
+            CoachBubble::MovementGuide(_) => Self::MovementGuide,
+            CoachBubble::DeadlineDay => Self::DeadlineDay,
+            CoachBubble::RecoveryInvite { .. } => Self::RecoveryInvite,
+            CoachBubble::RecoveryDates { .. } => Self::RecoveryDates,
+            CoachBubble::RecoveryPlanned { .. } => Self::RecoveryPlanned,
+            CoachBubble::RecoveryMorning { .. } => Self::RecoveryMorning,
+            CoachBubble::RecoveryWalk => Self::RecoveryWalk,
+            CoachBubble::RecoveryReflection => Self::RecoveryReflection,
         }
     }
+
+    /// The fixed keys (every kind but a reminder, whose key carries its offer).
+    const FIXED: [(Self, &'static str); 13] = [
+        (Self::PomodoroBreak, "pomodoro-break"),
+        (Self::PomodoroRoundDone, "pomodoro-round"),
+        (Self::PomodoroPaused, "pomodoro-paused"),
+        (Self::CheckIn, "check-in"),
+        (Self::Lighter, "lighter"),
+        (Self::MovementGuide, "movement-guide"),
+        (Self::DeadlineDay, "deadline-day"),
+        (Self::RecoveryInvite, "recovery-invite"),
+        (Self::RecoveryDates, "recovery-dates"),
+        (Self::RecoveryPlanned, "recovery-planned"),
+        (Self::RecoveryMorning, "recovery-morning"),
+        (Self::RecoveryWalk, "recovery-walk"),
+        (Self::RecoveryReflection, "recovery-reflection"),
+    ];
 
     fn key(self) -> String {
         match self {
             Self::Reminder { offer } => format!("reminder:{offer}"),
-            Self::PomodoroBreak => "pomodoro-break".to_owned(),
-            Self::PomodoroRoundDone => "pomodoro-round".to_owned(),
-            Self::PomodoroPaused => "pomodoro-paused".to_owned(),
-            Self::CheckIn => "check-in".to_owned(),
-            Self::Lighter => "lighter".to_owned(),
+            other => Self::FIXED
+                .iter()
+                .find(|(k, _)| *k == other)
+                .map_or_else(String::new, |(_, key)| (*key).to_owned()),
         }
     }
 
@@ -165,15 +257,11 @@ impl BubbleKind {
     pub fn parse(id: &str) -> Option<Self> {
         let (key, rev) = id.rsplit_once('#')?;
         rev.parse::<u64>().ok()?;
-        Some(match key {
-            "pomodoro-break" => Self::PomodoroBreak,
-            "pomodoro-round" => Self::PomodoroRoundDone,
-            "pomodoro-paused" => Self::PomodoroPaused,
-            "check-in" => Self::CheckIn,
-            "lighter" => Self::Lighter,
-            other => Self::Reminder {
-                offer: Uuid::parse_str(other.strip_prefix("reminder:")?).ok()?,
-            },
+        if let Some((kind, _)) = Self::FIXED.iter().find(|(_, k)| *k == key) {
+            return Some(*kind);
+        }
+        Some(Self::Reminder {
+            offer: Uuid::parse_str(key.strip_prefix("reminder:")?).ok()?,
         })
     }
 }
@@ -342,7 +430,6 @@ fn reminder_card(activity: Activity, reason: ReminderReason, chips: &[Chip; 3]) 
         ),
     };
     Bubble {
-        id: String::new(),
         title,
         lines,
         chips: chips
@@ -359,7 +446,248 @@ fn reminder_card(activity: Activity, reason: ReminderReason, chips: &[Chip; 3]) 
             act(action::SNOOZE, "Snooze 10 min", Normal),
             act(action::DISMISS, "Not now", Link),
         ],
+        ..Bubble::default()
     }
+}
+
+/// A weekday's full name.
+#[must_use]
+pub const fn day_name(d: Weekday) -> &'static str {
+    match d {
+        Weekday::Mon => "Monday",
+        Weekday::Tue => "Tuesday",
+        Weekday::Wed => "Wednesday",
+        Weekday::Thu => "Thursday",
+        Weekday::Fri => "Friday",
+        Weekday::Sat => "Saturday",
+        Weekday::Sun => "Sunday",
+    }
+}
+
+/// The action id suffix for a day's routine (`mon` to `sun`).
+#[must_use]
+pub const fn day_key(d: Weekday) -> &'static str {
+    match d {
+        Weekday::Mon => "mon",
+        Weekday::Tue => "tue",
+        Weekday::Wed => "wed",
+        Weekday::Thu => "thu",
+        Weekday::Fri => "fri",
+        Weekday::Sat => "sat",
+        Weekday::Sun => "sun",
+    }
+}
+
+/// The scheduled days, Monday to Saturday.
+const ROUTINE_DAYS: [Weekday; 6] = [
+    Weekday::Mon,
+    Weekday::Tue,
+    Weekday::Wed,
+    Weekday::Thu,
+    Weekday::Fri,
+    Weekday::Sat,
+];
+
+/// A date as the cards show it ("Wed 21 Oct").
+#[must_use]
+pub fn short_date(d: NaiveDate) -> String {
+    d.format("%a %-d %b").to_string()
+}
+
+const fn provisional_note() -> Option<&'static str> {
+    if PROVISIONAL {
+        Some(PROVISIONAL_NOTICE)
+    } else {
+        None
+    }
+}
+
+fn guide_card(g: &GuideView) -> Bubble {
+    use ActionStyle::{Link, Normal, Primary};
+    let note = provisional_note().map(str::to_owned);
+    let day_actions = |extra: BubbleAction| {
+        let mut v: Vec<_> = ROUTINE_DAYS
+            .iter()
+            .map(|d| {
+                act(
+                    &format!("{}{}", action::DAY_PREFIX, day_key(*d)),
+                    day_name(*d),
+                    if *d == g.day { Primary } else { Normal },
+                )
+            })
+            .collect();
+        v.push(extra);
+        v
+    };
+    let routine = routine_for(g.day);
+    let mut b = Bubble {
+        note: note.clone(),
+        continues: true,
+        ..Bubble::default()
+    };
+    match (g.stage, routine) {
+        (GuideStage::Sunday, _) | (GuideStage::Intro, None) => {
+            b.title = "Sunday: no routine scheduled".to_owned();
+            b.lines = vec![
+                "Sunday is optional. If you'd like to move, choose any day's routine.".to_owned(),
+            ];
+            b.actions = day_actions(act(action::LATER, "Later", Link));
+        }
+        (GuideStage::Intro, Some(r)) => {
+            b.title = if g.day == g.today {
+                format!("Today's movement: {}", day_name(g.day))
+            } else {
+                format!("{}'s movement routine", day_name(g.day))
+            };
+            b.lines = r
+                .movements
+                .iter()
+                .map(|e| {
+                    let m = &e.main;
+                    let seated = e
+                        .seated
+                        .map(|s| format!(" (seated version: {})", s.name.to_lowercase()))
+                        .unwrap_or_default();
+                    format!("{}: {}, {}{seated}", m.name, m.place, m.dose)
+                })
+                .collect();
+            b.lines.push(INTRO_SAFETY.to_owned());
+            b.actions = vec![
+                act(action::SEATED, "Seated", Primary),
+                act(action::STANDING, "Standing", Normal),
+                act(action::LATER, "Later", Normal),
+                act(action::OTHER_DAY, "Other day", Normal),
+                act(action::SKIP_TODAY, "Skip today", Link),
+            ];
+        }
+        (GuideStage::ChooseDay, _) => {
+            b.title = "Choose a day's routine".to_owned();
+            b.lines = ROUTINE_DAYS
+                .iter()
+                .filter_map(|d| {
+                    let r = routine_for(*d)?;
+                    let names: Vec<_> = r.movements.iter().map(|e| e.main.name).collect();
+                    Some(format!("{}: {}", day_name(*d), names.join(", ")))
+                })
+                .collect();
+            b.actions = day_actions(act(action::BACK, "Back", Link));
+        }
+        (GuideStage::Step { index, total }, Some(r)) => {
+            let e = r.movements[(index as usize).min(r.movements.len() - 1)];
+            let m = e.for_variant(g.variant);
+            b.title = format!("Movement {} of {total}: {}", index + 1, m.name);
+            b.lines = vec![
+                format!("{}, {}", m.place, m.dose),
+                format!("{}: {}", m.alternative_title, m.alternative),
+                STEP_SAFETY.to_owned(),
+            ];
+            b.steps = m.steps.iter().map(|s| (*s).to_owned()).collect();
+            b.figure = Some(BubbleFigure {
+                id: m.figure.to_owned(),
+                label: m.figure_label.to_owned(),
+            });
+            b.actions = vec![
+                act(action::STEP_DONE, "Done", Primary),
+                act(action::STEP_SKIP, "Skip this movement", Normal),
+                act(action::STOP, "Stop routine", Link),
+            ];
+        }
+        (GuideStage::Step { .. }, None) => {
+            // Not reachable (a step always has a routine); offer a way out.
+            b.title = "Movement".to_owned();
+            b.actions = vec![act(action::STOP, "Stop routine", Primary)];
+        }
+        (
+            GuideStage::Result {
+                outcome,
+                done,
+                skipped,
+                total,
+                stopped,
+            },
+            _,
+        ) => {
+            let skipped_part = if skipped > 0 {
+                format!(", {skipped} skipped")
+            } else {
+                String::new()
+            };
+            let (title, line) = match outcome {
+                RoutineOutcome::Done => (
+                    "Routine complete".to_owned(),
+                    format!("All {total} movements done. Saved as self-reported."),
+                ),
+                RoutineOutcome::Partial => (
+                    "Saved as partial".to_owned(),
+                    format!(
+                        "{done} of {total} movements done{skipped_part}{}. Recorded as partial (self-reported), not complete. No catch-up needed.",
+                        if stopped { ", stopped early" } else { "" }
+                    ),
+                ),
+                RoutineOutcome::None => (
+                    "Stopped, none recorded".to_owned(),
+                    format!(
+                        "No movements were marked done{}. Nothing is counted as movement and your movement timer is not reset. No catch-up needed.",
+                        if skipped > 0 {
+                            format!(" ({skipped} skipped)")
+                        } else {
+                            String::new()
+                        }
+                    ),
+                ),
+                RoutineOutcome::Skipped => (
+                    "Skipped for today".to_owned(),
+                    "Nothing is owed and there is no catch-up.".to_owned(),
+                ),
+            };
+            b.title = title;
+            b.lines = vec![line];
+            b.actions = vec![act(action::OK, "OK", Primary)];
+            b.note = None;
+            b.continues = false;
+        }
+    }
+    b
+}
+
+/// The plan's items in words, only those switched on (wireframe W15).
+fn plan_items(plan: &RecoveryPlan, water_goal_ml: Option<u32>) -> Vec<String> {
+    let mut v = Vec::new();
+    if plan.more_breaks {
+        v.push("Short breaks offered a little more often".to_owned());
+    }
+    if let Some(t) = plan.walk_at {
+        v.push(format!(
+            "Optional walk at {}{}",
+            t.format("%H:%M"),
+            if plan.walk_repeat {
+                ", repeated every 90 min"
+            } else {
+                ""
+            }
+        ));
+    }
+    if let Some(g) = water_goal_ml {
+        v.push(format!("Your water goal stays {g} ml"));
+    }
+    if plan.lunch_away {
+        v.push("Lunch away from the screen if you can".to_owned());
+    }
+    if plan.calm_pause {
+        v.push("One brief calming pause".to_owned());
+    }
+    if let Some(t) = plan.finish_at {
+        v.push(format!("Finish around {}", t.format("%H:%M")));
+    }
+    v
+}
+
+fn plan_action(d: NaiveDate, label: &str, style: ActionStyle) -> BubbleAction {
+    act(
+        &format!("{}{}", action::PLAN_PREFIX, d.format("%Y-%m-%d")),
+        label,
+        style,
+    )
 }
 
 /// The shell bubble for the engine's bubble, without its id (the link numbers each show;
@@ -368,11 +696,10 @@ fn reminder_card(activity: Activity, reason: ReminderReason, chips: &[Chip; 3]) 
 pub fn bubble(b: &CoachBubble, view: &CoachView) -> Bubble {
     use ActionStyle::{Link, Normal, Primary};
     let card = |title: &str, lines: Vec<String>, actions: Vec<BubbleAction>| Bubble {
-        id: String::new(),
         title: title.to_owned(),
         lines,
-        chips: Vec::new(),
         actions,
+        ..Bubble::default()
     };
     match *b {
         CoachBubble::Reminder {
@@ -441,14 +768,112 @@ pub fn bubble(b: &CoachBubble, view: &CoachView) -> Bubble {
                 act(action::KEEP_INTENSITY, "Keep current", Link),
             ],
         ),
+        CoachBubble::MovementGuide(g) => guide_card(&g),
+        CoachBubble::DeadlineDay => card(
+            "Deadline day?",
+            vec![
+                "Would you like to mark today as a deadline-heavy day?".to_owned(),
+                "Only you decide. The app does not infer stress or tiredness.".to_owned(),
+            ],
+            vec![
+                act(action::CHECK_IN_YES, "Yes, it was", Primary),
+                act(action::CHECK_IN_NO, "No", Normal),
+            ],
+        ),
+        CoachBubble::RecoveryInvite { next } => {
+            let label = if view.recovery.today.succ_opt() == Some(next) {
+                format!("Tomorrow ({})", short_date(next))
+            } else {
+                short_date(next)
+            };
+            card(
+                "Plan a gentler recovery day?",
+                vec![
+                    "A personal routine: more short breaks, an optional walk and a calm finish. Not a leave request."
+                        .to_owned(),
+                ],
+                vec![
+                    plan_action(next, &label, Primary),
+                    act(action::CHOOSE_DATE, "Choose a date", Normal),
+                    act(action::LATER, "Later", Normal),
+                    act(action::NO_THANKS, "No thanks", Link),
+                ],
+            )
+        }
+        CoachBubble::RecoveryDates { dates } => {
+            let mut actions: Vec<_> = dates
+                .iter()
+                .flatten()
+                .map(|d| plan_action(*d, &short_date(*d), Normal))
+                .collect();
+            actions.push(act(action::LATER, "Later", Link));
+            card("Choose a date", Vec::new(), actions)
+        }
+        CoachBubble::RecoveryPlanned { plan } => {
+            let mut lines = vec!["I'll show it in the morning.".to_owned()];
+            let items = plan_items(&plan, None);
+            if !items.is_empty() {
+                lines.push(format!("{}.", items.join("; ")));
+            }
+            card(
+                &format!("Recovery day planned: {}", short_date(plan.date)),
+                lines,
+                vec![
+                    act(action::OK, "OK", Primary),
+                    act(action::CHOOSE_DATE, "Reschedule", Normal),
+                    act(action::CANCEL_PLAN, "Cancel plan", Link),
+                ],
+            )
+        }
+        CoachBubble::RecoveryMorning {
+            plan,
+            water_goal_ml,
+        } => card(
+            "Today is your recovery day",
+            plan_items(&plan, water_goal_ml),
+            vec![
+                act(action::OK, "Sounds good", Primary),
+                act(action::CANCEL_PLAN, "Cancel for today", Link),
+            ],
+        ),
+        CoachBubble::RecoveryWalk => card(
+            "Optional walk",
+            vec![
+                "A comfortable 10 to 15 minute walk, if it suits you. Skipping is fine.".to_owned(),
+            ],
+            vec![
+                act(action::WALK_NOW, "Going now", Primary),
+                act(action::WALK_NOT_NOW, "Not now", Normal),
+            ],
+        ),
+        CoachBubble::RecoveryReflection => card(
+            "End of your recovery day",
+            vec![
+                "Did this routine feel helpful?".to_owned(),
+                "Your answer stays on this PC.".to_owned(),
+            ],
+            vec![
+                act(action::REFLECT_YES, "Yes", Normal),
+                act(action::REFLECT_SOMEWHAT, "Somewhat", Normal),
+                act(action::REFLECT_NO, "No", Normal),
+                act(action::REFLECT_SKIP, "Skip", Link),
+            ],
+        ),
     }
 }
 
 /// Whether a click on the pet should reopen something the engine holds (a waiting
-/// reminder, or a Pomodoro card the user has not answered) rather than open the menu.
+/// reminder, the movement guide waiting behind the pet, or a Pomodoro card the user has
+/// not answered) rather than open the menu.
 #[must_use]
 pub fn click_reopens(view: &CoachView) -> bool {
-    view.visible && view.bubble.is_none() && (waiting(view) || pomodoro_card_pending(view))
+    view.visible
+        && view.bubble.is_none()
+        && (waiting(view) || guide_waiting(view) || pomodoro_card_pending(view))
+}
+
+fn guide_waiting(view: &CoachView) -> bool {
+    view.guide.is_some_and(|g| !g.open)
 }
 
 const fn waiting(view: &CoachView) -> bool {
@@ -460,6 +885,7 @@ fn pomodoro_card_pending(view: &CoachView) -> bool {
         .iter()
         .any(|a| view.chip(*a).status == ChipStatus::Waiting);
     !waiting_offer
+        && view.guide.is_none()
         && view.pomodoro.is_some_and(|p| {
             matches!(
                 p.phase,
@@ -494,6 +920,8 @@ pub fn menu_actions(view: &CoachView) -> Vec<MenuAction> {
     if click_reopens(view) {
         let label = if waiting(view) {
             "Show waiting reminder"
+        } else if guide_waiting(view) {
+            "Show movement guide"
         } else {
             "Show Pomodoro card"
         };
@@ -508,7 +936,8 @@ pub fn menu_actions(view: &CoachView) -> Vec<MenuAction> {
     // The engine's routine state, not the pet's look: a pause, off-hours, focus, meeting
     // or presentation shows its own state over a running routine, and the user must
     // still be able to finish or stop it without lifting the hold. The tray carries
-    // these too, for when the pet is hidden.
+    // these too, for when the pet is hidden. A guided routine counts as running too: these
+    // entries answer it in one go, beside its own card or "Show movement guide" above.
     let movement_running = view
         .active_routine
         .is_some_and(|r| r.activity == Activity::Movement);
@@ -520,6 +949,24 @@ pub fn menu_actions(view: &CoachView) -> Vec<MenuAction> {
         m.push(menu(a::MOVEMENT_START, "Today's movement", false));
     }
     m.push(menu(a::BREAK, "Mark a break", false));
+
+    // Deadline day and the recovery plan (B7, flow 4), when a card can open.
+    let r = view.recovery;
+    if r.can_open {
+        if let Some(p) = r.plan {
+            let label = if p.date == r.today {
+                "Today is your recovery day".to_owned()
+            } else {
+                format!("Recovery day: {}", short_date(p.date))
+            };
+            m.push(menu(a::RECOVERY_SHOW, &label, false));
+        }
+        if !r.marked_today {
+            m.push(menu(a::DEADLINE_DAY, "Deadline day", false));
+        } else if r.plan.is_none() {
+            m.push(menu(a::DEADLINE_DAY, "Plan a recovery day", false));
+        }
+    }
 
     let paused = view.session == SessionState::Paused;
     if view.focus_left.is_some() {

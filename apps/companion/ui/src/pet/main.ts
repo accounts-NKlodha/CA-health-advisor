@@ -4,6 +4,7 @@
 // takes focus (WS_EX_NOACTIVATE), so clicks here never move the user's caret.
 import { insertArt, setPalette } from '../shared/art';
 import { renderBadge } from '../shared/icons';
+import { renderFigure } from '../shared/figures';
 import { call, on, report } from '../shared/ipc';
 import { renderMenu } from '../shared/menu';
 import type { Bubble, OpenView, PetView } from '../shared/types';
@@ -94,6 +95,18 @@ function bubbleBody(b: Bubble, engine: boolean): HTMLElement {
   const body = el('div', 'bubble-body');
   const h = el('h2', '', body);
   h.textContent = b.title;
+  if (b.steps.length > 0 || b.figure) {
+    // The movement guide: the illustration beside the numbered steps.
+    const guide = el('div', 'guide', body);
+    if (b.figure) {
+      const fig = renderFigure(b.figure.id, b.figure.label);
+      if (fig) guide.append(fig);
+    }
+    if (b.steps.length > 0) {
+      const ol = el('ol', 'steps', guide);
+      for (const s of b.steps) el('li', '', ol).textContent = s;
+    }
+  }
   for (const line of b.lines) el('p', '', body).textContent = line;
   if (b.chips.length > 0) {
     const ul = el('ul', 'chips', body);
@@ -119,6 +132,7 @@ function bubbleBody(b: Bubble, engine: boolean): HTMLElement {
       );
     }
   }
+  if (b.note) el('p', 'note', body).textContent = b.note;
   return body;
 }
 
@@ -167,7 +181,7 @@ function drawOpen(v: PetView): void {
       close.title = 'Close';
       if (open.kind === 'bubble' || open.kind === 'notice') {
         const b = open.bubble;
-        live.textContent = [b.title, ...b.lines].join('. ');
+        live.textContent = [b.title, ...b.steps, ...b.lines].join('. ');
       }
     }
   }

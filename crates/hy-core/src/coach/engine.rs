@@ -35,6 +35,15 @@
 //!   then at most one reminder (P).
 //! - A reminder that is showing or waiting when something starts holding reminders back is
 //!   withdrawn and logged as "offered, no response" (D).
+//! - The guided movement routine ([`guide`], slice V1-3) is the one bubble while it runs.
+//!   Each movement's answer is a `movement.step` event and the result a `movement.session`
+//!   event, in the same commit as the state. An immediate Stop, or every movement skipped,
+//!   is "none recorded" and does not restart the movement timer (P).
+//! - The deadline day and the recovery-day plan ([`recovery`], slice V1-3) use the same
+//!   single bubble, after the reminders and with their calm gap.
+
+mod guide;
+mod recovery;
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -48,10 +57,11 @@ use super::config::{
     CoachConfig, DISMISSALS_FOR_LIGHTER, EYE_REST_LENGTH, FOCUS_MINUTES, GRACE_AFTER_WAKE,
     Intensity, LONG_QUIET_AFTER, PAUSE_MINUTES, ROUTINE_TIMEOUT, SNOOZE,
 };
+use super::recovery::{CARD_CLOSES_AFTER, RecoveryPlan};
 use super::types::{
-    ActiveRoutine, Bubble, CheckInAnswer, Chip, ChipStatus, CoachView, Confirmation, FocusEnd,
-    HiddenReason, Hold, Input, InputOutcome, Notice, PauseLength, PetMode, PomodoroPause,
-    PomodoroPhase, PomodoroView, ReminderReason, Response,
+    ActiveRoutine, Bubble, Chip, ChipStatus, CoachView, Confirmation, FocusEnd, HiddenReason, Hold,
+    Input, InputOutcome, Notice, PauseLength, PetMode, PomodoroPause, PomodoroPhase, PomodoroView,
+    ReminderReason, Response,
 };
 use super::water::{WaterPace, WaterSnapshot, pace};
 use crate::schema::{
@@ -133,6 +143,18 @@ struct DayState {
     dismissals: u32,
     lighter_offered: bool,
     check_in_done: bool,
+    /// The user marked this date as deadline-heavy.
+    #[serde(default)]
+    deadline: bool,
+    /// The recovery day's morning card was shown.
+    #[serde(default)]
+    recovery_morning: bool,
+    /// Walk suggestion times used up today (shown, or passed while held).
+    #[serde(default)]
+    walk_slots: u32,
+    /// The recovery day's end-of-day question was asked.
+    #[serde(default)]
+    reflection_asked: bool,
 }
 
 /// One activity's scheduling state. Exposed read-only for tests and diagnostics.
@@ -176,6 +198,20 @@ struct Offer {
 enum Prompt {
     CheckIn,
     Lighter,
+    DeadlineDay,
+    RecoveryInvite,
+    RecoveryDates,
+    RecoveryPlanned,
+    RecoveryMorning,
+    RecoveryWalk,
+    RecoveryReflection,
+}
+
+impl Prompt {
+    /// Recovery cards close quietly when left unanswered.
+    const fn is_recovery_card(self) -> bool {
+        !matches!(self, Self::CheckIn | Self::Lighter | Self::DeadlineDay)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,6 +313,22 @@ pub struct EngineState {
     block_ms: u64,
     today: Option<NaiveDate>,
     days: BTreeMap<NaiveDate, DayState>,
+    /// The guided movement routine, open or waiting behind the pet.
+    #[serde(default)]
+    guide: Option<guide::Guide>,
+    /// Guided routines started (with `salt`, makes each routine's id unique).
+    #[serde(default)]
+    guide_seq: u64,
+    /// For a card the user asked for (the "Deadline day" chain), the holds in force when
+    /// it opened: it stays while only those hold. `None` for a card that opened on its own.
+    #[serde(default)]
+    prompt_opened_under: Option<HoldSet>,
+    /// Engine time the open card appeared.
+    #[serde(default)]
+    prompt_since: u64,
+    /// The one pending recovery-day plan.
+    #[serde(default)]
+    plan: Option<RecoveryPlan>,
 }
 
 /// What one step produced.
@@ -350,6 +402,11 @@ impl Engine {
                 block_ms: 0,
                 today: None,
                 days: BTreeMap::new(),
+                guide: None,
+                guide_seq: 0,
+                prompt_opened_under: None,
+                prompt_since: 0,
+                plan: None,
             },
         }
     }
@@ -408,6 +465,12 @@ impl Engine {
         self.s.days.get(&date).map_or(0, |d| d.dismissals)
     }
 
+    /// The one recovery-day plan kept (it may be for a past date until the day changes).
+    #[must_use]
+    pub fn recovery_plan(&self) -> Option<RecoveryPlan> {
+        self.s.plan
+    }
+
     /// The view for the current state, without advancing time.
     #[must_use]
     pub fn view(&self, ctx: &Context) -> CoachView {
@@ -424,7 +487,9 @@ impl Engine {
             significant: true,
             ..Out::default()
         };
-        // Close what the previous run left open, at the moment it stopped.
+        // Close what the previous run left open, at the moment it stopped. A routine in the
+        // guide keeps the movements already answered.
+        self.interrupt_guide(ctx, &mut out);
         if let Some(o) = self.s.offer {
             match o.phase {
                 OfferPhase::Showing { .. } | OfferPhase::Waiting => {
@@ -433,7 +498,7 @@ impl Engine {
                 OfferPhase::InProgress { .. } => self.abandon_in_progress(&mut out),
             }
         }
-        self.s.prompt = None;
+        self.clear_prompt();
         self.s.exercise_since = None;
         let since = self.s.now;
         let was_away = self.s.away;
@@ -604,7 +669,7 @@ impl Engine {
         };
         match a {
             Activity::Movement | Activity::EyeRest => {
-                cycle_or_snooze(st.accum_ms >= st.base_ms.saturating_add(ms(ctx.config.every(a))))
+                cycle_or_snooze(st.accum_ms >= st.base_ms.saturating_add(ms(self.every(ctx, a))))
             }
             Activity::Water => {
                 self.water_pace(ctx, 0).is_some_and(|p| p.is_behind())
@@ -648,6 +713,10 @@ impl Engine {
             self.s.pause = None;
             out.notices.push(Notice::PauseEnded);
             self.resume_pomodoro_after_coaching_pause();
+        }
+        if self.s.plan.is_some_and(|p| p.date < today) {
+            // The recovery day has passed; nothing is owed and nothing is carried over.
+            self.s.plan = None;
         }
         self.s.days.entry(today).or_default();
         while self.s.days.len() > DAYS_KEPT {
@@ -777,6 +846,7 @@ impl Engine {
             out.notices.push(Notice::PauseEnded);
             self.resume_pomodoro_after_coaching_pause();
         }
+        self.run_guide_timers(ctx, out);
         if self
             .s
             .exercise_since
@@ -824,7 +894,7 @@ impl Engine {
         // A card opens on its own only when nothing above the Pomodoro holds it back; a
         // card held back is not replayed when the hold ends (the pet still shows the
         // phase, and the user can open it).
-        let visible = !self.pomodoro_card_held(ctx);
+        let visible = !self.pomodoro_card_held(ctx) && self.s.guide.is_none();
         let auto = ctx.config.pomodoro_auto_start;
         let Some(p) = self.s.pomodoro.as_mut() else {
             return;
@@ -901,7 +971,7 @@ impl Engine {
         self.s.idle_ms = 0;
         self.s.grace_until = self.s.now + ms(GRACE_AFTER_WAKE);
         // The "paused while you were away" card, unless something else still holds.
-        let show = !self.pomodoro_card_held(ctx);
+        let show = !self.pomodoro_card_held(ctx) && self.s.guide.is_none();
         if let Some(p) = self.s.pomodoro.as_mut()
             && p.paused == Some(PomodoroPause::LockOrSleep)
         {
@@ -955,7 +1025,7 @@ impl Engine {
     /// missed while quiet).
     fn reschedule(&mut self, ctx: &Context, a: Activity) {
         let now = self.s.now;
-        let every = ms(ctx.config.every(a));
+        let every = ms(self.every(ctx, a));
         let st = &mut self.s.acts[idx(a)];
         st.snooze_until = None;
         st.due_since = None;
@@ -1046,7 +1116,7 @@ impl Engine {
         let offer = day.dismissals >= DISMISSALS_FOR_LIGHTER && !day.lighter_offered && !light;
         if offer {
             day.lighter_offered = true;
-            self.s.prompt = Some(Prompt::Lighter);
+            self.set_prompt(Prompt::Lighter, false, ctx);
         }
     }
 
@@ -1096,6 +1166,9 @@ impl Engine {
                 if let Some(cur) = self.s.offer.as_mut() {
                     cur.phase = OfferPhase::InProgress { since: self.s.now };
                 }
+                if a == Activity::Movement {
+                    self.open_guide(ctx, Some(o.id), out);
+                }
             }
             Response::Snooze => {
                 out.events
@@ -1141,6 +1214,7 @@ impl Engine {
         let in_progress = self.s.offer.filter(|o| {
             o.activity == Activity::Movement && matches!(o.phase, OfferPhase::InProgress { .. })
         });
+
         match offer.or(in_progress.map(|o| o.id)) {
             Some(id) => {
                 let Some(o) = self.current_offer(id) else {
@@ -1255,7 +1329,10 @@ impl Engine {
                 {
                     self.collapse(out);
                     Applied
-                } else if self.s.prompt.take().is_some() {
+                } else if self.close_guide_card(out) {
+                    Applied
+                } else if self.s.prompt.is_some() {
+                    self.clear_prompt();
                     self.s.gap_until = self.s.now + ms(CALM_GAP);
                     Applied
                 } else if let Some(p) = self.s.pomodoro.as_mut()
@@ -1272,12 +1349,16 @@ impl Engine {
                     return Ignored("the pet is hidden");
                 }
                 let holds = self.holds_above_pomodoro(ctx);
-                if let Some(o) = self.s.offer.as_mut()
+                if self.reopen_guide(ctx) {
+                    Applied
+                } else if let Some(o) = self.s.offer.as_mut()
                     && o.phase == OfferPhase::Waiting
                 {
                     o.phase = OfferPhase::Showing { since: self.s.now };
                     Applied
                 } else if self.s.offer.is_none()
+                    && self.s.guide.is_none()
+                    && self.s.prompt.is_none()
                     && let Some(p) = self.s.pomodoro.as_mut()
                     && !p.card_open
                     && (matches!(
@@ -1303,10 +1384,17 @@ impl Engine {
                     return Ignored("an exercise or Pomodoro is already running");
                 }
                 self.s.exercise_since = Some(self.s.now);
+                self.open_guide(ctx, None, out);
                 Applied
             }
+            Input::Guide(action) => self.guide_input(ctx, action, out),
             Input::RoutineFinished { offer, outcome } => {
-                self.routine_finished(ctx, offer, outcome, out)
+                let r = self.routine_finished(ctx, offer, outcome, out);
+                if r == Applied {
+                    // A report in one go answers the guide too.
+                    self.report_guide(ctx, outcome, out);
+                }
+                r
             }
             Input::RoutineLater { offer } => {
                 let Some(o) = self.current_offer(offer) else {
@@ -1319,6 +1407,7 @@ impl Engine {
                 }
                 self.snooze(Activity::Movement);
                 self.finish_offer(o, ChipStatus::Snoozed, out);
+                self.s.guide = None;
                 Applied
             }
             Input::MarkBreak => {
@@ -1412,6 +1501,7 @@ impl Engine {
                     });
                 }
                 self.s.pause = None;
+                self.interrupt_guide(ctx, out);
                 self.s.exercise_since = None;
                 self.s.pomodoro = Some(Pomodoro {
                     work_ms: ms(work),
@@ -1473,7 +1563,9 @@ impl Engine {
             Input::SkipPomodoroBreak => {
                 let auto = ctx.config.pomodoro_auto_start;
                 let holds = self.holds_above_pomodoro(ctx);
-                let visible = self.visible(ctx);
+                // The movement guide (open or waiting) or an open card keeps the bubble.
+                let visible =
+                    self.visible(ctx) && self.s.guide.is_none() && self.s.prompt.is_none();
                 let Some(p) = self.s.pomodoro.as_mut() else {
                     return Ignored("no Pomodoro");
                 };
@@ -1508,23 +1600,14 @@ impl Engine {
                 p.card_open = false;
                 Applied
             }
-            Input::CheckIn(answer) => {
-                if self.s.prompt != Some(Prompt::CheckIn) {
-                    return Ignored("no check-in open");
-                }
-                self.s.prompt = None;
-                self.s.gap_until = self.s.now + ms(CALM_GAP);
-                if answer == CheckInAnswer::Yes {
-                    out.notices
-                        .push(Notice::DeadlineDayConfirmed(ctx.zone.local_date(ctx.wall)));
-                }
-                Applied
-            }
+            Input::CheckIn(answer) => self.check_in(ctx, answer, out),
+            Input::DeadlineDay => self.deadline_day(ctx, out),
+            Input::Recovery(action) => self.recovery_input(ctx, action, out),
             Input::LighterSchedule { accept } => {
                 if self.s.prompt != Some(Prompt::Lighter) {
                     return Ignored("no offer open");
                 }
-                self.s.prompt = None;
+                self.clear_prompt();
                 self.s.gap_until = self.s.now + ms(CALM_GAP);
                 if accept {
                     out.notices.push(Notice::UseIntensity(Intensity::Light));
@@ -1563,6 +1646,9 @@ impl Engine {
 
     /// Apply holds, then offer at most one thing.
     fn settle(&mut self, ctx: &Context, out: &mut Out) {
+        // A hold that was not in force when the guide's card opened puts it behind the pet;
+        // the routine keeps running.
+        self.settle_guide(ctx, out);
         let hold = self.hold(ctx);
         // Anything holding reminders back withdraws a reminder that is showing or waiting.
         if let Some(o) = self.s.offer
@@ -1571,10 +1657,7 @@ impl Engine {
         {
             self.resolve_no_response(ctx, out);
         }
-        if self.s.prompt.is_some() && (self.prompt_blocked(ctx) || !self.visible(ctx)) {
-            self.s.prompt = None;
-            out.significant = true;
-        }
+        self.settle_prompt(ctx, out);
         self.withdraw_held_pomodoro_card(ctx, out);
         // End of a quiet period: nothing is replayed.
         let quiet = self.quiet_hold(ctx);
@@ -1605,12 +1688,20 @@ impl Engine {
                 _ => {}
             }
         }
-        let slot_free = self.s.offer.is_none() && self.s.prompt.is_none();
+        let slot_free = self.s.offer.is_none() && self.s.prompt.is_none() && self.s.guide.is_none();
         let calm = now >= self.s.gap_until && now >= self.s.grace_until;
+        let held = self.hold(ctx).is_some();
+        if !slot_free || held || !self.visible(ctx) {
+            // A recovery walk time that arrives now is used up, not shown afterwards.
+            self.use_up_held_walk(ctx, out);
+        }
         if !(slot_free && calm && self.visible(ctx)) {
             return;
         }
-        if self.hold(ctx).is_none() {
+        if !held {
+            if self.maybe_recovery_card(ctx, out) {
+                return;
+            }
             let next = ORDER
                 .iter()
                 .copied()
@@ -1621,7 +1712,51 @@ impl Engine {
                 return;
             }
         }
+        if self.maybe_reflection(ctx, out) {
+            return;
+        }
         self.maybe_check_in(ctx, out);
+    }
+
+    /// Open a card in the bubble. `user`: the user asked for it (the "Deadline day"
+    /// chain), so it may stay under the holds in force now; otherwise any hold that
+    /// blocks cards withdraws it.
+    fn set_prompt(&mut self, p: Prompt, user: bool, ctx: &Context) {
+        self.s.prompt = Some(p);
+        self.s.prompt_opened_under = user.then(|| self.holds_above_pomodoro(ctx));
+        self.s.prompt_since = self.s.now;
+    }
+
+    fn clear_prompt(&mut self) {
+        self.s.prompt = None;
+        self.s.prompt_opened_under = None;
+    }
+
+    /// Withdraw a card that a hold now blocks (a card the user asked for stays while only
+    /// the holds it opened under are in force), and close a recovery card left
+    /// unanswered.
+    fn settle_prompt(&mut self, ctx: &Context, out: &mut Out) {
+        let Some(p) = self.s.prompt else {
+            return;
+        };
+        let holds = self.holds_above_pomodoro(ctx);
+        let withdraw = !self.visible(ctx)
+            || match self.s.prompt_opened_under {
+                Some(under) => !holds.within(under),
+                None => self.prompt_blocked(ctx),
+            }
+            || (p.is_recovery_card()
+                && self.s.now.saturating_sub(self.s.prompt_since) >= ms(CARD_CLOSES_AFTER));
+        if withdraw {
+            self.clear_prompt();
+            out.significant = true;
+        } else if let Some(under) = self.s.prompt_opened_under
+            && under != holds
+        {
+            // A hold that ended no longer covers the card if it begins again.
+            self.s.prompt_opened_under = Some(holds);
+            out.significant = true;
+        }
     }
 
     fn show(&mut self, ctx: &Context, a: Activity, out: &mut Out) {
@@ -1666,7 +1801,7 @@ impl Engine {
             return;
         }
         day.check_in_done = true;
-        self.s.prompt = Some(Prompt::CheckIn);
+        self.set_prompt(Prompt::CheckIn, false, ctx);
         out.significant = true;
     }
 
@@ -1815,12 +1950,18 @@ impl Engine {
                 reason,
             });
         }
+        if let Some(g) = self.guide_view(ctx)
+            && g.open
+        {
+            return Some(Bubble::MovementGuide(g));
+        }
         if let Some(p) = self.s.prompt {
             return Some(match p {
                 Prompt::CheckIn => Bubble::LongDayCheckIn {
                     hours: ctx.config.long_day_check_in.hours,
                 },
                 Prompt::Lighter => Bubble::LighterSchedule,
+                _ => self.recovery_bubble(ctx, p)?,
             });
         }
         let holds = self.holds_above_pomodoro(ctx);
@@ -1862,6 +2003,8 @@ impl Engine {
                 .map(|t| dur(t.saturating_sub(self.s.now))),
             meeting: self.s.meeting.is_some(),
             active_routine: self.active_routine(),
+            guide: self.guide_view(ctx),
+            recovery: self.recovery_view(ctx),
         }
     }
 

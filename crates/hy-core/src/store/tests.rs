@@ -319,6 +319,7 @@ fn every_payload_kind_round_trips_through_the_store() {
             state: SessionState::ConfirmedBreak,
         }),
         NewEvent::manual(EventPayload::MovementSession {
+            session_id: Uuid::nil(),
             routine_id: "mon-neck".into(),
             routine_version: 1,
             variant: Some(RoutineVariant::Seated),

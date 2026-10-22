@@ -74,8 +74,21 @@ pub struct BubbleAction {
     pub style: ActionStyle,
 }
 
-/// One bubble (the engine's reminder card, offer or notice).
+/// An illustration drawn by the pet page (the movement guide's figures).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BubbleFigure {
+    /// Which drawing, for example "neck". The page draws only figures it knows.
+    pub id: String,
+    /// The drawing in words (its text equivalent).
+    pub label: String,
+}
+
+/// Most numbered steps in one bubble.
+pub const MAX_BUBBLE_STEPS: usize = 5;
+
+/// One bubble (the engine's reminder card, offer or notice).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bubble {
     /// Chosen by the engine; returned in events.
@@ -91,6 +104,19 @@ pub struct Bubble {
     /// Actions.
     #[serde(default)]
     pub actions: Vec<BubbleAction>,
+    /// Numbered steps, one action each (the movement guide).
+    #[serde(default)]
+    pub steps: Vec<String>,
+    /// An illustration beside the steps.
+    #[serde(default)]
+    pub figure: Option<BubbleFigure>,
+    /// A small note under the card, for example that its content is provisional.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// The card continues after an answer (the next movement replaces it), so the keyboard
+    /// panel stays open instead of closing.
+    #[serde(default)]
+    pub continues: bool,
 }
 
 /// Most actions in one bubble.
@@ -105,9 +131,7 @@ impl Bubble {
         Self {
             id: id.to_owned(),
             title: title.to_owned(),
-            lines: Vec::new(),
-            chips: Vec::new(),
-            actions: Vec::new(),
+            ..Self::default()
         }
     }
 
@@ -137,6 +161,25 @@ impl Bubble {
             if !short(&a.id, 64) || !short(&a.label, 40) || !ids.insert(a.id.as_str()) {
                 return Err("actions need unique ids and labels of 1 to 40 characters".into());
             }
+        }
+        if self.steps.len() > MAX_BUBBLE_STEPS || !self.steps.iter().all(|s| short(s, 160)) {
+            return Err(format!(
+                "at most {MAX_BUBBLE_STEPS} steps of 1 to 160 characters"
+            ));
+        }
+        if let Some(f) = &self.figure {
+            let id_ok = short(&f.id, 32)
+                && f.id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+            if !id_ok || !short(&f.label, 200) {
+                return Err(
+                    "a figure needs a short lowercase id and a label of 1 to 200 characters".into(),
+                );
+            }
+        }
+        if self.note.as_deref().is_some_and(|n| !short(n, 120)) {
+            return Err("the note must be 1 to 120 characters".into());
         }
         Ok(())
     }

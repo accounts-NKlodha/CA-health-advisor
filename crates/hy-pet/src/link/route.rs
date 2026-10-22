@@ -7,10 +7,14 @@
 //! [`crate::shell::ShellEventSink::on_event`], which must not block, so it never touches
 //! the engine or the store; the resulting [`Command`] is applied by the link afterwards.
 
-use hy_core::coach::{CheckInAnswer, Input, PauseLength, PomodoroPreset, Response};
-use hy_core::schema::RoutineOutcome;
+use chrono::{NaiveDate, Weekday};
+use hy_core::coach::{
+    CheckInAnswer, GuideAction, Input, PauseLength, PomodoroPreset, RecoveryAction, Reflection,
+    Response,
+};
+use hy_core::schema::{RoutineOutcome, RoutineVariant};
 
-use super::present::{BubbleKind, WATER_SERVING_ML, action};
+use super::present::{BubbleKind, WATER_SERVING_ML, action, day_key};
 use crate::shell::{CloseCause, Handled, ShellEvent};
 
 /// Something for the link to do.
@@ -18,6 +22,17 @@ use crate::shell::{CloseCause, Handled, ShellEvent};
 pub enum Command {
     /// Apply an engine input.
     Coach(Input),
+    /// Apply an answer given on the bubble `bubble_id` (one of its actions, or closing it).
+    /// The link applies it only if that bubble is still the one it shows when the command
+    /// runs on the engine thread: an answer to a card that an earlier answer already
+    /// replaced (a second quick click on the same movement, a click queued before a
+    /// routine stopped) is refused there, not only on the UI thread.
+    Answer {
+        /// The shell bubble id the answer was given on (with its show number).
+        bubble_id: String,
+        /// The engine input it means.
+        input: Input,
+    },
     /// Log water from the pet menu (not an answer to a reminder), then re-evaluate.
     LogWater {
         /// Amount in ml.
@@ -57,6 +72,16 @@ impl Routed {
             command: Some(Command::Coach(input)),
         }
     }
+
+    fn answer(bubble_id: &str, input: Input) -> Self {
+        Self {
+            handled: Handled::Yes,
+            command: Some(Command::Answer {
+                bubble_id: bubble_id.to_owned(),
+                input,
+            }),
+        }
+    }
 }
 
 /// Route one shell event.
@@ -73,10 +98,7 @@ pub fn route(state: &RouteState, event: &ShellEvent) -> Routed {
             }
             BubbleKind::parse(bubble_id)
                 .and_then(|k| bubble_command(k, action_id))
-                .map_or_else(Routed::none, |c| Routed {
-                    handled: Handled::Yes,
-                    command: Some(c),
-                })
+                .map_or_else(Routed::none, |input| Routed::answer(bubble_id, input))
         }
         ShellEvent::BubbleClosed { bubble_id, cause } => match cause {
             // The link replaced its own bubble: nothing for the engine.
@@ -86,7 +108,7 @@ pub fn route(state: &RouteState, event: &ShellEvent) -> Routed {
             // the engine already withdrew (a presentation) no longer matches.
             CloseCause::User | CloseCause::Hidden => {
                 if state.bubble_id.as_deref() == Some(bubble_id.as_str()) {
-                    Routed::coach(Input::CloseBubble)
+                    Routed::answer(bubble_id, Input::CloseBubble)
                 } else {
                     Routed::none()
                 }
@@ -111,7 +133,7 @@ pub fn route(state: &RouteState, event: &ShellEvent) -> Routed {
 
 /// The engine input for an action in a bubble of this kind.
 #[must_use]
-pub fn bubble_command(kind: BubbleKind, action_id: &str) -> Option<Command> {
+pub fn bubble_command(kind: BubbleKind, action_id: &str) -> Option<Input> {
     use action as a;
     let input = match kind {
         BubbleKind::Reminder { offer } => {
@@ -156,8 +178,78 @@ pub fn bubble_command(kind: BubbleKind, action_id: &str) -> Option<Command> {
                 _ => return None,
             },
         },
+        BubbleKind::MovementGuide => Input::Guide(match action_id {
+            a::SEATED => GuideAction::Variant(RoutineVariant::Seated),
+            a::STANDING => GuideAction::Variant(RoutineVariant::Standing),
+            a::STEP_DONE => GuideAction::Done,
+            a::STEP_SKIP => GuideAction::Skip,
+            a::STOP => GuideAction::Stop,
+            a::LATER => GuideAction::Later,
+            a::SKIP_TODAY => GuideAction::SkipToday,
+            a::OTHER_DAY => GuideAction::OtherDay,
+            a::BACK => GuideAction::Back,
+            a::OK => GuideAction::Close,
+            other => GuideAction::Day(parse_day(other.strip_prefix(a::DAY_PREFIX)?)?),
+        }),
+        BubbleKind::DeadlineDay => Input::CheckIn(match action_id {
+            a::CHECK_IN_YES => CheckInAnswer::Yes,
+            a::CHECK_IN_NO => CheckInAnswer::No,
+            _ => return None,
+        }),
+        BubbleKind::RecoveryInvite | BubbleKind::RecoveryDates => {
+            Input::Recovery(match action_id {
+                a::CHOOSE_DATE if kind == BubbleKind::RecoveryInvite => RecoveryAction::ChooseDate,
+                a::LATER => RecoveryAction::Later,
+                a::NO_THANKS if kind == BubbleKind::RecoveryInvite => RecoveryAction::NoThanks,
+                other => RecoveryAction::PlanFor(parse_date(other.strip_prefix(a::PLAN_PREFIX)?)?),
+            })
+        }
+        BubbleKind::RecoveryPlanned => Input::Recovery(match action_id {
+            a::OK => RecoveryAction::Ok,
+            a::CHOOSE_DATE => RecoveryAction::ChooseDate,
+            a::CANCEL_PLAN => RecoveryAction::CancelPlan,
+            _ => return None,
+        }),
+        BubbleKind::RecoveryMorning => Input::Recovery(match action_id {
+            a::OK => RecoveryAction::Ok,
+            a::CANCEL_PLAN => RecoveryAction::CancelPlan,
+            _ => return None,
+        }),
+        BubbleKind::RecoveryWalk => Input::Recovery(match action_id {
+            a::WALK_NOW => RecoveryAction::WalkNow,
+            a::WALK_NOT_NOW => RecoveryAction::WalkNotNow,
+            _ => return None,
+        }),
+        BubbleKind::RecoveryReflection => {
+            Input::Recovery(RecoveryAction::Reflect(match action_id {
+                a::REFLECT_YES => Reflection::Yes,
+                a::REFLECT_SOMEWHAT => Reflection::Somewhat,
+                a::REFLECT_NO => Reflection::No,
+                a::REFLECT_SKIP => Reflection::Skip,
+                _ => return None,
+            }))
+        }
     };
-    Some(Command::Coach(input))
+    Some(input)
+}
+
+/// The weekday named by a `day_` action suffix (Monday to Saturday).
+fn parse_day(key: &str) -> Option<Weekday> {
+    [
+        Weekday::Mon,
+        Weekday::Tue,
+        Weekday::Wed,
+        Weekday::Thu,
+        Weekday::Fri,
+        Weekday::Sat,
+    ]
+    .into_iter()
+    .find(|d| day_key(*d) == key)
+}
+
+/// The date named by a `plan_` action suffix (`2026-10-21`).
+fn parse_date(text: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(text, "%Y-%m-%d").ok()
 }
 
 /// Split `rest` into a number and the confirmation flags that follow it.
@@ -201,6 +293,8 @@ pub fn menu_command(id: &str) -> Option<Command> {
                 },
             })
         }
+        a::DEADLINE_DAY => coach(Input::DeadlineDay),
+        a::RECOVERY_SHOW => coach(Input::Recovery(RecoveryAction::ShowPlan)),
         a::BREAK => coach(Input::MarkBreak),
         a::FOCUS_END => coach(Input::EndFocus),
         a::POMODORO_PAUSE => coach(Input::PausePomodoro),
