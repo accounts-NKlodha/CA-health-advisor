@@ -340,7 +340,8 @@ pub enum Bubble {
     ///
     /// The three Pomodoro cards never open by themselves under a hold above the Pomodoro
     /// (pause, lock or sleep, off-hours, focus, presentation, meeting), and a hold that
-    /// starts withdraws an open one. They are not reopened when the hold ends; the phase is
+    /// starts withdraws an open one, even one the user opened during another hold. They
+    /// are not reopened when the hold ends; the phase is
     /// kept in [`CoachView::pomodoro`] and the user can open the card with
     /// [`Input::OpenPending`].
     PomodoroBreak {
