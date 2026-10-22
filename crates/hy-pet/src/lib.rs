@@ -12,6 +12,7 @@
 //!
 //! The coaching engine (slice V1-2) drives the pet through [`shell::PetShell`].
 
+pub mod frame;
 pub mod geometry;
 pub mod hotkey;
 pub mod messages;

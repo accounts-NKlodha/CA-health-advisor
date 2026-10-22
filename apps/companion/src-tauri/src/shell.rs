@@ -13,18 +13,19 @@ use std::time::Duration;
 
 use hy_core::schema::PetEdge;
 use hy_core::store::{PetProfile, Store};
+use hy_pet::frame::ShellCore;
 use hy_pet::geometry::{Monitor, Rect, layout_fingerprint};
 use hy_pet::hotkey::Hotkey;
 use hy_pet::messages::{MessageId, bring_back_message, message};
 use hy_pet::pack::{Library, Pack};
 use hy_pet::placement::{
-    BubbleLayout, Placement, Side, bring_above_clock, bubble_limits_logical, gap_physical,
-    layout_bubble, pet_window_logical, reconcile, resize_anchored, snap_after_drop,
+    Placement, Side, bring_above_clock, bubble_limits_logical, gap_physical, layout_bubble,
+    pet_window_logical, reconcile, resize_anchored, snap_after_drop,
 };
 use hy_pet::profile::{self, PetEdit};
 use hy_pet::shell::{
-    Bubble, BubbleOutcome, CloseCause, Effect, Handled, HideReason, MenuAction, Open, PetShell,
-    ShellEvent, ShellEventSink, ShellModel, TrayView,
+    Bubble, BubbleOutcome, CloseCause, Effect, Handled, HideReason, MenuAction, PetShell,
+    ShellEvent, ShellEventSink, TrayView,
 };
 use hy_pet::state::{PetState, StateLook};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
@@ -59,21 +60,11 @@ struct Drag {
 
 #[derive(Debug)]
 struct Inner {
-    model: ShellModel,
+    /// The shell's rules and the window frame (pet, monitor, open bubble layout, the
+    /// rectangle last given to the window), from `hy-pet` so they are unit-tested.
+    core: ShellCore,
     profile: PetProfile,
-    /// The pet's rectangle, physical pixels.
-    pet: Option<Rect>,
-    /// The monitor the pet is on.
-    monitor: Option<Monitor>,
     fingerprint: String,
-    /// Changes whenever what is open changes.
-    open_token: u64,
-    open_key: String,
-    /// The measured bubble size for `open_token`, logical pixels.
-    bubble_logical: Option<(f64, f64)>,
-    layout: Option<BubbleLayout>,
-    /// The window rectangle last applied.
-    applied: Option<Rect>,
     drag: Option<Drag>,
     hotkey: Option<Hotkey>,
     hotkey_registered: bool,
@@ -94,15 +85,6 @@ pub struct Shell {
 impl std::fmt::Debug for Shell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Shell").finish_non_exhaustive()
-    }
-}
-
-fn open_key(open: &Open) -> String {
-    match open {
-        Open::None => String::new(),
-        Open::Bubble { bubble } => format!("bubble:{}", bubble.id),
-        Open::Notice { bubble } => format!("notice:{}", bubble.id),
-        Open::Menu => "menu".to_owned(),
     }
 }
 
@@ -186,16 +168,9 @@ impl Shell {
             store: Mutex::new(store),
             library,
             inner: Mutex::new(Inner {
-                model: ShellModel::new(),
+                core: ShellCore::new(profile.scale_pct),
                 profile,
-                pet: None,
-                monitor: None,
                 fingerprint: String::new(),
-                open_token: 0,
-                open_key: String::new(),
-                bubble_logical: None,
-                layout: None,
-                applied: None,
                 drag: None,
                 hotkey,
                 hotkey_registered: false,
@@ -249,7 +224,8 @@ impl Shell {
                 i.profile.edge,
             );
             if let Some(p) = p {
-                place(&mut i, p, &monitors);
+                let pct = i.profile.scale_pct;
+                i.core.place(p, &monitors, pct);
             }
         }
         self.render();
@@ -351,7 +327,7 @@ impl Shell {
         let sink = lock(&self.sink).clone();
         let handled = sink.map_or(Handled::No, |s| s.on_event(ev));
         if let (ShellEvent::PetClicked { .. }, Handled::No) = (ev, handled) {
-            self.run(|i, _| i.model.open_menu());
+            self.run(|i, _| i.core.model.open_menu());
         }
     }
 
@@ -378,7 +354,7 @@ impl Shell {
 
     /// The tray's labels.
     pub fn tray_view(&self) -> TrayView {
-        lock(&self.inner).model.tray()
+        lock(&self.inner).core.model.tray()
     }
 
     /// The hotkey label for menus.
@@ -396,33 +372,21 @@ impl Shell {
             .hotkey
             .filter(|_| i.hotkey_registered)
             .map(|h| h.to_string());
-        menu_view(&i.profile, i.model.menu_actions(), hk)
+        menu_view(&i.profile, i.core.model.menu_actions(), hk)
     }
 
     /// Lay the window out and send the pet page (and the panel, if open) a fresh view.
     pub fn render(&self) {
         let (view, panel) = {
             let mut i = lock(&self.inner);
-            let key = open_key(i.model.open());
-            if key != i.open_key {
-                i.open_key = key;
-                i.open_token += 1;
-                i.bubble_logical = None;
-                i.layout = None;
-            }
-            let window_rect = match (i.model.open(), i.layout, i.pet) {
-                (Open::None, _, Some(p)) | (_, None, Some(p)) => Some(p),
-                (_, Some(l), _) => Some(l.window),
-                _ => None,
-            };
-            if let (Some(r), Some(w)) = (window_rect, self.pet_window())
-                && i.applied != Some(r)
-                && i.drag.is_none()
-            {
+            let dragging = i.drag.is_some();
+            // The frame decides both the window rectangle and whether to apply it, from
+            // the current pet and monitor, so it is always inside the work area.
+            let frame = i.core.frame_for_render(dragging);
+            if let (Some(r), Some(w)) = (frame.apply, self.pet_window()) {
                 set_window_rect(&w, r);
-                i.applied = Some(r);
             }
-            let view = self.pet_view(&i, window_rect);
+            let view = self.pet_view(&i, frame.window);
             let panel = self
                 .app
                 .get_webview_window(PANEL)
@@ -438,22 +402,25 @@ impl Shell {
 
     fn pet_view(&self, i: &Inner, window: Option<Rect>) -> PetView {
         let pack = self.pack(&i.profile);
-        let (state, tag) = i.model.state();
+        let (state, tag) = i.core.model.state();
         let look = StateLook::of(state, tag);
-        let scale = i.monitor.as_ref().map_or(1.0, Monitor::safe_scale);
-        let (max_w, max_h) = i.monitor.as_ref().map_or((320.0, 400.0), |m| {
+        let monitor = i.core.monitor();
+        let scale = monitor.map_or(1.0, Monitor::safe_scale);
+        let (max_w, max_h) = monitor.map_or((320.0, 400.0), |m| {
             bubble_limits_logical(m, i.profile.scale_pct)
         });
         let to_css = |v: i32| f64::from(v) / scale;
-        let layout = match (window, i.pet, i.layout) {
-            (Some(w), Some(p), l) => {
-                let measured = l.filter(|_| i.bubble_logical.is_some());
+        let token = i.core.open_token();
+        let layout = match (window, i.core.pet()) {
+            (Some(w), Some(p)) => {
+                // A layout is used only while it fits the window being applied.
+                let measured = i.core.layout().filter(|l| l.window == w);
                 LayoutView {
                     pet_x: to_css(p.x - w.x),
                     pet_y: to_css(p.y - w.y),
                     bubble_x: measured.map_or(0.0, |l| to_css(l.bubble.x - w.x)),
                     bubble_y: measured.map_or(0.0, |l| to_css(l.bubble.y - w.y)),
-                    measured_token: if measured.is_some() { i.open_token } else { 0 },
+                    measured_token: if measured.is_some() { token } else { 0 },
                     side: measured.map_or(Side::Left, |l| l.side),
                     bubble_max_w: max_w,
                     bubble_max_h: max_h,
@@ -481,7 +448,7 @@ impl Shell {
             look,
             motion: i.profile.motion,
             pet_px: pet_window_logical(i.profile.scale_pct),
-            open: open_view(i.model.open(), i.open_token, || self.menu_for(i)),
+            open: open_view(i.core.model.open(), token, || self.menu_for(i)),
             layout,
         }
     }
@@ -489,7 +456,7 @@ impl Shell {
     /// The pet page's current view (for its first load).
     pub fn current_pet_view(&self) -> PetView {
         let i = lock(&self.inner);
-        let window = i.applied.or(i.pet);
+        let window = i.core.applied().or(i.core.pet());
         self.pet_view(&i, window)
     }
 
@@ -505,37 +472,23 @@ impl Shell {
 
     // ---------------------------------------------------------------- geometry
 
-    fn relayout(i: &mut Inner) {
-        if let (Some((w, h)), Some(m), Some(pet)) = (i.bubble_logical, i.monitor.as_ref(), i.pet) {
-            let size = (m.to_physical(w), m.to_physical(h));
-            i.layout = Some(layout_bubble(m.work_area, pet, size, gap_physical(m)));
-        } else {
-            i.layout = None;
-        }
-    }
-
     /// The pet page measured the open bubble (logical pixels).
     pub fn bubble_measured(self: &Arc<Self>, token: u64, width: f64, height: f64) {
-        if !(width.is_finite() && height.is_finite()) || width <= 0.0 || height <= 0.0 {
-            return;
-        }
         self.run(|i, _| {
-            if token != i.open_token || matches!(i.model.open(), Open::None) {
-                return Vec::new();
+            if i.core.bubble_measured(token, width, height) {
+                vec![Effect::Render]
+            } else {
+                Vec::new()
             }
-            let (max_w, max_h) = i.monitor.as_ref().map_or((width, height), |m| {
-                bubble_limits_logical(m, i.profile.scale_pct)
-            });
-            i.bubble_logical = Some((width.min(max_w), height.min(max_h)));
-            Self::relayout(i);
-            vec![Effect::Render]
         });
     }
 
     /// The display layout may have changed: place the pet again inside the work area
     /// (monitor removed, resolution, scaling or taskbar change). With `force` false the
-    /// pet is only moved if the layout fingerprint changed. Automatic moves are not
-    /// saved, so the saved spot is used again if the monitor comes back after a restart.
+    /// pet is only moved if the layout fingerprint changed. An open bubble or menu is laid
+    /// out again beside the new spot (or measured again after a scaling or work-area
+    /// change). Automatic moves are not saved, so the saved spot is used again if the
+    /// monitor comes back after a restart.
     pub fn on_display_change(self: &Arc<Self>, force: bool) {
         let monitors = current_monitors(&self.app);
         if monitors.is_empty() {
@@ -547,19 +500,22 @@ impl Shell {
                 return Vec::new();
             }
             i.fingerprint = fp;
-            let at = i.pet.map(|r| (r.x, r.y)).or(i.profile.position);
-            if let Some(p) = reconcile(&monitors, at, i.profile.scale_pct, i.profile.edge) {
-                place(i, p, &monitors);
-                i.applied = None;
-            }
+            let (saved, pct, edge) = (i.profile.position, i.profile.scale_pct, i.profile.edge);
+            i.core.display_changed(&monitors, saved, pct, edge);
             vec![Effect::Render]
         });
     }
 
-    /// The pet's rectangle and monitor (for the self-test).
-    pub fn pet_geometry(&self) -> (Option<Rect>, Option<Monitor>, Option<Rect>) {
+    /// The pet's rectangle and monitor, the bubble layout's window (if something open is
+    /// laid out) and the rectangle last given to the window (for the self-test).
+    pub fn pet_geometry(&self) -> Geometry {
         let i = lock(&self.inner);
-        (i.pet, i.monitor.clone(), i.layout.map(|l| l.window))
+        Geometry {
+            pet: i.core.pet(),
+            monitor: i.core.monitor().cloned(),
+            bubble_window: i.core.layout().map(|l| l.window),
+            applied: i.core.applied(),
+        }
     }
 
     // -------------------------------------------------------------------- drag
@@ -570,7 +526,7 @@ impl Shell {
             return;
         };
         let mut i = lock(&self.inner);
-        if let Some(p) = i.pet {
+        if let Some(p) = i.core.pet() {
             i.drag = Some(Drag {
                 cursor: (c.x, c.y),
                 origin: (p.x, p.y),
@@ -586,32 +542,22 @@ impl Shell {
         let fx = {
             let mut i = lock(&self.inner);
             let Some(d) = i.drag else { return };
-            let fx = if matches!(i.model.open(), Open::None) {
-                Vec::new()
-            } else {
-                // Close what is open before moving, so the window is the pet alone.
-                i.layout = None;
-                i.bubble_logical = None;
-                i.model.user_close()
-            };
+            // Close what is open before moving, so the window is the pet alone.
+            let fx = i.core.drag_begin_move();
             #[allow(clippy::cast_possible_truncation)]
             let (dx, dy) = (
                 (c.x - d.cursor.0).round() as i32,
                 (c.y - d.cursor.1).round() as i32,
             );
-            if let Some(p) = i.pet {
-                let r = p.at(d.origin.0 + dx, d.origin.1 + dy);
-                i.pet = Some(r);
-                if let Some(w) = self.pet_window() {
-                    if i.applied
-                        .is_some_and(|a| a.width != r.width || a.height != r.height)
-                    {
-                        set_window_rect(&w, r);
-                    } else {
-                        let _ = w.set_position(PhysicalPosition::new(r.x, r.y));
-                    }
+            if let (Some((r, resize)), Some(w)) = (
+                i.core.drag_to(d.origin.0 + dx, d.origin.1 + dy),
+                self.pet_window(),
+            ) {
+                if resize {
+                    set_window_rect(&w, r);
+                } else {
+                    let _ = w.set_position(PhysicalPosition::new(r.x, r.y));
                 }
-                i.applied = Some(r);
             }
             fx
         };
@@ -624,19 +570,22 @@ impl Shell {
             return false;
         };
         let moved_px = lock(&self.inner)
-            .pet
+            .core
+            .pet()
             .is_some_and(|p| (p.x, p.y) != d.origin);
         if !moved && !moved_px {
             return false;
         }
         let monitors = current_monitors(&self.app);
         self.run(|i, shell| {
-            let Some(pet) = i.pet else { return Vec::new() };
+            let Some(pet) = i.core.pet() else {
+                return Vec::new();
+            };
             if let Some((p, edge)) =
                 snap_after_drop(&monitors, pet, i.profile.scale_pct, i.profile.edge)
             {
-                place(i, p, &monitors);
-                i.applied = None;
+                let pct = i.profile.scale_pct;
+                i.core.place(p, &monitors, pct);
                 shell.save(
                     i,
                     &PetEdit::Position {
@@ -665,53 +614,51 @@ impl Shell {
 
     /// A click on the pet.
     pub fn pet_click(self: &Arc<Self>) {
-        self.run(|i, _| i.model.pet_clicked());
+        self.run(|i, _| i.core.model.pet_clicked());
     }
 
     /// The close button of the open bubble, menu or notice.
     pub fn bubble_close(self: &Arc<Self>) {
-        self.run(|i, _| i.model.user_close());
+        self.run(|i, _| i.core.model.user_close());
     }
 
     /// An action in the engine's bubble.
     pub fn bubble_action(self: &Arc<Self>, bubble_id: &str, action_id: &str) {
-        self.run(|i, _| i.model.bubble_action(bubble_id, action_id));
+        self.run(|i, _| i.core.model.bubble_action(bubble_id, action_id));
     }
 
     /// An engine action from the pet menu, panel or tray.
     pub fn menu_action(self: &Arc<Self>, action_id: &str) {
-        self.run(|i, _| i.model.menu_action(action_id));
+        self.run(|i, _| i.core.model.menu_action(action_id));
     }
 
     /// "Hide pet".
     pub fn hide_pet(self: &Arc<Self>) {
-        self.run(|i, _| i.model.hide(HideReason::User));
+        self.run(|i, _| i.core.model.hide(HideReason::User));
     }
 
     /// The tray's "Hide pet" / "Show pet".
     pub fn toggle_from_tray(self: &Arc<Self>) {
         self.run(|i, _| {
-            if i.model.is_visible() {
-                i.model.hide(HideReason::User)
+            if i.core.model.is_visible() {
+                i.core.model.hide(HideReason::User)
             } else {
-                i.model.user_show()
+                i.core.model.user_show()
             }
         });
     }
 
     /// "Bring pet above clock" (tray, Settings, pet menu, panel). Works when the pet is
-    /// hidden by the user, off-screen or behind other windows; it never takes focus.
+    /// hidden by the user, off-screen or behind other windows; it never takes focus. An
+    /// open engine bubble stays open and moves with the pet.
     pub fn bring_above_clock(self: &Arc<Self>) {
         let monitors = current_monitors(&self.app);
         let mut notice_id = None;
         self.run(|i, shell| {
-            let mut fx = i.model.close_menu();
-            fx.extend(i.model.bring_back());
-            let Some(p) = bring_above_clock(&monitors, i.profile.scale_pct) else {
+            let (mut fx, home) = i.core.bring_home(&monitors, i.profile.scale_pct);
+            let Some(p) = home else {
                 return fx;
             };
-            place(i, p, &monitors);
-            i.applied = None;
             if i.profile.edge == PetEdge::Left {
                 shell.save(
                     i,
@@ -734,7 +681,7 @@ impl Shell {
                 i.profile.tone,
                 &i.profile.display_name,
             );
-            let shown = i.model.show_notice(Bubble::notice(&id, &text));
+            let shown = i.core.model.show_notice(Bubble::notice(&id, &text));
             if !shown.is_empty() {
                 notice_id = Some(id);
             }
@@ -752,7 +699,7 @@ impl Shell {
                 .name("hy-notice".into())
                 .spawn(move || {
                     std::thread::sleep(Duration::from_millis(NOTICE_MS));
-                    me.post(move |s| s.run(|i, _| i.model.notice_expired(&id)));
+                    me.post(move |s| s.run(|i, _| i.core.model.notice_expired(&id)));
                 });
         }
     }
@@ -771,12 +718,13 @@ impl Shell {
             i.profile = saved;
             let placement: Option<Placement> = match edit {
                 PetEdit::Size { pct } => i
-                    .pet
+                    .core
+                    .pet()
                     .and_then(|r| resize_anchored(&monitors, r, *pct, i.profile.edge)),
                 PetEdit::Edge { .. } | PetEdit::Position { .. } | PetEdit::ClearPosition => {
                     reconcile(
                         &monitors,
-                        i.profile.position.or(i.pet.map(|r| (r.x, r.y))),
+                        i.profile.position.or(i.core.pet().map(|r| (r.x, r.y))),
                         i.profile.scale_pct,
                         i.profile.edge,
                     )
@@ -789,9 +737,8 @@ impl Shell {
                 | PetEdit::Tone { .. } => None,
             };
             if let Some(p) = placement {
-                place(i, p, &monitors);
-                Self::relayout(i);
-                i.applied = None;
+                let pct = i.profile.scale_pct;
+                i.core.place(p, &monitors, pct);
                 // A resize or edge change moves the pet: keep the new spot. Reset and
                 // "forget position" leave no saved spot (home above the clock).
                 if matches!(edit, PetEdit::Size { .. } | PetEdit::Edge { .. }) {
@@ -848,7 +795,7 @@ impl Shell {
                 i.profile.tone,
                 &i.profile.display_name,
             ),
-            accessible_name: StateLook::of(i.model.state().0, i.model.state().1)
+            accessible_name: StateLook::of(i.core.model.state().0, i.core.model.state().1)
                 .accessible_name(&i.profile.display_name),
         }
     }
@@ -880,11 +827,11 @@ impl Shell {
         let rect = {
             let mut i = lock(&self.inner);
             i.panel_prev_foreground = prev;
-            let fx = i.model.close_menu();
+            let fx = i.core.model.close_menu();
             drop(i);
             self.apply(fx);
             let i = lock(&self.inner);
-            match (i.pet, i.monitor.as_ref()) {
+            match (i.core.pet(), i.core.monitor()) {
                 (Some(pet), Some(m)) => {
                     let size = (
                         m.to_physical(windows::PANEL_LOGICAL.0),
@@ -922,7 +869,7 @@ impl Shell {
 
     /// Open the settings window (or focus it).
     pub fn open_settings(self: &Arc<Self>) {
-        let monitor = lock(&self.inner).monitor.clone();
+        let monitor = lock(&self.inner).core.monitor().cloned();
         if let Err(e) = windows::open_settings(&self.app, monitor.as_ref()) {
             eprintln!("HealthierYou: could not open settings: {e}");
         }
@@ -935,13 +882,21 @@ impl Shell {
     }
 
     fn visible(&self) -> bool {
-        lock(&self.inner).model.is_visible()
+        lock(&self.inner).core.model.is_visible()
     }
 }
 
-fn place(i: &mut Inner, p: Placement, monitors: &[Monitor]) {
-    i.pet = Some(p.rect);
-    i.monitor = monitors.get(p.monitor).cloned();
+/// The shell's geometry, for the self-test.
+#[derive(Debug, Clone)]
+pub struct Geometry {
+    /// The pet's rectangle, physical pixels.
+    pub pet: Option<Rect>,
+    /// The monitor it is on.
+    pub monitor: Option<Monitor>,
+    /// The window of the laid-out bubble or menu, if one is open and measured.
+    pub bubble_window: Option<Rect>,
+    /// The rectangle last given to the window-position call.
+    pub applied: Option<Rect>,
 }
 
 /// The engine's handle on the pet shell. Cheap to clone; callable from any thread.
@@ -951,7 +906,7 @@ pub struct ShellHandle(Arc<Shell>);
 impl PetShell for ShellHandle {
     fn set_state(&self, state: PetState, tag: Option<String>) {
         self.0
-            .post(move |s| s.run(|i, _| i.model.set_state(state, tag)));
+            .post(move |s| s.run(|i, _| i.core.model.set_state(state, tag)));
     }
 
     fn show_bubble(&self, bubble: Bubble) -> BubbleOutcome {
@@ -964,7 +919,7 @@ impl PetShell for ShellHandle {
         self.0.post(move |s| {
             s.run(|i, _| {
                 let id = bubble.id.clone();
-                let (outcome, mut fx) = i.model.show_bubble(bubble);
+                let (outcome, mut fx) = i.core.model.show_bubble(bubble);
                 if outcome == BubbleOutcome::Suppressed {
                     // Hidden between the call and now: tell the engine it closed.
                     fx.push(Effect::Emit(ShellEvent::BubbleClosed {
@@ -981,15 +936,17 @@ impl PetShell for ShellHandle {
     fn close_bubble(&self, bubble_id: &str) {
         let id = bubble_id.to_owned();
         self.0
-            .post(move |s| s.run(|i, _| i.model.close_bubble(&id)));
+            .post(move |s| s.run(|i, _| i.core.model.close_bubble(&id)));
     }
 
     fn hide(&self, reason: HideReason) {
-        self.0.post(move |s| s.run(|i, _| i.model.hide(reason)));
+        self.0
+            .post(move |s| s.run(|i, _| i.core.model.hide(reason)));
     }
 
     fn unhide(&self, reason: HideReason) {
-        self.0.post(move |s| s.run(|i, _| i.model.unhide(reason)));
+        self.0
+            .post(move |s| s.run(|i, _| i.core.model.unhide(reason)));
     }
 
     fn is_visible(&self) -> bool {
@@ -998,7 +955,7 @@ impl PetShell for ShellHandle {
 
     fn set_menu_actions(&self, actions: Vec<MenuAction>) {
         self.0
-            .post(move |s| s.run(|i, _| i.model.set_menu_actions(actions)));
+            .post(move |s| s.run(|i, _| i.core.model.set_menu_actions(actions)));
     }
 
     fn set_event_sink(&self, sink: Arc<dyn ShellEventSink>) {

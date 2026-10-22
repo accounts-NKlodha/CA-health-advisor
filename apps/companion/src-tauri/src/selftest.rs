@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use hy_pet::geometry::Monitor;
+use hy_pet::geometry::{Monitor, Rect};
 use hy_pet::placement::{SCALE_MAX, SCALE_MIN, SCALE_STEP, bring_above_clock, pet_window_physical};
 use hy_pet::profile::PetEdit;
 use hy_pet::shell::{Bubble, BubbleAction, BubbleOutcome, HideReason, PetShell};
@@ -102,6 +102,24 @@ fn pet_visible(shell: &Arc<Shell>) -> Option<bool> {
     on_main(shell, |s| s.handle().is_visible())
 }
 
+/// The pet window's real rectangle as the operating system reports it (physical pixels),
+/// read on the main thread: what the window-position calls actually produced.
+fn real_window_rect(shell: &Arc<Shell>) -> Option<Rect> {
+    on_main(shell, |s| {
+        use tauri::Manager;
+        let w = s.app().get_webview_window(crate::shell::PET)?;
+        let pos = w.outer_position().ok()?;
+        let size = w.outer_size().ok()?;
+        Some(Rect::new(
+            pos.x,
+            pos.y,
+            i32::try_from(size.width).ok()?,
+            i32::try_from(size.height).ok()?,
+        ))
+    })
+    .flatten()
+}
+
 fn foreground() -> isize {
     #[cfg(windows)]
     {
@@ -167,17 +185,31 @@ fn run(shell: &Arc<Shell>) -> Report {
         );
     }
 
+    // Inside the work area: the pet, the laid-out bubble window, the rectangle given to
+    // the window-position call, and the window's real rectangle from the system.
     let inside = |shell: &Arc<Shell>| {
-        let (pet, mon, window) = shell.pet_geometry();
-        match (pet, mon) {
-            (Some(p), Some(m)) => (
-                m.work_area.contains(&p) && window.is_none_or(|w| m.work_area.contains(&w)),
-                format!("pet {p:?} window {window:?} work area {:?}", m.work_area),
-                Some((p, m)),
-            ),
+        let g = shell.pet_geometry();
+        let real = real_window_rect(shell);
+        match (g.pet, g.monitor) {
+            (Some(p), Some(m)) => {
+                let wa = m.work_area;
+                let ok = wa.contains(&p)
+                    && g.bubble_window.is_none_or(|w| wa.contains(&w))
+                    && g.applied.is_some_and(|a| wa.contains(&a))
+                    && real.is_some_and(|r| wa.contains(&r));
+                (
+                    ok,
+                    format!(
+                        "pet {p:?} bubble window {:?} applied {:?} real {real:?} work area {wa:?}",
+                        g.bubble_window, g.applied
+                    ),
+                    Some((p, m)),
+                )
+            }
             _ => (false, "no placement".into(), None),
         }
     };
+    let laid_out = |shell: &Arc<Shell>| shell.pet_geometry().bubble_window.is_some();
 
     // Fresh store: the pet starts at home, above the clock.
     let home = bring_above_clock(&monitors, 100).map(|p| p.rect);
@@ -257,7 +289,7 @@ fn run(shell: &Arc<Shell>) -> Report {
     let suppressed = handle.show_bubble(Bubble::notice("selftest-hidden", "Hidden test"));
     handle.unhide(HideReason::Presentation);
     let back = wait_until(Duration::from_secs(5), || pet_visible(shell) == Some(true));
-    let replayed = shell.pet_geometry().2.is_some();
+    let replayed = laid_out(shell);
     r.check(
         "presentation_hide_api",
         hid && suppressed == BubbleOutcome::Suppressed && back && !replayed,
@@ -277,15 +309,41 @@ fn run(shell: &Arc<Shell>) -> Report {
         }],
     };
     let outcome = handle.show_bubble(bubble);
-    let laid_out = wait_until(Duration::from_secs(10), || shell.pet_geometry().2.is_some());
+    let measured = wait_until(Duration::from_secs(10), || laid_out(shell));
     let (ok, detail, _) = inside(shell);
     r.check(
         "bubble_inside_work_area",
-        outcome == BubbleOutcome::Shown && laid_out && ok,
-        format!("{outcome:?}, measured {laid_out}; {detail}"),
+        outcome == BubbleOutcome::Shown && measured && ok,
+        format!("{outcome:?}, measured {measured}; {detail}"),
+    );
+
+    // With the engine's bubble open, move the pet to the top-left corner and bring it
+    // home: the bubble stays open and moves with the pet, and the real window stays
+    // inside the work area (review finding on PR 7).
+    let corner = monitors.first().map(|m| (m.work_area.x, m.work_area.y));
+    if let Some((x, y)) = corner {
+        let _ = on_main(shell, move |s| s.edit(&PetEdit::Position { x, y }));
+    }
+    let moved_ok = wait_until(Duration::from_secs(5), || {
+        inside(shell).0 && laid_out(shell)
+    });
+    let _ = on_main(shell, |s| s.bring_above_clock());
+    let home = bring_above_clock(&monitors, SCALE_MAX).map(|p| p.rect);
+    let back = wait_until(Duration::from_secs(5), || {
+        let g = shell.pet_geometry();
+        g.pet == home
+            && g.bubble_window
+                .is_some_and(|w| home.is_some_and(|h| w.contains(&h)))
+    });
+    let (ok, detail, _) = inside(shell);
+    let still_open = laid_out(shell);
+    r.check(
+        "bring_home_with_engine_bubble_open",
+        moved_ok && back && ok && still_open,
+        format!("moved {moved_ok}, home with bubble {back}, open {still_open}; {detail}; expected pet {home:?}"),
     );
     handle.close_bubble("selftest");
-    let closed = wait_until(Duration::from_secs(5), || shell.pet_geometry().2.is_none());
+    let closed = wait_until(Duration::from_secs(5), || !laid_out(shell));
     r.check(
         "bubble_closed_by_engine",
         closed,
@@ -294,9 +352,9 @@ fn run(shell: &Arc<Shell>) -> Report {
 
     // A click with no engine opens the pet menu; a second click closes it.
     let _ = on_main(shell, |s| s.pet_click());
-    let menu = wait_until(Duration::from_secs(10), || shell.pet_geometry().2.is_some());
+    let menu = wait_until(Duration::from_secs(10), || laid_out(shell));
     let _ = on_main(shell, |s| s.pet_click());
-    let menu_closed = wait_until(Duration::from_secs(5), || shell.pet_geometry().2.is_none());
+    let menu_closed = wait_until(Duration::from_secs(5), || !laid_out(shell));
     r.check(
         "pet_click_menu",
         menu && menu_closed,
