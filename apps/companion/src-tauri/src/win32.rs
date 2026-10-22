@@ -10,6 +10,13 @@
 //!   signal; all work happens later on the UI thread.
 //! - The keyboard panel records the foreground window before it takes focus and gives
 //!   focus back to it on Escape (PET-04; architecture A8).
+//! - The tracker's signals (architecture 4.2 and 7): the same subclass hears session lock
+//!   and unlock (`WTSRegisterSessionNotification`, `WM_WTSSESSION_CHANGE`), sleep and wake
+//!   (`WM_POWERBROADCAST`, also registered with `RegisterSuspendResumeNotification` for
+//!   modern standby) and the end of the Windows session (`WM_ENDSESSION`). Input idle time
+//!   comes from `GetLastInputInfo`, and presentation or full-screen state from
+//!   `SHQueryUserNotificationState` plus a look at the foreground window. Only raw values
+//!   are read here; the rules are in `hy_pet::link::signals`.
 //!
 //! Window handles cross this module as `isize` so callers need no unsafe code.
 
@@ -17,16 +24,35 @@
 
 use std::sync::OnceLock;
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use std::time::Duration;
+
+use hy_pet::geometry::Rect;
+use hy_pet::link::signals::{ForegroundWindow, NotificationState, idle_from_ticks};
+use windows_sys::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+};
+use windows_sys::Win32::System::Power::RegisterSuspendResumeNotification;
+use windows_sys::Win32::System::RemoteDesktop::{
+    NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification,
+};
+use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey};
-use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetLastInputInfo, LASTINPUTINFO, RegisterHotKey, UnregisterHotKey,
+};
+use windows_sys::Win32::UI::Shell::{
+    DefSubclassProc, QUERY_USER_NOTIFICATION_STATE, SHQueryUserNotificationState, SetWindowSubclass,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId, HWND_TOPMOST,
-    IsWindow, IsWindowVisible, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_HOTKEY, WM_SETTINGCHANGE, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW,
+    DEVICE_NOTIFY_WINDOW_HANDLE, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetDesktopWindow,
+    GetForegroundWindow, GetShellWindow, GetWindowLongPtrW, GetWindowRect,
+    GetWindowThreadProcessId, HWND_TOPMOST, IsIconic, IsWindow, IsWindowVisible,
+    PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, SW_HIDE, SW_SHOWNOACTIVATE,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_HOTKEY, WM_POWERBROADCAST,
+    WM_SETTINGCHANGE, WM_WTSSESSION_CHANGE, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
 };
 
 /// Something Windows told the pet window.
@@ -36,6 +62,16 @@ pub enum Signal {
     DisplayChanged,
     /// The keyboard-panel hotkey was pressed.
     Hotkey,
+    /// The session was locked.
+    Lock,
+    /// The session was unlocked.
+    Unlock,
+    /// The PC is going to sleep.
+    Suspend,
+    /// The PC woke up (both resume broadcasts map here; the engine ignores a repeat).
+    Resume,
+    /// Windows is signing out or shutting down: save now.
+    EndSession,
 }
 
 type SignalSink = Box<dyn Fn(Signal) + Send + Sync>;
@@ -134,6 +170,18 @@ unsafe extern "system" fn subclass_proc(
     let signal = match msg {
         WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE => Some(Signal::DisplayChanged),
         WM_HOTKEY if usize::try_from(HOTKEY_ID).ok() == Some(wparam) => Some(Signal::Hotkey),
+        WM_WTSSESSION_CHANGE => match u32::try_from(wparam) {
+            Ok(WTS_SESSION_LOCK) => Some(Signal::Lock),
+            Ok(WTS_SESSION_UNLOCK) => Some(Signal::Unlock),
+            _ => None,
+        },
+        WM_POWERBROADCAST => match u32::try_from(wparam) {
+            Ok(PBT_APMSUSPEND) => Some(Signal::Suspend),
+            Ok(PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND) => Some(Signal::Resume),
+            _ => None,
+        },
+        // wParam is TRUE when the session really ends.
+        WM_ENDSESSION if wparam != 0 => Some(Signal::EndSession),
         _ => None,
     };
     if let (Some(s), Some(sink)) = (signal, SINK.get()) {
@@ -144,9 +192,10 @@ unsafe extern "system" fn subclass_proc(
     unsafe { DefSubclassProc(h, msg, wparam, lparam) }
 }
 
-/// Start forwarding display-change and hotkey messages of the pet window to `sink`.
-/// Must be called on the thread that owns the window (Tauri's main thread). The sink
-/// must not block: it runs inside the window procedure.
+/// Start forwarding display-change, hotkey, session, power and end-of-session messages of
+/// the pet window to `sink`, and ask Windows to send the session and power ones. Must be
+/// called on the thread that owns the window (Tauri's main thread). The sink must not
+/// block for long: it runs inside the window procedure.
 pub fn install_signals(h: isize, sink: SignalSink) -> bool {
     if SINK.set(sink).is_err() {
         return false;
@@ -154,7 +203,101 @@ pub fn install_signals(h: isize, sink: SignalSink) -> bool {
     // SAFETY: `subclass_proc` matches SUBCLASSPROC and stays valid for the program's
     // life; the handle belongs to this thread's window. The subclass is never removed
     // because the pet window lives until the process exits.
-    unsafe { SetWindowSubclass(hwnd(h), Some(subclass_proc), SUBCLASS_ID, 0) != 0 }
+    let subclassed = unsafe { SetWindowSubclass(hwnd(h), Some(subclass_proc), SUBCLASS_ID, 0) };
+    // SAFETY: a valid top-level window handle owned by this thread; plain integer flags.
+    // Both registrations last for the window's (the process's) life, so the returned
+    // registration is never unregistered. A failure leaves the plain broadcasts, which
+    // top-level windows receive anyway on most PCs.
+    unsafe {
+        WTSRegisterSessionNotification(hwnd(h), NOTIFY_FOR_THIS_SESSION);
+        RegisterSuspendResumeNotification(hwnd(h) as HANDLE, DEVICE_NOTIFY_WINDOW_HANDLE);
+    }
+    subclassed != 0
+}
+
+/// Time since the last keyboard or mouse input in this session (`GetLastInputInfo`), or
+/// zero if Windows cannot say.
+pub fn idle_time() -> Duration {
+    let mut info = LASTINPUTINFO {
+        cbSize: u32::try_from(std::mem::size_of::<LASTINPUTINFO>()).unwrap_or(8),
+        dwTime: 0,
+    };
+    // SAFETY: `info` is a valid, correctly sized out structure for the call's duration;
+    // GetTickCount takes no arguments.
+    unsafe {
+        if GetLastInputInfo(&raw mut info) == 0 {
+            return Duration::ZERO;
+        }
+        idle_from_ticks(GetTickCount(), info.dwTime)
+    }
+}
+
+/// The shell's notification state (presentation mode, a full-screen app, and so on).
+pub fn notification_state() -> NotificationState {
+    let mut state: QUERY_USER_NOTIFICATION_STATE = 0;
+    // SAFETY: `state` is a valid out pointer for the call's duration.
+    let hr = unsafe { SHQueryUserNotificationState(&raw mut state) };
+    if hr < 0 {
+        NotificationState::Unknown
+    } else {
+        NotificationState::from_raw(state)
+    }
+}
+
+fn rect(r: RECT) -> Rect {
+    Rect::new(
+        r.left,
+        r.top,
+        r.right.saturating_sub(r.left),
+        r.bottom.saturating_sub(r.top),
+    )
+}
+
+fn is_desktop_class(h: HWND) -> bool {
+    let mut buf = [0u16; 32];
+    // SAFETY: `buf` is a valid buffer of the length passed; the handle may be stale, in
+    // which case the call returns 0.
+    let n = unsafe { GetClassNameW(h, buf.as_mut_ptr(), 32) };
+    let name = String::from_utf16_lossy(&buf[..usize::try_from(n).unwrap_or(0).min(32)]);
+    name == "Progman" || name == "WorkerW"
+}
+
+/// What the foreground window looks like, for the full-screen check; `None` if there is
+/// no foreground window or Windows will not describe it.
+pub fn foreground_window() -> Option<ForegroundWindow> {
+    // SAFETY: every call takes the foreground handle (validated by IsWindow) or a no-arg
+    // query, and the out structures are valid and correctly sized for each call.
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_null() || IsWindow(fg) == 0 {
+            return None;
+        }
+        let mut wr = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if GetWindowRect(fg, &raw mut wr) == 0 {
+            return None;
+        }
+        let mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = u32::try_from(std::mem::size_of::<MONITORINFO>()).unwrap_or(40);
+        if mon.is_null() || GetMonitorInfoW(mon, &raw mut mi) == 0 {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let style = GetWindowLongPtrW(fg, GWL_STYLE) as u32;
+        Some(ForegroundWindow {
+            rect: rect(wr),
+            monitor: rect(mi.rcMonitor),
+            has_caption: style & WS_CAPTION == WS_CAPTION,
+            shown: IsWindowVisible(fg) != 0 && IsIconic(fg) == 0,
+            desktop: fg == GetShellWindow() || fg == GetDesktopWindow() || is_desktop_class(fg),
+            own: is_own_window(fg as isize),
+        })
+    }
 }
 
 /// Register the panel hotkey on the pet window; false if another app holds it.

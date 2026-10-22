@@ -1,0 +1,331 @@
+//! The link between the coaching engine ([`hy_core::coach::Coach`], slice V1-2) and the pet
+//! shell ([`PetShell`], slice V1-1).
+//!
+//! Inputs go in through [`CoachLink::input`] (the companion's 5-second idle poll, lock,
+//! unlock, suspend, resume and presentation changes) and [`CoachLink::command`] (what
+//! [`route`] made of a shell event). After each step the link draws the engine's
+//! [`CoachView`] on the shell, changing only what differs:
+//!
+//! - the pet's state and tag ([`present::pet_look`]), with a short celebration after a
+//!   done answer;
+//! - at most one bubble, the engine's ([`present::bubble`]). Each show gets a new bubble
+//!   id ([`present::BubbleKind::id`]); the link closes it when the engine's view no longer
+//!   has it, and never shows anything the engine did not ask for, so a bubble the engine
+//!   withdrew (a hold, a presentation) is never replayed;
+//! - `hide(HideReason::Presentation)` while the engine's view is not visible, and
+//!   `unhide` when it is again. The engine decides (presentation detection feeds it, and
+//!   the user's setting may keep the pet shown); the shell only follows;
+//! - the engine's pet menu, panel and tray entries ([`present::menu_actions`]).
+//!
+//! Answers come back from the shell through [`LinkSink`] (the shell's
+//! [`ShellEventSink`]) on the UI thread: it routes the event against the [`RouteState`]
+//! the link wrote just before changing the shell, decides at once whether a click on the
+//! pet is handled, and forwards the resulting [`Command`] without blocking.
+//!
+//! If the shell refuses a bubble because the user hid the pet, the reminder is collapsed
+//! to its waiting badge ([`Input::CloseBubble`]) instead of popping up later.
+
+pub mod present;
+pub mod route;
+pub mod signals;
+
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
+
+use hy_core::coach::Coach;
+use hy_core::coach::{CoachView, Input, Notice, StepOutput};
+use hy_core::error::Result;
+use hy_core::schema::{EventPayload, NewEvent};
+use hy_core::store::Store;
+
+pub use route::{Command, RouteState, Routed, route};
+
+use self::present::BubbleKind;
+use crate::shell::{
+    Bubble, BubbleOutcome, Handled, HideReason, MenuAction, PetShell, ShellEvent, ShellEventSink,
+};
+use crate::state::PetState;
+
+/// How long the celebration pose lasts after a done answer (wireframe section 4: two
+/// small hops, then Idle). It ends on the first step after this.
+pub const CELEBRATE_FOR: Duration = Duration::from_secs(3);
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The shared routing snapshot. Cheap to clone.
+#[derive(Debug, Clone, Default)]
+pub struct Router(Arc<Mutex<RouteState>>);
+
+impl Router {
+    /// Route one shell event against the latest snapshot.
+    #[must_use]
+    pub fn route(&self, event: &ShellEvent) -> Routed {
+        route(&lock(&self.0), event)
+    }
+
+    /// The latest snapshot.
+    #[must_use]
+    pub fn state(&self) -> RouteState {
+        lock(&self.0).clone()
+    }
+
+    fn set(&self, state: RouteState) {
+        *lock(&self.0) = state;
+    }
+}
+
+/// The shell's event sink: routes on the UI thread and hands the command on.
+pub struct LinkSink {
+    router: Router,
+    forward: Box<dyn Fn(Command) + Send + Sync>,
+}
+
+impl std::fmt::Debug for LinkSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkSink")
+            .field("router", &self.router)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LinkSink {
+    /// A sink that routes with `router` and passes each command to `forward`, which must
+    /// not block (the companion sends it to the engine's thread).
+    #[must_use]
+    pub fn new(router: Router, forward: impl Fn(Command) + Send + Sync + 'static) -> Self {
+        Self {
+            router,
+            forward: Box::new(forward),
+        }
+    }
+}
+
+impl ShellEventSink for LinkSink {
+    fn on_event(&self, event: &ShellEvent) -> Handled {
+        let routed = self.router.route(event);
+        if let Some(c) = routed.command {
+            (self.forward)(c);
+        }
+        routed.handled
+    }
+}
+
+/// What the link last told the shell.
+#[derive(Debug, Default)]
+struct Shown {
+    hidden: bool,
+    look: Option<(PetState, Option<String>)>,
+    menu: Option<Vec<MenuAction>>,
+    bubble: Option<(BubbleKind, Bubble)>,
+}
+
+/// The engine bound to the shell.
+pub struct CoachLink {
+    coach: Coach,
+    shell: Arc<dyn PetShell>,
+    router: Router,
+    shown: Shown,
+    rev: u64,
+    celebrate_until: Option<Duration>,
+}
+
+impl std::fmt::Debug for CoachLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CoachLink")
+            .field("coach", &self.coach)
+            .field("shown", &self.shown)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CoachLink {
+    /// Open the engine over `store` (see [`Coach::open`]) and draw its first view.
+    ///
+    /// # Errors
+    /// Any error from [`Coach::open`].
+    pub fn open(store: Store, shell: Arc<dyn PetShell>) -> Result<(Self, StepOutput)> {
+        let (coach, out) = Coach::open(store)?;
+        let mut link = Self {
+            coach,
+            shell,
+            router: Router::default(),
+            shown: Shown::default(),
+            rev: 0,
+            celebrate_until: None,
+        };
+        link.after(&out);
+        Ok((link, out))
+    }
+
+    /// The routing snapshot, for the shell's sink.
+    #[must_use]
+    pub fn router(&self) -> Router {
+        self.router.clone()
+    }
+
+    /// Apply one engine input now and draw the result.
+    ///
+    /// # Errors
+    /// Any error from [`Coach::handle`]; the engine is rolled back and the shell is left
+    /// as it was.
+    pub fn input(&mut self, input: Input) -> Result<StepOutput> {
+        let out = self.coach.handle(input)?;
+        self.after(&out);
+        Ok(out)
+    }
+
+    /// Apply a routed command.
+    ///
+    /// # Errors
+    /// Any store or engine error.
+    pub fn command(&mut self, command: Command) -> Result<StepOutput> {
+        match command {
+            Command::Coach(i) => self.input(i),
+            Command::LogWater { ml } => {
+                let now = self.coach.store().clock().now();
+                let event = NewEvent::manual(EventPayload::WaterLogged { amount_ml: ml }).at(now);
+                self.coach.store_mut().append_event(event)?;
+                self.input(Input::Refresh)
+            }
+        }
+    }
+
+    /// Save anything not yet saved (on exit).
+    ///
+    /// # Errors
+    /// Any store error.
+    pub fn flush(&mut self) -> Result<()> {
+        self.coach.flush()
+    }
+
+    /// The engine's last view.
+    #[must_use]
+    pub fn view(&self) -> &CoachView {
+        self.coach.view()
+    }
+
+    /// The engine.
+    #[must_use]
+    pub const fn coach(&self) -> &Coach {
+        &self.coach
+    }
+
+    /// The id of the bubble the link last showed and has not closed.
+    #[must_use]
+    pub fn shown_bubble_id(&self) -> Option<&str> {
+        self.shown.bubble.as_ref().map(|(_, b)| b.id.as_str())
+    }
+
+    /// Whether the link has the pet hidden for a presentation.
+    #[must_use]
+    pub const fn hidden_for_presentation(&self) -> bool {
+        self.shown.hidden
+    }
+
+    fn after(&mut self, out: &StepOutput) {
+        let now = self.coach.store().clock().monotonic();
+        if out
+            .notices
+            .iter()
+            .any(|n| matches!(n, Notice::Celebrate(_)))
+        {
+            self.celebrate_until = Some(now + CELEBRATE_FOR);
+        }
+        let celebrating = self.celebrate_until.is_some_and(|t| now < t);
+        if !celebrating {
+            self.celebrate_until = None;
+        }
+        let view = out.view.clone();
+        if self.render(&view, celebrating) {
+            // The shell refused the bubble because the user hid the pet: collapse it to
+            // the waiting badge rather than show it later. The engine then has no bubble,
+            // so this does not repeat.
+            if let Ok(next) = self.coach.handle(Input::CloseBubble) {
+                self.render(&next.view, celebrating);
+            }
+        }
+    }
+
+    /// Draw `view` on the shell. Returns true if the shell refused a new bubble.
+    fn render(&mut self, view: &CoachView, celebrating: bool) -> bool {
+        let look = present::pet_look(view, celebrating);
+        let menu = present::menu_actions(view);
+        let want = view
+            .bubble
+            .as_ref()
+            .map(|b| (BubbleKind::of(b), present::bubble(b, view)));
+
+        // The bubble to show: the same card stays as it is (its wording is not redrawn
+        // every tick) unless its chips or actions changed.
+        let show = match (&self.shown.bubble, want) {
+            (Some((k, old)), Some((k2, new)))
+                if *k == k2 && old.chips == new.chips && old.actions == new.actions =>
+            {
+                None
+            }
+            (_, Some((k, mut b))) => {
+                self.rev += 1;
+                b.id = k.id(self.rev);
+                Some((k, b))
+            }
+            (_, None) => None,
+        };
+        let close = match (&self.shown.bubble, &show, view.bubble.is_some()) {
+            (Some((_, old)), None, false) => Some(old.id.clone()),
+            _ => None,
+        };
+
+        // Routing first, so an event from the shell is judged against what it now shows.
+        let bubble_id = match (&show, &close) {
+            (Some((_, b)), _) => Some(b.id.clone()),
+            (None, Some(_)) => None,
+            (None, None) => self.shown.bubble.as_ref().map(|(_, b)| b.id.clone()),
+        };
+        self.router.set(RouteState {
+            bubble_id,
+            click_reopens: present::click_reopens(view),
+        });
+
+        if !view.visible && !self.shown.hidden {
+            if let Some((_, b)) = self.shown.bubble.take() {
+                self.shell.close_bubble(&b.id);
+            }
+            self.shell.hide(HideReason::Presentation);
+            self.shown.hidden = true;
+        }
+        if self.shown.look.as_ref() != Some(&look) {
+            self.shell.set_state(look.0, look.1.clone());
+            self.shown.look = Some(look);
+        }
+        if self.shown.menu.as_ref() != Some(&menu) {
+            self.shell.set_menu_actions(menu.clone());
+            self.shown.menu = Some(menu);
+        }
+        if view.visible && self.shown.hidden {
+            self.shell.unhide(HideReason::Presentation);
+            self.shown.hidden = false;
+        }
+        if let Some(id) = close {
+            self.shell.close_bubble(&id);
+            self.shown.bubble = None;
+        }
+        if let Some((k, b)) = show {
+            match self.shell.show_bubble(b.clone()) {
+                BubbleOutcome::Shown => self.shown.bubble = Some((k, b)),
+                BubbleOutcome::Suppressed | BubbleOutcome::Invalid => {
+                    self.shown.bubble = None;
+                    let mut state = self.router.state();
+                    state.bubble_id = None;
+                    self.router.set(state);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests;

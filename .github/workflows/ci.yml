@@ -1,4 +1,4 @@
-# HealthierYou CI (slices V1-0 and V1-1).
+# HealthierYou CI (slices V1-0, V1-1 and V1-2, and their integration).
 # Linux: format, lint and unit tests for the shared core, the pet shell logic (hy-pet:
 # placement and clamping, pet packs, edits), server and simulator, plus the companion UI
 # type check and build. The companion is a Windows product (Tauri 2 +
@@ -7,7 +7,9 @@
 # runtime are slice V1-6, so the Windows job builds the binary without bundling.
 # The Windows job then runs the built companion's scripted self-test (HY_SELFTEST) on the
 # runner's desktop: real pet window styles, placement at every size, Bring pet above
-# clock, tray hide and show, presentation hiding, bubble layout and the panel hotkey.
+# clock, tray hide and show, presentation hiding, bubble layout and the panel hotkey, then
+# the coaching engine end to end on a simulated clock (a due reminder as the single bubble,
+# the answer recorded in the store, a presentation hiding it with nothing replayed).
 name: ci
 
 on:

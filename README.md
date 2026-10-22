@@ -24,11 +24,11 @@ Source conversation export is retained as background. `sources/` and `AGENTS.md`
 
 | Path | What it is |
 | --- | --- |
-| `crates/hy-core` | Shared Rust core: schema, local SQLite store, migrations, clock and time zone |
-| `crates/hy-pet` | Pet shell logic (V1-1): placement and clamping in the work area, pet packs (`crates/hy-pet/packs`), pet edits, the `PetShell` interface for the coaching engine |
+| `crates/hy-core` | Shared Rust core: schema, local SQLite store, migrations, clock and time zone; the activity tracker and coaching engine (`hy_core::coach`, V1-2) |
+| `crates/hy-pet` | Pet shell logic (V1-1): placement and clamping in the work area, pet packs (`crates/hy-pet/packs`), pet edits, the `PetShell` interface for the coaching engine; `hy_pet::link` connects the engine to the shell (view and answer routing, the rules behind the Windows idle and presentation signals) |
 | `crates/hy-server` | Office LAN server (skeleton; built in V1-5 after the pairing security gate) |
 | `crates/hy-sim` | Load simulator (skeleton; built in V1-5) |
-| `apps/companion/src-tauri` | Windows desktop companion, Tauri 2: pet window, tray, keyboard pet panel, settings window |
+| `apps/companion/src-tauri` | Windows desktop companion, Tauri 2: pet window, tray, keyboard pet panel, settings window, and the coaching engine's thread fed by Windows idle, lock, sleep and presentation signals |
 | `apps/companion/ui` | Companion pages: pet and keyboard panel (plain TypeScript), screens (Preact), built with Vite |
 
 Local checks (Rust toolchain pinned in `rust-toolchain.toml`, Node 22):

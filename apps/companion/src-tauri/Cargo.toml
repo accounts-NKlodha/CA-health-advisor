@@ -13,6 +13,7 @@ repository.workspace = true
 tauri-build = { version = "=2.7.3", features = [] }
 
 [dependencies]
+chrono.workspace = true
 hy-core.workspace = true
 hy-pet.workspace = true
 serde.workspace = true
@@ -23,6 +24,10 @@ tauri = { version = "=2.12.4", features = ["tray-icon"] }
 # Already in the lockfile through Tauri. Used only by src/win32.rs.
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_System_Power",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_SystemInformation",
   "Win32_System_Threading",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Shell",
@@ -31,8 +36,10 @@ windows-sys = { version = "0.61.2", features = [
 
 # The workspace forbids unsafe code. The companion needs a few Win32 calls (the proven
 # non-activating pet window, show without activation, display-change and hotkey messages,
-# handing focus back). They live in src/win32.rs only, each with a SAFETY note, so here
-# unsafe code is denied (not forbidden) and that one module allows it.
+# handing focus back, and the tracker's signals: input idle time, lock and unlock, sleep
+# and wake, presentation and full-screen state). They live in src/win32.rs only, each with
+# a SAFETY note, so here unsafe code is denied (not forbidden) and that one module allows
+# it.
 [lints.rust]
 unsafe_code = "deny"
 missing_debug_implementations = "warn"

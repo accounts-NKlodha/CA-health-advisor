@@ -97,10 +97,15 @@ fn tray_show_pet_overrides_every_reason() {
     m.hide(HideReason::User);
     let fx = m.user_show();
     assert!(fx.contains(&Effect::ShowWindow));
+    // The engine hid the pet for the presentation, so it is told about the override.
+    assert!(fx.contains(&Effect::Emit(ShellEvent::PetShownByUser)));
     assert!(m.is_visible());
     // The presentation ending later changes nothing.
     assert!(m.unhide(HideReason::Presentation).is_empty());
     assert!(m.user_show().is_empty());
+    // Showing a pet the user hid tells the engine nothing.
+    m.hide(HideReason::User);
+    assert!(!m.user_show().iter().any(|e| matches!(e, Effect::Emit(_))));
 }
 
 #[test]
