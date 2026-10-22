@@ -197,6 +197,9 @@ pub enum ShellEvent {
         /// The state at the time.
         state: PetState,
     },
+    /// The user chose the tray's "Show pet" while the pet was hidden for a presentation:
+    /// the engine keeps the pet shown until the presentation ends.
+    PetShownByUser,
 }
 
 /// Whether the engine handled an event.
@@ -528,8 +531,14 @@ impl ShellModel {
         if self.hidden.is_empty() {
             return Vec::new();
         }
+        let presentation = self.hidden.contains(&HideReason::Presentation);
         self.hidden.clear();
-        vec![Effect::ShowWindow, Effect::Render, Effect::UpdateTray]
+        let mut fx = vec![Effect::ShowWindow, Effect::Render, Effect::UpdateTray];
+        if presentation {
+            // The engine hid the pet; tell it the user overrode that.
+            fx.push(Effect::Emit(ShellEvent::PetShownByUser));
+        }
+        fx
     }
 
     /// "Bring pet above clock" clears the user's own hiding (it works for a hidden or

@@ -7,6 +7,10 @@
 //! the same way, so the engine can call it from any thread. The `inner` lock is never
 //! held while calling the engine's sink, and the store lock is only ever taken inside
 //! `inner` (never the other way round), so there is no lock-order deadlock.
+//!
+//! The coaching engine (`crate::coach`) is attached through [`PetShell`] and the sink; the
+//! pet window's lock, sleep and end-of-session messages reach it through
+//! [`Shell::set_system_listener`].
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -24,12 +28,13 @@ use hy_pet::placement::{
 };
 use hy_pet::profile::{self, PetEdit};
 use hy_pet::shell::{
-    Bubble, BubbleOutcome, CloseCause, Effect, Handled, HideReason, MenuAction, PetShell,
+    Bubble, BubbleOutcome, CloseCause, Effect, Handled, HideReason, MenuAction, Open, PetShell,
     ShellEvent, ShellEventSink, TrayView,
 };
 use hy_pet::state::{PetState, StateLook};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 
+use crate::coach::SystemSignal;
 use crate::view::{
     LayoutView, MenuView, PanelView, PetView, SettingsView, menu_view, open_view, pose_for,
     settings_view,
@@ -80,7 +85,11 @@ pub struct Shell {
     library: Library,
     inner: Mutex<Inner>,
     sink: Mutex<Option<Arc<dyn ShellEventSink>>>,
+    system: Mutex<Option<SystemListener>>,
 }
+
+/// Hears lock, unlock, sleep, wake and the end of the Windows session.
+pub type SystemListener = Arc<dyn Fn(SystemSignal) + Send + Sync>;
 
 impl std::fmt::Debug for Shell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -179,6 +188,7 @@ impl Shell {
                 page_ready: false,
             }),
             sink: Mutex::new(None),
+            system: Mutex::new(None),
         }))
     }
 
@@ -270,6 +280,13 @@ impl Shell {
                             shell.post(|s| s.on_display_change(true));
                         }
                         crate::win32::Signal::Hotkey => shell.post(|s| s.open_panel()),
+                        crate::win32::Signal::Lock => shell.on_system(SystemSignal::Lock),
+                        crate::win32::Signal::Unlock => shell.on_system(SystemSignal::Unlock),
+                        crate::win32::Signal::Suspend => shell.on_system(SystemSignal::Suspend),
+                        crate::win32::Signal::Resume => shell.on_system(SystemSignal::Resume),
+                        crate::win32::Signal::EndSession => {
+                            shell.on_system(SystemSignal::EndSession);
+                        }
                     }
                 }
             }),
@@ -279,6 +296,20 @@ impl Shell {
     #[cfg(not(windows))]
     #[allow(clippy::unused_self)]
     fn install_signals(self: &Arc<Self>) {}
+
+    /// Send the pet window's system events (lock, unlock, sleep, wake, end of session) to
+    /// `listener`, which is called inside the window procedure and must return quickly.
+    pub fn set_system_listener(&self, listener: SystemListener) {
+        *lock(&self.system) = Some(listener);
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn on_system(&self, s: SystemSignal) {
+        let listener = lock(&self.system).clone();
+        if let Some(f) = listener {
+            f(s);
+        }
+    }
 
     /// Register (or clear) the panel hotkey. Returns whether Windows accepted it.
     pub fn apply_hotkey(&self, hotkey: Option<Hotkey>) -> bool {
@@ -789,6 +820,10 @@ impl Shell {
 
     fn panel_view_locked(&self, i: &Inner) -> PanelView {
         PanelView {
+            bubble: match i.core.model.open() {
+                Open::Bubble { bubble } => Some(bubble.clone()),
+                _ => None,
+            },
             menu: self.menu_for(i),
             panel_hint: message(
                 MessageId::PanelHint,
@@ -883,6 +918,14 @@ impl Shell {
 
     fn visible(&self) -> bool {
         lock(&self.inner).core.model.is_visible()
+    }
+
+    /// The id of the engine's bubble open beside the pet, if any (for the self-test).
+    pub fn open_bubble_id(&self) -> Option<String> {
+        match lock(&self.inner).core.model.open() {
+            Open::Bubble { bubble } => Some(bubble.id.clone()),
+            _ => None,
+        }
     }
 }
 

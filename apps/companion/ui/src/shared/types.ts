@@ -126,6 +126,8 @@ export interface PetView {
 }
 
 export interface PanelView {
+  /** The engine's bubble open beside the pet, so it can be answered from the keyboard. */
+  bubble: Bubble | null;
   menu: MenuView;
   panel_hint: string;
   accessible_name: string;

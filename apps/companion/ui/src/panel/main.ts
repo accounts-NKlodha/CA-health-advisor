@@ -1,14 +1,68 @@
 // The keyboard pet panel (wireframe K1). The hotkey opens it and it takes focus on
 // purpose; Tab moves between actions, Escape closes it and the shell hands focus back to
 // the window that had it. Actions that open another window (Settings) leave focus there.
+// When the engine's bubble is open beside the pet (a reminder, a Pomodoro card, the
+// check-in), the panel shows the same bubble first so it can be answered by keyboard.
 import { call, on, report } from '../shared/ipc';
 import { renderMenu } from '../shared/menu';
-import type { PanelView } from '../shared/types';
+import type { Bubble, PanelView } from '../shared/types';
 
 const root = document.getElementById('panel') as HTMLElement;
 
 function close(restore: boolean): void {
   call('panel_close', { restore }).catch(report);
+}
+
+function bubbleSection(b: Bubble): HTMLElement {
+  const section = document.createElement('section');
+  section.className = 'panel-bubble';
+  section.setAttribute('aria-labelledby', 'panel-bubble-title');
+  const h = document.createElement('h2');
+  h.id = 'panel-bubble-title';
+  h.textContent = b.title;
+  section.append(h);
+  for (const line of b.lines) {
+    const p = document.createElement('p');
+    p.textContent = line;
+    section.append(p);
+  }
+  if (b.chips.length > 0) {
+    const ul = document.createElement('ul');
+    ul.className = 'chips';
+    for (const c of b.chips) {
+      const li = document.createElement('li');
+      li.className = c.highlighted ? 'chip on' : 'chip';
+      li.textContent = `${c.label}: ${c.status}`;
+      ul.append(li);
+    }
+    section.append(ul);
+  }
+  const row = document.createElement('div');
+  row.className = 'row';
+  for (const a of b.actions) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = a.style === 'primary' ? 'btn primary' : 'btn';
+    btn.textContent = a.label;
+    btn.addEventListener('click', () => {
+      call('bubble_action', { bubbleId: b.id, actionId: a.id })
+        .then(() => close(true))
+        .catch(report);
+    });
+    row.append(btn);
+  }
+  const later = document.createElement('button');
+  later.type = 'button';
+  later.className = 'btn';
+  later.textContent = 'Close this card';
+  later.addEventListener('click', () => {
+    call('bubble_close')
+      .then(() => close(true))
+      .catch(report);
+  });
+  row.append(later);
+  section.append(row);
+  return section;
 }
 
 function draw(v: PanelView, keepFocus: boolean): void {
@@ -49,7 +103,11 @@ function draw(v: PanelView, keepFocus: boolean): void {
   const hint = document.createElement('p');
   hint.className = 'hint';
   hint.textContent = v.panel_hint;
-  root.replaceChildren(state, menu, hint);
+  if (v.bubble) {
+    root.replaceChildren(state, bubbleSection(v.bubble), menu, hint);
+  } else {
+    root.replaceChildren(state, menu, hint);
+  }
 
   const buttons = Array.from(root.querySelectorAll<HTMLButtonElement>('button'));
   const again =

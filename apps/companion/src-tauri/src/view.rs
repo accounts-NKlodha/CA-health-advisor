@@ -88,6 +88,9 @@ pub struct MenuView {
 /// The keyboard panel's view.
 #[derive(Debug, Clone, Serialize)]
 pub struct PanelView {
+    /// The engine's bubble open beside the pet, so it can be answered from the keyboard
+    /// (the same bubble, not a second one).
+    pub bubble: Option<Bubble>,
     /// The same content as the pet menu.
     pub menu: MenuView,
     /// "Tab moves between actions. Esc closes and returns you to your work."

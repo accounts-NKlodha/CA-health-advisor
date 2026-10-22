@@ -12,10 +12,16 @@
 //! - the settings window with the pet library and edits.
 //!
 //! The tracker, coaching engine and suppression (V1-2) drive the pet through
-//! `hy_pet::shell::PetShell`, implemented by [`shell::ShellHandle`].
+//! `hy_pet::shell::PetShell`, implemented by [`shell::ShellHandle`]. [`coach`] runs the
+//! engine on its own thread over a second connection to the same store, feeds it the
+//! Windows signals (input idle time every 5 s, lock and unlock, sleep and wake,
+//! presentation and full-screen state) and routes the user's answers from the bubble, pet
+//! menu, tray and keyboard panel back to it; `hy_pet::link` holds the rules. On exit the
+//! engine's state is saved.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod coach;
 mod commands;
 mod selftest;
 mod shell;
@@ -29,11 +35,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hy_core::clock::SystemClock;
+use hy_core::clock::{Clock, ManualClock, SystemClock};
 use hy_core::store::Store;
 use hy_pet::pack::Library;
 use tauri::{Manager, RunEvent};
 
+use crate::coach::{CoachRunner, SHUTDOWN_WAIT};
 use crate::shell::Shell;
 
 /// The store's location under the per-user local data folder (architecture 6.1).
@@ -71,12 +78,47 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     windows::create_pet_window(app.handle())?;
     tray::create(app.handle(), &shell)?;
     shell.start();
+
+    // The coaching engine, over its own connection to the store. The self-test gives it a
+    // simulated clock and drives it without the signal pump.
+    let sim = selftest
+        .is_some()
+        .then(|| Arc::new(ManualClock::new(selftest::sim_start())));
+    let coach_clock: Arc<dyn Clock> = match &sim {
+        Some(c) => c.clone(),
+        None => Arc::new(SystemClock::new()),
+    };
+    let runner = Store::open(&path, coach_clock)
+        .and_then(|store| CoachRunner::start(&shell, store, sim.is_none()));
+    let runner = match runner {
+        Ok(r) => {
+            app.manage(Arc::clone(&r));
+            let weak = Arc::downgrade(&r);
+            shell.set_system_listener(Arc::new(move |s| {
+                if let Some(r) = weak.upgrade() {
+                    r.system(s);
+                }
+            }));
+            Some(r)
+        }
+        Err(e) => {
+            // The pet still runs; reminders are off until the problem is fixed.
+            eprintln!("HealthierYou: coaching could not start: {e}");
+            None
+        }
+    };
+
     if let Some(report) = selftest {
         let idle = std::env::var("HY_SELFTEST_IDLE_S")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        selftest::spawn(Arc::clone(&shell), report, Duration::from_secs(idle));
+        selftest::spawn(
+            Arc::clone(&shell),
+            runner.zip(sim),
+            report,
+            Duration::from_secs(idle),
+        );
     }
     Ok(())
 }
@@ -106,15 +148,19 @@ fn main() {
         .setup(setup)
         .build(tauri::generate_context!());
     match app {
-        Ok(app) => app.run(|_, event| {
+        Ok(app) => app.run(|app, event| match event {
             // Closing the settings window or the panel must not quit: the pet and tray
             // stay. Only "Quit" in the tray (an explicit exit code) ends the app.
-            if let RunEvent::ExitRequested {
+            RunEvent::ExitRequested {
                 code: None, api, ..
-            } = event
-            {
-                api.prevent_exit();
+            } => api.prevent_exit(),
+            // A clean exit saves the engine's state first.
+            RunEvent::Exit => {
+                if let Some(r) = app.try_state::<Arc<CoachRunner>>() {
+                    r.shutdown(SHUTDOWN_WAIT);
+                }
             }
+            _ => {}
         }),
         Err(e) => {
             eprintln!("HealthierYou failed to start: {e}");

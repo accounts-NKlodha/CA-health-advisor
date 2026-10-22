@@ -9,6 +9,13 @@
 //! keyboard panel's focus hand-back. It writes a JSON report and exits with 0 when every
 //! required check passed.
 //!
+//! It then checks the coaching engine end to end on a simulated clock (the engine's store
+//! connection uses a `ManualClock` starting on a Monday morning, and the signal pump is
+//! off): a reminder falls due and appears as the single bubble beside the pet, answering
+//! it on the real bubble records the response through the store, and a simulated
+//! presentation (the same engine input the Windows detector sends) hides the pet and the
+//! next reminder, with nothing replayed when it ends.
+//!
 //! A CI runner is not an office PC: focus checks that depend on an interactive desktop
 //! are recorded as informational, and real Windows acceptance of focus and DPI remains a
 //! UAT item (architecture 11; A6, A8).
@@ -18,13 +25,27 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, TimeZone, Utc};
+use hy_core::clock::ManualClock;
+use hy_core::coach::{CoachView, Input};
+use hy_core::schema::{EventPayload, ReminderOutcome};
 use hy_pet::geometry::{Monitor, Rect};
+use hy_pet::link::present::{BubbleKind, action};
 use hy_pet::placement::{SCALE_MAX, SCALE_MIN, SCALE_STEP, bring_above_clock, pet_window_physical};
 use hy_pet::profile::PetEdit;
 use hy_pet::shell::{Bubble, BubbleAction, BubbleOutcome, HideReason, PetShell};
 use serde::Serialize;
 
+use crate::coach::CoachRunner;
 use crate::shell::{Shell, current_monitors};
+
+/// Where the simulated clock starts: Monday 26 Oct 2026, 10:00 in Kolkata, inside the
+/// default work hours.
+pub fn sim_start() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 10, 26, 4, 30, 0)
+        .single()
+        .unwrap_or_else(Utc::now)
+}
 
 #[derive(Debug, Serialize)]
 struct Check {
@@ -131,12 +152,23 @@ fn foreground() -> isize {
     }
 }
 
-/// Start the self-test on its own thread.
-pub fn spawn(shell: Arc<Shell>, report_path: PathBuf, idle_after: Duration) {
+/// Start the self-test on its own thread. `coach` is the engine's runner and its
+/// simulated clock, if the engine started.
+pub fn spawn(
+    shell: Arc<Shell>,
+    coach: Option<(Arc<CoachRunner>, Arc<ManualClock>)>,
+    report_path: PathBuf,
+    idle_after: Duration,
+) {
     let _ = std::thread::Builder::new()
         .name("hy-selftest".into())
         .spawn(move || {
-            let report = run(&shell);
+            let mut report = run(&shell);
+            match &coach {
+                Some((runner, clock)) => coach_end_to_end(&mut report, &shell, runner, clock),
+                None => report.check("coach_started", false, "the coaching engine did not start"),
+            }
+            report.ok = report.checks.iter().all(|c| c.ok || !c.required);
             std::thread::sleep(idle_after);
             let code = i32::from(!report.ok);
             let text = serde_json::to_string_pretty(&report).unwrap_or_default();
@@ -396,4 +428,183 @@ fn run(shell: &Arc<Shell>) -> Report {
 
     r.ok = r.checks.iter().all(|c| c.ok || !c.required);
     r
+}
+
+// ------------------------------------------------------------ coaching engine
+
+/// Let `secs` simulated seconds pass with the user active, ticking every 5 s as the signal
+/// pump does. Returns the engine's view after the last tick.
+fn sim_work(runner: &CoachRunner, clock: &ManualClock, secs: u64) -> Option<CoachView> {
+    let mut view = None;
+    for _ in 0..secs / 5 {
+        clock.advance(chrono::Duration::seconds(5));
+        view = runner.call(|l| {
+            let _ = l.input(Input::Tick {
+                idle: Duration::ZERO,
+            });
+            l.view().clone()
+        });
+        view.as_ref()?;
+    }
+    view
+}
+
+/// Work until the engine's view satisfies `done`, at most `limit_min` simulated minutes.
+/// Returns the view and the simulated minutes it took.
+fn sim_work_until(
+    runner: &CoachRunner,
+    clock: &ManualClock,
+    limit_min: u64,
+    done: impl Fn(&CoachView) -> bool,
+) -> Option<(CoachView, u64)> {
+    for i in 0..limit_min * 12 {
+        let v = sim_work(runner, clock, 5)?;
+        if done(&v) {
+            return Some((v, (i + 1) * 5 / 60));
+        }
+    }
+    None
+}
+
+/// Today's reminder offers and responses in the engine's store.
+fn reminder_events(runner: &CoachRunner) -> (Vec<String>, Vec<(String, ReminderOutcome)>) {
+    runner
+        .call(|l| {
+            let store = l.coach().store();
+            let events = store
+                .today()
+                .and_then(|d| store.events_on(d))
+                .unwrap_or_default();
+            let mut offers = Vec::new();
+            let mut responses = Vec::new();
+            for e in events {
+                match e.payload {
+                    EventPayload::ReminderOffered { reminder_id, .. } => {
+                        offers.push(reminder_id.to_string());
+                    }
+                    EventPayload::ReminderResponse {
+                        reminder_id,
+                        outcome,
+                        ..
+                    } => responses.push((reminder_id.to_string(), outcome)),
+                    _ => {}
+                }
+            }
+            (offers, responses)
+        })
+        .unwrap_or_default()
+}
+
+/// The bubble the link last showed, and the engine's offer in it.
+fn shown(runner: &CoachRunner) -> (Option<String>, Option<String>) {
+    runner
+        .call(|l| {
+            let id = l.shown_bubble_id().map(str::to_owned);
+            let offer = l.view().reminder().map(|(o, _)| o.to_string());
+            (id, offer)
+        })
+        .unwrap_or_default()
+}
+
+/// The engine's bubble open beside the pet, laid out inside the work area.
+fn engine_bubble_on_show(shell: &Arc<Shell>, id: &str) -> bool {
+    let g = shell.pet_geometry();
+    shell.open_bubble_id().as_deref() == Some(id)
+        && match (g.bubble_window, g.monitor) {
+            (Some(w), Some(m)) => m.work_area.contains(&w),
+            _ => false,
+        }
+}
+
+#[allow(clippy::too_many_lines)]
+fn coach_end_to_end(
+    r: &mut Report,
+    shell: &Arc<Shell>,
+    runner: &Arc<CoachRunner>,
+    clock: &Arc<ManualClock>,
+) {
+    // 1. A reminder falls due on the simulated clock and is the single bubble.
+    let due = sim_work_until(runner, clock, 60, |v| v.reminder().is_some());
+    let (id, offer) = shown(runner);
+    let parsed = id.as_deref().and_then(BubbleKind::parse);
+    let id_matches = matches!(
+        (parsed, &offer),
+        (Some(BubbleKind::Reminder { offer: o }), Some(want)) if &o.to_string() == want
+    );
+    let on_show = id
+        .as_deref()
+        .is_some_and(|id| wait_until(Duration::from_secs(10), || engine_bubble_on_show(shell, id)));
+    let (offers, responses) = reminder_events(runner);
+    let open_offers = offers
+        .iter()
+        .filter(|o| !responses.iter().any(|(r, _)| r == *o))
+        .count();
+    r.check(
+        "coach_reminder_due_single_bubble",
+        due.is_some() && id_matches && on_show && open_offers == 1,
+        format!(
+            "due after {:?} simulated min ({:?}); link bubble {id:?}; shell bubble {:?}; on show inside the work area {on_show}; open offers {open_offers}",
+            due.as_ref().map(|(_, m)| m),
+            due.as_ref().and_then(|(v, _)| v.reminder()).map(|(_, a)| a),
+            shell.open_bubble_id(),
+        ),
+    );
+
+    // 2. "Already did it" on the real bubble is routed to the engine and recorded.
+    if let Some(bubble_id) = id.clone() {
+        let _ = on_main(shell, move |s| s.bubble_action(&bubble_id, action::DONE));
+    }
+    let recorded = offer.as_ref().is_some_and(|o| {
+        wait_until(Duration::from_secs(10), || {
+            reminder_events(runner)
+                .1
+                .iter()
+                .any(|(r, out)| r == o && *out == ReminderOutcome::Done)
+        })
+    });
+    let closed = wait_until(Duration::from_secs(5), || shell.open_bubble_id().is_none());
+    r.check(
+        "coach_answer_recorded_in_store",
+        recorded && closed,
+        format!("reminder.response done for {offer:?}: {recorded}; bubble closed {closed}"),
+    );
+
+    // 3. The next reminder; a presentation hides it, and nothing comes back afterwards.
+    let next = sim_work_until(runner, clock, 60, |v| v.reminder().is_some());
+    let (id2, offer2) = shown(runner);
+    let on_show2 = id2
+        .as_deref()
+        .is_some_and(|id| wait_until(Duration::from_secs(10), || engine_bubble_on_show(shell, id)));
+    runner.input(Input::PresentationChanged(true));
+    let hid = wait_until(Duration::from_secs(5), || {
+        pet_visible(shell) == Some(false) && shell.open_bubble_id().is_none()
+    });
+    let withdrawn = offer2.as_ref().is_some_and(|o| {
+        reminder_events(runner)
+            .1
+            .iter()
+            .any(|(r, out)| r == o && *out == ReminderOutcome::NoResponse)
+    });
+    let _ = sim_work(runner, clock, 10 * 60);
+    let still_hidden = pet_visible(shell) == Some(false) && shell.open_bubble_id().is_none();
+    runner.input(Input::PresentationChanged(false));
+    let back = wait_until(Duration::from_secs(5), || pet_visible(shell) == Some(true));
+    let offers_at_end = reminder_events(runner).0.len();
+    let _ = sim_work(runner, clock, 4 * 60);
+    std::thread::sleep(Duration::from_secs(1));
+    let (link_bubble, _) = shown(runner);
+    let replayed = shell.open_bubble_id().is_some()
+        || link_bubble.is_some()
+        || reminder_events(runner).0.len() != offers_at_end;
+    r.check(
+        "coach_presentation_hides_without_replay",
+        next.is_some() && on_show2 && hid && withdrawn && still_hidden && back && !replayed,
+        format!(
+            "next reminder {offer2:?} on show {on_show2}; hidden {hid}; withdrawn as no response {withdrawn}; hidden after 10 simulated min {still_hidden}; back {back}; replayed {replayed}"
+        ),
+    );
+
+    // 4. The engine's state is saved (as on exit).
+    let saved = runner.call(|l| l.flush().is_ok()) == Some(true);
+    r.check("coach_state_saved", saved, "flush of the engine state");
 }
