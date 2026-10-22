@@ -3227,6 +3227,104 @@ fn recovery_walk_repeats_every_ninety_minutes_and_a_held_one_is_not_replayed() {
     assert_eq!(walks, vec![hm(11, 0), hm(14, 0), hm(15, 30), hm(17, 0)]);
 }
 
+/// The repeating walk from 11:00 on the recovery day, with the morning card acknowledged.
+/// `at` runs at each tick before the walk check (it may answer or open something); the
+/// local times of the walk suggestions shown until 18:40 are returned, each answered.
+fn walks_with(mut at: impl FnMut(&mut H)) -> Vec<NaiveTime> {
+    let mut h = recovery_day(quiet_config(), |p| {
+        p.walk_at = Some(hm(11, 0));
+        p.walk_repeat = true;
+        p.reflection = false;
+    });
+    h.wait_until(mins(40), |v| v.bubble.is_some());
+    h.rec(RecoveryAction::Ok);
+    let mut walks = Vec::new();
+    while h.local() < hm(18, 40) {
+        at(&mut h);
+        if h.view().bubble == Some(Bubble::RecoveryWalk) {
+            walks.push(h.local());
+            h.rec(RecoveryAction::WalkNow);
+        }
+        h.wait(h.tick);
+    }
+    walks
+}
+
+/// The walks after a 12:30 slot that was used up: the next ones come at their times.
+fn walks_without_1230() -> Vec<NaiveTime> {
+    vec![hm(11, 0), hm(14, 0), hm(15, 30), hm(17, 0)]
+}
+
+#[test]
+fn recovery_walk_due_in_a_short_meeting_is_not_shown_after_it() {
+    // The meeting ends at 12:31; its calm gap ends at 12:36, still inside the 12:30
+    // walk's 10-minute window. The walk time passed while held: it is used up.
+    let walks = walks_with(|h| {
+        if h.local() == hm(12, 25) {
+            h.input(Input::SetMeeting(true));
+        }
+        if h.local() == hm(12, 31) {
+            h.input(Input::SetMeeting(false));
+        }
+    });
+    assert_eq!(walks, walks_without_1230());
+}
+
+#[test]
+fn recovery_walk_due_while_another_card_is_open_is_not_shown_after_it() {
+    // "Deadline day?" from the pet menu is open at 12:30 and answered at 12:31.
+    let walks = walks_with(|h| {
+        if h.local() == hm(12, 29) {
+            assert_eq!(h.input(Input::DeadlineDay).outcome, InputOutcome::Applied);
+        }
+        if h.local() == hm(12, 31) {
+            assert_eq!(
+                h.input(Input::CheckIn(CheckInAnswer::No)).outcome,
+                InputOutcome::Applied
+            );
+        }
+    });
+    assert_eq!(walks, walks_without_1230());
+}
+
+#[test]
+fn recovery_walk_due_while_the_guide_is_open_is_not_shown_after_it() {
+    // The movement guide is open from 12:28 and closed with "Later" at 12:32.
+    let walks = walks_with(|h| {
+        if h.local() == hm(12, 28) {
+            assert_eq!(
+                h.input(Input::RoutineStarted).outcome,
+                InputOutcome::Applied
+            );
+        }
+        if h.local() == hm(12, 32) {
+            assert_eq!(
+                h.input(Input::Guide(GuideAction::Later)).outcome,
+                InputOutcome::Applied
+            );
+        }
+    });
+    assert_eq!(walks, walks_without_1230());
+}
+
+#[test]
+fn recovery_walk_after_only_a_calm_gap_is_delayed_inside_its_window() {
+    // The calm gap after a card that closed before the walk time only delays it inside
+    // its window: answered at 12:27, the 12:30 walk comes when the gap ends at 12:32.
+    let walks = walks_with(|h| {
+        if h.local() == hm(12, 26) {
+            h.input(Input::DeadlineDay);
+        }
+        if h.local() == hm(12, 27) {
+            h.input(Input::CheckIn(CheckInAnswer::No));
+        }
+    });
+    assert_eq!(
+        walks,
+        vec![hm(11, 0), hm(12, 32), hm(14, 0), hm(15, 30), hm(17, 0)]
+    );
+}
+
 #[test]
 fn recovery_day_cancelled_on_the_day_stops_its_cards() {
     let mut h = recovery_day(quiet_config(), |_| {});

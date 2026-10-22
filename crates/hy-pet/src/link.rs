@@ -20,7 +20,10 @@
 //! Answers come back from the shell through [`LinkSink`] (the shell's
 //! [`ShellEventSink`]) on the UI thread: it routes the event against the [`RouteState`]
 //! the link wrote just before changing the shell, decides at once whether a click on the
-//! pet is handled, and forwards the resulting [`Command`] without blocking.
+//! pet is handled, and forwards the resulting [`Command`] without blocking. An answer on
+//! a bubble carries that bubble's id, and the link applies it on the engine thread only
+//! while that bubble is still the one on show ([`Command::Answer`]): two quick clicks on
+//! one card, or a click queued before the card changed, count at most once.
 //!
 //! If the shell refuses a bubble because the user hid the pet, the reminder is collapsed
 //! to its waiting badge ([`Input::CloseBubble`]) instead of popping up later.
@@ -33,7 +36,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use hy_core::coach::Coach;
-use hy_core::coach::{CoachView, Input, Notice, StepOutput};
+use hy_core::coach::{CoachView, Input, InputOutcome, Notice, StepOutput};
 use hy_core::error::Result;
 use hy_core::schema::{EventPayload, NewEvent};
 use hy_core::store::Store;
@@ -176,13 +179,30 @@ impl CoachLink {
         Ok(out)
     }
 
-    /// Apply a routed command.
+    /// Apply a routed command. An answer from a bubble that is no longer the one shown
+    /// (see [`Command::Answer`]) is ignored.
     ///
     /// # Errors
     /// Any store or engine error.
     pub fn command(&mut self, command: Command) -> Result<StepOutput> {
         match command {
             Command::Coach(i) => self.input(i),
+            Command::Answer { bubble_id, input } => {
+                if self.shown_bubble_id() == Some(bubble_id.as_str()) {
+                    self.input(input)
+                } else {
+                    // The card was answered, replaced or withdrawn after this answer was
+                    // routed: nothing changes, and nothing needs redrawing.
+                    Ok(StepOutput {
+                        outcome: InputOutcome::Ignored("that card was already answered"),
+                        view: self.coach.view().clone(),
+                        notices: Vec::new(),
+                        events: Vec::new(),
+                        touched_days: Vec::new(),
+                        significant: false,
+                    })
+                }
+            }
             Command::LogWater { ml } => {
                 let now = self.coach.store().clock().now();
                 let event = NewEvent::manual(EventPayload::WaterLogged { amount_ml: ml }).at(now);

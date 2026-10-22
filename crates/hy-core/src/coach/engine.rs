@@ -1690,10 +1690,15 @@ impl Engine {
         }
         let slot_free = self.s.offer.is_none() && self.s.prompt.is_none() && self.s.guide.is_none();
         let calm = now >= self.s.gap_until && now >= self.s.grace_until;
+        let held = self.hold(ctx).is_some();
+        if !slot_free || held || !self.visible(ctx) {
+            // A recovery walk time that arrives now is used up, not shown afterwards.
+            self.use_up_held_walk(ctx, out);
+        }
         if !(slot_free && calm && self.visible(ctx)) {
             return;
         }
-        if self.hold(ctx).is_none() {
+        if !held {
             if self.maybe_recovery_card(ctx, out) {
                 return;
             }

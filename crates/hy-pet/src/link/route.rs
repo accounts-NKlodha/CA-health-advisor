@@ -22,6 +22,17 @@ use crate::shell::{CloseCause, Handled, ShellEvent};
 pub enum Command {
     /// Apply an engine input.
     Coach(Input),
+    /// Apply an answer given on the bubble `bubble_id` (one of its actions, or closing it).
+    /// The link applies it only if that bubble is still the one it shows when the command
+    /// runs on the engine thread: an answer to a card that an earlier answer already
+    /// replaced (a second quick click on the same movement, a click queued before a
+    /// routine stopped) is refused there, not only on the UI thread.
+    Answer {
+        /// The shell bubble id the answer was given on (with its show number).
+        bubble_id: String,
+        /// The engine input it means.
+        input: Input,
+    },
     /// Log water from the pet menu (not an answer to a reminder), then re-evaluate.
     LogWater {
         /// Amount in ml.
@@ -61,6 +72,16 @@ impl Routed {
             command: Some(Command::Coach(input)),
         }
     }
+
+    fn answer(bubble_id: &str, input: Input) -> Self {
+        Self {
+            handled: Handled::Yes,
+            command: Some(Command::Answer {
+                bubble_id: bubble_id.to_owned(),
+                input,
+            }),
+        }
+    }
 }
 
 /// Route one shell event.
@@ -77,10 +98,7 @@ pub fn route(state: &RouteState, event: &ShellEvent) -> Routed {
             }
             BubbleKind::parse(bubble_id)
                 .and_then(|k| bubble_command(k, action_id))
-                .map_or_else(Routed::none, |c| Routed {
-                    handled: Handled::Yes,
-                    command: Some(c),
-                })
+                .map_or_else(Routed::none, |input| Routed::answer(bubble_id, input))
         }
         ShellEvent::BubbleClosed { bubble_id, cause } => match cause {
             // The link replaced its own bubble: nothing for the engine.
@@ -90,7 +108,7 @@ pub fn route(state: &RouteState, event: &ShellEvent) -> Routed {
             // the engine already withdrew (a presentation) no longer matches.
             CloseCause::User | CloseCause::Hidden => {
                 if state.bubble_id.as_deref() == Some(bubble_id.as_str()) {
-                    Routed::coach(Input::CloseBubble)
+                    Routed::answer(bubble_id, Input::CloseBubble)
                 } else {
                     Routed::none()
                 }
@@ -115,7 +133,7 @@ pub fn route(state: &RouteState, event: &ShellEvent) -> Routed {
 
 /// The engine input for an action in a bubble of this kind.
 #[must_use]
-pub fn bubble_command(kind: BubbleKind, action_id: &str) -> Option<Command> {
+pub fn bubble_command(kind: BubbleKind, action_id: &str) -> Option<Input> {
     use action as a;
     let input = match kind {
         BubbleKind::Reminder { offer } => {
@@ -212,7 +230,7 @@ pub fn bubble_command(kind: BubbleKind, action_id: &str) -> Option<Command> {
             }))
         }
     };
-    Some(Command::Coach(input))
+    Some(input)
 }
 
 /// The weekday named by a `day_` action suffix (Monday to Saturday).

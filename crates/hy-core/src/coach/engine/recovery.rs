@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use chrono::{NaiveDate, TimeDelta};
+use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
 
 use super::{CALM_GAP, Context, Engine, InputOutcome, Out, Prompt, ms, ms_between};
 use crate::coach::config::Intensity;
@@ -283,11 +283,12 @@ impl Engine {
 
     /// On the recovery day, with no hold: the morning card once, then the walk suggestion
     /// at its time (and every 90 minutes if chosen). A walk time that passes while held
-    /// or busy is used up, never replayed. Returns true if a card opened.
+    /// or busy is used up, never replayed (see [`Self::use_up_held_walk`]). Returns true
+    /// if a card opened.
     pub(super) fn maybe_recovery_card(&mut self, ctx: &Context, out: &mut Out) -> bool {
-        let Some(plan) = self.todays_plan(ctx) else {
+        if self.todays_plan(ctx).is_none() {
             return false;
-        };
+        }
         let day = self.today_state(ctx);
         if !day.recovery_morning {
             day.recovery_morning = true;
@@ -295,22 +296,37 @@ impl Engine {
             out.significant = true;
             return true;
         }
-        let Some(walk) = plan.walk_at else {
+        let Some((slot, slot_at)) = self.due_walk_slot(ctx) else {
             return false;
         };
-        let used = day.walk_slots;
+        self.today_state(ctx).walk_slots = slot.saturating_add(1);
+        out.significant = true;
+        if ms_between(slot_at, ctx.wall) < ms(WALK_WINDOW) {
+            self.set_prompt(Prompt::RecoveryWalk, false, ctx);
+            return true;
+        }
+        false
+    }
+
+    /// The walk time that has arrived on the recovery day and is not used up yet: its
+    /// number (0 for the first, then one per 90 minutes if the walk repeats) and when it
+    /// was due. `None` before the first walk time, once the latest one is used up, or
+    /// from the planned finish time (or the end of work hours) on.
+    fn due_walk_slot(&self, ctx: &Context) -> Option<(u32, DateTime<Utc>)> {
+        let plan = self.todays_plan(ctx)?;
+        let walk = plan.walk_at?;
         let first = ctx.zone.resolve_local(plan.date.and_time(walk));
         if ctx.wall < first {
-            return false;
+            return None;
         }
-        let since_first = ms_between(first, ctx.wall);
         let slot = if plan.walk_repeat {
-            u32::try_from(since_first / ms(WALK_REPEAT_EVERY)).unwrap_or(u32::MAX)
+            u32::try_from(ms_between(first, ctx.wall) / ms(WALK_REPEAT_EVERY)).unwrap_or(u32::MAX)
         } else {
             0
         };
+        let used = self.s.days.get(&plan.date).map_or(0, |d| d.walk_slots);
         if slot < used {
-            return false;
+            return None;
         }
         // The suggestion stops at the planned finish time (or the end of work hours).
         let end = plan
@@ -322,15 +338,21 @@ impl Engine {
                 i64::try_from(u64::from(slot) * ms(WALK_REPEAT_EVERY)).unwrap_or(i64::MAX),
             );
         if end.is_some_and(|e| slot_at >= e) {
-            return false;
+            return None;
         }
-        self.today_state(ctx).walk_slots = slot.saturating_add(1);
-        out.significant = true;
-        if ms_between(slot_at, ctx.wall) < ms(WALK_WINDOW) {
-            self.set_prompt(Prompt::RecoveryWalk, false, ctx);
-            return true;
+        Some((slot, slot_at))
+    }
+
+    /// Called on every settle while the walk suggestion could not open (a hold, the pet
+    /// hidden, or the bubble taken by another card, a reminder or the guide): a walk time
+    /// that arrives then is used up at once, so it does not appear when that ends, even
+    /// inside its 10-minute window. Only the calm gap after a card that closed before the
+    /// walk time, or the grace after waking, delays a walk inside its window.
+    pub(super) fn use_up_held_walk(&mut self, ctx: &Context, out: &mut Out) {
+        if let Some((slot, _)) = self.due_walk_slot(ctx) {
+            self.today_state(ctx).walk_slots = slot.saturating_add(1);
+            out.significant = true;
         }
-        false
     }
 
     /// On the recovery day, once, after the planned finish time (or the end of work

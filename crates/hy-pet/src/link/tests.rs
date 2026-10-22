@@ -394,10 +394,10 @@ fn reminder_card_shows_one_activity_with_three_chips() {
     let kind = BubbleKind::Reminder { offer };
     assert_eq!(
         bubble_command(kind, action::LOG_WATER),
-        Some(Command::Coach(Input::Respond {
+        Some(Input::Respond {
             offer,
             response: Response::LogWater { ml: 250 }
-        }))
+        })
     );
 }
 
@@ -783,10 +783,13 @@ fn bubble_events_route_only_for_the_bubble_on_show() {
     assert_eq!(r.handled, Handled::Yes);
     assert_eq!(
         r.command,
-        Some(Command::Coach(Input::Respond {
-            offer,
-            response: Response::Snooze
-        }))
+        Some(Command::Answer {
+            bubble_id: id.clone(),
+            input: Input::Respond {
+                offer,
+                response: Response::Snooze
+            }
+        })
     );
     // An older copy of the card, or an unknown action, does nothing.
     let old = BubbleKind::Reminder { offer }.id(0);
@@ -798,14 +801,12 @@ fn bubble_events_route_only_for_the_bubble_on_show() {
         bubble_id: id.clone(),
         cause,
     };
-    assert_eq!(
-        route(&state, &closed(CloseCause::User)).command,
-        Some(Command::Coach(Input::CloseBubble))
-    );
-    assert_eq!(
-        route(&state, &closed(CloseCause::Hidden)).command,
-        Some(Command::Coach(Input::CloseBubble))
-    );
+    let close = Some(Command::Answer {
+        bubble_id: id.clone(),
+        input: Input::CloseBubble,
+    });
+    assert_eq!(route(&state, &closed(CloseCause::User)).command, close);
+    assert_eq!(route(&state, &closed(CloseCause::Hidden)).command, close);
     assert_eq!(route(&state, &closed(CloseCause::Replaced)).command, None);
     let withdrawn = RouteState::default();
     assert_eq!(route(&withdrawn, &closed(CloseCause::Hidden)).command, None);
@@ -819,7 +820,10 @@ fn bubble_events_route_only_for_the_bubble_on_show() {
     };
     assert_eq!(
         route(&state, &act(&check_in, "dont_ask")).command,
-        Some(Command::Coach(Input::CheckIn(CheckInAnswer::DontAskToday)))
+        Some(Command::Answer {
+            bubble_id: check_in.clone(),
+            input: Input::CheckIn(CheckInAnswer::DontAskToday)
+        })
     );
 }
 
@@ -1213,6 +1217,46 @@ impl H {
     fn tray_show(&mut self) {
         self.shell.tray_show();
         self.pump();
+    }
+
+    /// Press each of `action_ids` on the card now shown, all before the engine thread
+    /// applies any of them (quick clicks), then let it catch up.
+    fn press_quickly(&mut self, action_ids: &[&str]) {
+        for a in action_ids {
+            self.shell.press(a);
+        }
+        assert_eq!(
+            lock(&self.queue).len(),
+            action_ids.len(),
+            "every click was routed from the card on show"
+        );
+        self.pump();
+    }
+
+    /// The commands routed from the shell and not yet applied, taken off the queue.
+    fn take_queued(&self) -> Vec<Command> {
+        std::mem::take(&mut *lock(&self.queue))
+    }
+
+    /// The `movement.step` events: (routine, movement index, outcome).
+    fn movement_steps(&self) -> Vec<(Uuid, u32, StepOutcome)> {
+        self.events()
+            .into_iter()
+            .filter_map(|p| match p {
+                EventPayload::MovementStep {
+                    session_id,
+                    step_index,
+                    outcome,
+                    ..
+                } => Some((session_id, step_index, outcome)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The guide's stage.
+    fn guide_stage(&self) -> Option<GuideStage> {
+        self.link.view().guide.map(|g| g.stage)
     }
 
     /// The rules that hold after every step.
@@ -1765,10 +1809,137 @@ fn deadline_day_and_a_recovery_plan_run_through_the_shell() {
     assert!(h.link.view().recovery.plan.is_none());
 }
 
+// ---------------------------------- answers queued before the engine applies them
+
+#[test]
+fn two_quick_clicks_on_one_movement_answer_it_once() {
+    let mut h = H::with_store(movement_only);
+    h.menu(action::MOVEMENT_START);
+    h.press(action::SEATED);
+    assert_eq!(
+        h.guide_stage(),
+        Some(GuideStage::Step { index: 0, total: 3 })
+    );
+    // "Done" twice on the first movement, both routed before either is applied.
+    h.press_quickly(&[action::STEP_DONE, action::STEP_DONE]);
+    let steps = h.movement_steps();
+    assert_eq!(steps.len(), 1, "one movement shown, one answer: {steps:?}");
+    assert_eq!((steps[0].1, steps[0].2), (0, StepOutcome::Done));
+    assert_eq!(
+        h.guide_stage(),
+        Some(GuideStage::Step { index: 1, total: 3 })
+    );
+    assert_eq!(
+        h.shell.open_bubble().unwrap().title,
+        "Movement 2 of 3: Shoulder rolls"
+    );
+    // "Done" then "Skip this movement" on the second: only the first click counts.
+    h.press_quickly(&[action::STEP_DONE, action::STEP_SKIP]);
+    let steps: Vec<_> = h.movement_steps().into_iter().map(|s| (s.1, s.2)).collect();
+    assert_eq!(steps, vec![(0, StepOutcome::Done), (1, StepOutcome::Done)]);
+    assert_eq!(
+        h.guide_stage(),
+        Some(GuideStage::Step { index: 2, total: 3 })
+    );
+    // The last movement, clicked twice: one answer, then the result.
+    h.press_quickly(&[action::STEP_SKIP, action::STEP_SKIP]);
+    assert_eq!(h.movement_steps().len(), 3);
+    assert!(matches!(
+        h.guide_stage(),
+        Some(GuideStage::Result {
+            done: 2,
+            skipped: 1,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn an_answer_queued_before_a_routine_stopped_does_not_reach_the_next_one() {
+    let mut h = H::with_store(movement_only);
+    h.menu(action::MOVEMENT_START);
+    h.press(action::SEATED);
+    // "Done" on the first movement is routed but not yet applied...
+    h.shell.press(action::STEP_DONE);
+    let stale = h.take_queued();
+    assert_eq!(stale.len(), 1);
+    // ...while the routine is stopped from the tray and a new one is started.
+    h.menu(action::MOVEMENT_STOP);
+    h.assert_no_movement_running();
+    if h.link.view().guide.is_some() {
+        h.press(action::OK);
+    }
+    h.menu(action::MOVEMENT_START);
+    h.press(action::SEATED);
+    assert_eq!(
+        h.guide_stage(),
+        Some(GuideStage::Step { index: 0, total: 3 })
+    );
+    // The old answer arrives now: it belonged to the stopped routine, so it is refused.
+    for c in stale {
+        let out = h.link.command(c).unwrap();
+        assert!(
+            matches!(out.outcome, hy_core::coach::InputOutcome::Ignored(_)),
+            "{:?}",
+            out.outcome
+        );
+    }
+    h.check();
+    assert_eq!(h.movement_steps(), vec![]);
+    assert_eq!(
+        h.guide_stage(),
+        Some(GuideStage::Step { index: 0, total: 3 })
+    );
+    // The new routine's own first movement still answers normally.
+    h.press(action::STEP_DONE);
+    assert_eq!(h.movement_steps().len(), 1);
+    assert_eq!(
+        h.guide_stage(),
+        Some(GuideStage::Step { index: 1, total: 3 })
+    );
+}
+
+#[test]
+fn two_quick_answers_on_one_recovery_card_apply_only_the_first() {
+    let mut h = H::with_store(movement_only);
+    h.menu("deadline_day");
+    // "Yes" twice: one check-in answer, then the invitation.
+    h.press_quickly(&[action::CHECK_IN_YES, action::CHECK_IN_YES]);
+    assert_eq!(
+        h.shell.open_bubble().unwrap().title,
+        "Plan a gentler recovery day?"
+    );
+    h.press("plan_2026-10-27");
+    assert_eq!(
+        h.shell.open_bubble().unwrap().title,
+        "Recovery day planned: Tue 27 Oct"
+    );
+    // "OK" then "Cancel plan" on the same card: the card was answered by "OK", so the
+    // second click is refused and the plan stays.
+    h.press_quickly(&[action::OK, action::CANCEL_PLAN]);
+    assert!(h.shell.open_bubble().is_none());
+    assert!(h.link.view().recovery.plan.is_some());
+    let kinds: Vec<_> = h
+        .events()
+        .into_iter()
+        .map(|p| p.type_name())
+        .filter(|t| t.starts_with("recovery."))
+        .collect();
+    assert_eq!(kinds, vec!["recovery.check_in", "recovery.plan"]);
+}
+
+#[test]
+fn two_quick_answers_on_one_reminder_record_one_answer() {
+    let mut h = H::new();
+    let (offer, _) = h.work_until_reminder(50);
+    h.press_quickly(&[action::DONE, action::SNOOZE]);
+    assert_eq!(h.responses(), vec![(offer, ReminderOutcome::Done)]);
+}
+
 #[test]
 fn guide_and_recovery_actions_route_only_from_their_own_cards() {
     let g = BubbleKind::MovementGuide;
-    let coach = |i| Some(Command::Coach(i));
+    let coach = Some;
     assert_eq!(
         bubble_command(g, "seated"),
         coach(Input::Guide(GuideAction::Variant(RoutineVariant::Seated)))
