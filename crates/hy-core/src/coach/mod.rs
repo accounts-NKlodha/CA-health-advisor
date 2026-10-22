@@ -25,8 +25,8 @@ pub use config::{CoachConfig, Intensity, PomodoroPreset};
 pub use driver::Coach;
 pub use engine::{ActivityState, Context, DayTally, Engine, EngineState, StepOutput};
 pub use types::{
-    Bubble, CheckInAnswer, Chip, ChipStatus, CoachView, Confirmation, FocusEnd, HiddenReason, Hold,
-    Input, InputOutcome, Notice, PauseLength, PetMode, PomodoroPause, PomodoroPhase, PomodoroView,
-    ReminderReason, Response,
+    ActiveRoutine, Bubble, CheckInAnswer, Chip, ChipStatus, CoachView, Confirmation, FocusEnd,
+    HiddenReason, Hold, Input, InputOutcome, Notice, PauseLength, PetMode, PomodoroPause,
+    PomodoroPhase, PomodoroView, ReminderReason, Response,
 };
 pub use water::{WaterPace, WaterSnapshot};

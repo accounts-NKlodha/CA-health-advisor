@@ -479,6 +479,10 @@ fn menu(id: &str, label: &str, in_tray: bool) -> MenuAction {
 /// The engine's entries in the pet menu and keyboard panel (and the pause entries in the
 /// tray) for a view (wireframe B1, B5, B6 and T1).
 ///
+/// While a movement routine runs ([`CoachView::active_routine`]), its three result
+/// entries replace "Today's movement" in the menu, the panel and the tray, whatever hold
+/// the pet is showing.
+///
 /// The engine asks for a confirmation before replacing focus or a Pomodoro, or before a
 /// Pomodoro resumes paused coaching. The menu never skips that silently: an entry that
 /// would do one of these says so in its label, and only such an entry carries the
@@ -501,13 +505,17 @@ pub fn menu_actions(view: &CoachView) -> Vec<MenuAction> {
         false,
     ));
 
-    let movement_running = view.chip(Activity::Movement).status == ChipStatus::InProgress
-        || (view.pet == PetMode::Exercise
-            && view.chip(Activity::EyeRest).status != ChipStatus::InProgress);
+    // The engine's routine state, not the pet's look: a pause, off-hours, focus, meeting
+    // or presentation shows its own state over a running routine, and the user must
+    // still be able to finish or stop it without lifting the hold. The tray carries
+    // these too, for when the pet is hidden.
+    let movement_running = view
+        .active_routine
+        .is_some_and(|r| r.activity == Activity::Movement);
     if movement_running {
-        m.push(menu(a::MOVEMENT_DONE, "Movement done", false));
-        m.push(menu(a::MOVEMENT_PARTIAL, "Did part of it", false));
-        m.push(menu(a::MOVEMENT_STOP, "Stopped, none done", false));
+        m.push(menu(a::MOVEMENT_DONE, "Movement done", true));
+        m.push(menu(a::MOVEMENT_PARTIAL, "Did part of it", true));
+        m.push(menu(a::MOVEMENT_STOP, "Stopped, none done", true));
     } else {
         m.push(menu(a::MOVEMENT_START, "Today's movement", false));
     }
