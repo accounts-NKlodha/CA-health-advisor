@@ -68,6 +68,7 @@ fn engine_bubble() -> Bubble {
             label: "Done".into(),
             style: ActionStyle::Primary,
         }],
+        ..Bubble::default()
     }
 }
 

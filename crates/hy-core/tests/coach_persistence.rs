@@ -1,6 +1,7 @@
 //! The coaching engine bound to the real store: restart persistence (close and reopen a
 //! file database), clock rollback and forward jumps across a restart, stale writers,
-//! durable one-response-per-offer, per-day tallies, and the 0002 schema guards.
+//! durable one-response-per-offer, per-day tallies, the guided movement routine and the
+//! recovery plan across restarts, and the 0002 and 0003 schema guards.
 
 // Test helpers outside `#[test]` functions may unwrap too.
 #![allow(clippy::unwrap_used)]
@@ -16,6 +17,7 @@ use hy_core::coach::config::{CONFIG_KEY, Categories};
 use hy_core::coach::*;
 use hy_core::schema::{
     Activity, EventPayload, GoalKind, MeasurementStatus, NewEvent, ReminderOutcome, RoutineOutcome,
+    RoutineVariant, StepOutcome,
 };
 use hy_core::store::{CoachCommit, Store};
 use hy_core::time::{UserZone, WeekdaySet, WorkSchedule};
@@ -312,6 +314,186 @@ fn a_running_routine_at_shutdown_is_abandoned_without_a_record() {
         outcomes(c.store(), date(20)),
         vec![(Activity::Movement, ReminderOutcome::Started)]
     );
+}
+
+fn movement_events(store: &Store, day: NaiveDate) -> Vec<EventPayload> {
+    store
+        .events_on(day)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.payload)
+        .filter(|p| {
+            matches!(
+                p,
+                EventPayload::MovementStep { .. } | EventPayload::MovementSession { .. }
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_guided_routine_is_stored_step_by_step_with_its_result() {
+    let env = Env::new(ist(20, 10, 0));
+    let mut c = env.open_with(only(true, false, false));
+    work_until(&env, &mut c, mins(50), |v| v.reminder().is_some());
+    let offer = c.view().reminder().unwrap().0;
+    c.handle(Input::Respond {
+        offer,
+        response: Response::Start,
+    })
+    .unwrap();
+    c.handle(Input::Guide(GuideAction::Variant(RoutineVariant::Seated)))
+        .unwrap();
+    for _ in 0..3 {
+        c.handle(Input::Guide(GuideAction::Done)).unwrap();
+    }
+    let evs = movement_events(c.store(), date(20));
+    assert_eq!(evs.len(), 4);
+    let EventPayload::MovementSession {
+        session_id,
+        outcome,
+        steps_done,
+        variant,
+        ..
+    } = evs[3].clone()
+    else {
+        panic!("{evs:?}")
+    };
+    assert_eq!(
+        (outcome, steps_done, variant),
+        (RoutineOutcome::Done, 3, Some(RoutineVariant::Seated))
+    );
+    for (i, e) in evs[..3].iter().enumerate() {
+        assert!(matches!(
+            e,
+            EventPayload::MovementStep { session_id: s, step_index, outcome: StepOutcome::Done, .. }
+                if *s == session_id && *step_index == i as u32
+        ));
+    }
+    assert_eq!(
+        outcomes(c.store(), date(20)),
+        vec![(Activity::Movement, ReminderOutcome::Started)]
+    );
+}
+
+#[test]
+fn a_guided_routine_running_at_shutdown_keeps_its_answered_steps() {
+    let env = Env::new(ist(20, 10, 0));
+    let mut c = env.open_with(only(true, false, false));
+    work_until(&env, &mut c, mins(50), |v| v.reminder().is_some());
+    let offer = c.view().reminder().unwrap().0;
+    c.handle(Input::Respond {
+        offer,
+        response: Response::Start,
+    })
+    .unwrap();
+    c.handle(Input::Guide(GuideAction::Variant(RoutineVariant::Standing)))
+        .unwrap();
+    c.handle(Input::Guide(GuideAction::Done)).unwrap();
+    c.close().unwrap();
+    env.clock.advance(chrono::Duration::seconds(30));
+    let mut c = env.open();
+    // The restart ends the routine as a stop: one movement done is partial.
+    assert_eq!(c.view().guide, None);
+    assert_eq!(
+        c.view().chip(Activity::Movement).status,
+        ChipStatus::Partial
+    );
+    let evs = movement_events(c.store(), date(20));
+    assert_eq!(evs.len(), 2);
+    assert!(matches!(
+        evs[1],
+        EventPayload::MovementSession {
+            outcome: RoutineOutcome::Partial,
+            steps_done: 1,
+            steps_skipped: 0,
+            ..
+        }
+    ));
+    // Late answers to the old guide change nothing.
+    let out = c.handle(Input::Guide(GuideAction::Done)).unwrap();
+    assert_eq!(out.outcome, InputOutcome::Ignored("no movement guide"));
+    assert_eq!(movement_events(c.store(), date(20)).len(), 2);
+}
+
+#[test]
+fn a_guide_waiting_behind_the_pet_and_a_recovery_plan_survive_a_save() {
+    let env = Env::new(ist(20, 10, 0));
+    let mut c = env.open_with(only(true, false, false));
+    c.handle(Input::DeadlineDay).unwrap();
+    c.handle(Input::CheckIn(CheckInAnswer::Yes)).unwrap();
+    c.handle(Input::Recovery(RecoveryAction::PlanFor(date(21))))
+        .unwrap();
+    c.handle(Input::Recovery(RecoveryAction::Ok)).unwrap();
+    c.handle(Input::RoutineStarted).unwrap();
+    c.handle(Input::Guide(GuideAction::Variant(RoutineVariant::Seated)))
+        .unwrap();
+    c.handle(Input::CloseBubble).unwrap();
+    let saved = c.view().guide.unwrap();
+    assert!(!saved.open);
+    // Reopen the store as another reader: the saved state carries both.
+    let store = c.close().unwrap();
+    let state = store.coach_state().unwrap().unwrap();
+    let engine = Engine::from_state(serde_json::from_str(&state.state).unwrap()).unwrap();
+    assert_eq!(engine.recovery_plan().unwrap().date, date(21));
+    let kinds: Vec<_> = store
+        .events_on(date(20))
+        .unwrap()
+        .into_iter()
+        .map(|e| e.payload.type_name())
+        .collect();
+    assert_eq!(kinds, vec!["recovery.check_in", "recovery.plan"]);
+}
+
+#[test]
+fn routine_steps_and_results_are_guarded_by_the_database() {
+    let env = Env::new(ist(20, 10, 0));
+    let mut s = env.store();
+    let id = Uuid::from_u128(7);
+    let step = |i| {
+        NewEvent::manual(EventPayload::MovementStep {
+            session_id: id,
+            routine_id: "tue".to_owned(),
+            routine_version: 1,
+            variant: RoutineVariant::Seated,
+            step_index: i,
+            steps_total: 3,
+            outcome: StepOutcome::Done,
+        })
+    };
+    let result = || {
+        NewEvent::manual(EventPayload::MovementSession {
+            session_id: id,
+            routine_id: "tue".to_owned(),
+            routine_version: 1,
+            variant: Some(RoutineVariant::Seated),
+            outcome: RoutineOutcome::Partial,
+            steps_done: 1,
+            steps_skipped: 0,
+            steps_total: 3,
+        })
+    };
+    s.append_event(step(0)).unwrap();
+    // Each step is answered once.
+    assert!(s.append_event(step(0)).is_err());
+    let r = s.append_event(result()).unwrap();
+    // One result per routine, and no step after it.
+    assert!(s.append_event(result()).is_err());
+    assert!(s.append_event(step(1)).is_err());
+    // Routine results are not corrected through the store (the raw-SQL guards in
+    // schema_constraints show a correction would not count as a second result).
+    assert!(s.append_event(result().superseding(r.id)).is_err());
+    // Another routine is independent.
+    let other = NewEvent::manual(EventPayload::MovementStep {
+        session_id: Uuid::from_u128(8),
+        routine_id: "tue".to_owned(),
+        routine_version: 1,
+        variant: RoutineVariant::Standing,
+        step_index: 0,
+        steps_total: 3,
+        outcome: StepOutcome::Skipped,
+    });
+    s.append_event(other).unwrap();
 }
 
 #[test]

@@ -25,6 +25,7 @@ fn reminder(id: &str) -> Bubble {
                 style: ActionStyle::Normal,
             },
         ],
+        ..Bubble::default()
     }
 }
 

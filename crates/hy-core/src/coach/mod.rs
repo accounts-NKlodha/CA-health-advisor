@@ -9,6 +9,9 @@
 //!   [`CoachView`]. The shell never shows a reminder on its own.
 //! - [`config`]: the user's coaching settings and the fixed timings.
 //! - [`water`]: the water pace model.
+//! - [`movement`]: the guided movement routine's bundled content (provisional, pending
+//!   the content review).
+//! - [`recovery`]: the deadline day and the one pending recovery-day plan.
 //! - [`types`]: inputs, the view, and notices.
 //!
 //! Persistence: the engine state, the reminder events and the per-day tracker tallies of
@@ -18,15 +21,18 @@
 pub mod config;
 pub mod driver;
 pub mod engine;
+pub mod movement;
+pub mod recovery;
 pub mod types;
 pub mod water;
 
 pub use config::{CoachConfig, Intensity, PomodoroPreset};
 pub use driver::Coach;
 pub use engine::{ActivityState, Context, DayTally, Engine, EngineState, StepOutput};
+pub use recovery::{RecoveryAction, RecoveryPlan, RecoveryView, Reflection};
 pub use types::{
-    Bubble, CheckInAnswer, Chip, ChipStatus, CoachView, Confirmation, FocusEnd, HiddenReason, Hold,
-    Input, InputOutcome, Notice, PauseLength, PetMode, PomodoroPause, PomodoroPhase, PomodoroView,
-    ReminderReason, Response,
+    Bubble, CheckInAnswer, Chip, ChipStatus, CoachView, Confirmation, FocusEnd, GuideAction,
+    GuideStage, GuideView, HiddenReason, Hold, Input, InputOutcome, Notice, PauseLength, PetMode,
+    PomodoroPause, PomodoroPhase, PomodoroView, ReminderReason, Response,
 };
 pub use water::{WaterPace, WaterSnapshot};

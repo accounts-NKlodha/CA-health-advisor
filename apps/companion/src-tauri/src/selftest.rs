@@ -14,7 +14,10 @@
 //! off): a reminder falls due and appears as the single bubble beside the pet, answering
 //! it on the real bubble records the response through the store, and a simulated
 //! presentation (the same engine input the Windows detector sends) hides the pet and the
-//! next reminder, with nothing replayed when it ends.
+//! next reminder, with nothing replayed when it ends. Finally it runs the guided movement
+//! routine from the pet menu on the real bubble (Seated, then Done on each movement) and
+//! checks each movement card is laid out inside the work area and the store holds three
+//! `movement.step` events and a done `movement.session`.
 //!
 //! A CI runner is not an office PC: focus checks that depend on an interactive desktop
 //! are recorded as informational, and real Windows acceptance of focus and DPI remains a
@@ -27,8 +30,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeZone, Utc};
 use hy_core::clock::ManualClock;
-use hy_core::coach::{CoachView, Input};
-use hy_core::schema::{EventPayload, ReminderOutcome};
+use hy_core::coach::{CoachView, GuideStage, Input};
+use hy_core::schema::{EventPayload, ReminderOutcome, RoutineOutcome, RoutineVariant};
 use hy_pet::geometry::{Monitor, Rect};
 use hy_pet::link::present::{BubbleKind, action};
 use hy_pet::placement::{SCALE_MAX, SCALE_MIN, SCALE_STEP, bring_above_clock, pet_window_physical};
@@ -339,6 +342,7 @@ fn run(shell: &Arc<Shell>) -> Report {
             label: "OK".into(),
             style: hy_pet::shell::ActionStyle::Primary,
         }],
+        ..Bubble::default()
     };
     let outcome = handle.show_bubble(bubble);
     let measured = wait_until(Duration::from_secs(10), || laid_out(shell));
@@ -604,7 +608,137 @@ fn coach_end_to_end(
         ),
     );
 
-    // 4. The engine's state is saved (as on exit).
+    // 4. The guided movement routine from the pet menu, answered on the real bubble.
+    guided_routine_end_to_end(r, shell, runner);
+
+    // 5. The engine's state is saved (as on exit).
     let saved = runner.call(|l| l.flush().is_ok()) == Some(true);
     r.check("coach_state_saved", saved, "flush of the engine state");
+}
+
+/// The guide's stage and the bubble the link last showed.
+fn guide_shown(runner: &CoachRunner) -> (Option<GuideStage>, Option<String>) {
+    runner
+        .call(|l| {
+            (
+                l.view().guide.map(|g| g.stage),
+                l.shown_bubble_id().map(str::to_owned),
+            )
+        })
+        .unwrap_or_default()
+}
+
+/// Today's routine events: (steps answered, the routine results).
+fn routine_events(runner: &CoachRunner) -> (usize, Vec<(RoutineOutcome, Option<RoutineVariant>)>) {
+    runner
+        .call(|l| {
+            let store = l.coach().store();
+            let events = store
+                .today()
+                .and_then(|d| store.events_on(d))
+                .unwrap_or_default();
+            let mut steps = 0;
+            let mut results = Vec::new();
+            for e in events {
+                match e.payload {
+                    EventPayload::MovementStep { .. } => steps += 1,
+                    EventPayload::MovementSession {
+                        outcome, variant, ..
+                    } => results.push((outcome, variant)),
+                    _ => {}
+                }
+            }
+            (steps, results)
+        })
+        .unwrap_or_default()
+}
+
+/// Press `action_id` on the shown guide card and wait for the guide to reach `next`, laid
+/// out beside the pet inside the work area. Returns whether it did.
+fn guide_press(
+    shell: &Arc<Shell>,
+    runner: &CoachRunner,
+    action_id: &'static str,
+    next: GuideStage,
+) -> bool {
+    let (_, id) = guide_shown(runner);
+    let Some(id) = id else {
+        return false;
+    };
+    let _ = on_main(shell, move |s| s.bubble_action(&id, action_id));
+    wait_until(Duration::from_secs(10), || {
+        let (stage, id) = guide_shown(runner);
+        stage == Some(next) && id.is_some_and(|id| engine_bubble_on_show(shell, &id))
+    })
+}
+
+fn guided_routine_end_to_end(r: &mut Report, shell: &Arc<Shell>, runner: &CoachRunner) {
+    let _ = on_main(shell, |s| s.menu_action(action::MOVEMENT_START));
+    let intro = wait_until(Duration::from_secs(10), || {
+        let (stage, id) = guide_shown(runner);
+        stage == Some(GuideStage::Intro)
+            && id.is_some_and(|id| {
+                BubbleKind::parse(&id) == Some(BubbleKind::MovementGuide)
+                    && engine_bubble_on_show(shell, &id)
+            })
+    });
+    let mut cards = vec![("intro", intro)];
+    cards.push((
+        "movement 1",
+        guide_press(
+            shell,
+            runner,
+            action::SEATED,
+            GuideStage::Step { index: 0, total: 3 },
+        ),
+    ));
+    cards.push((
+        "movement 2",
+        guide_press(
+            shell,
+            runner,
+            action::STEP_DONE,
+            GuideStage::Step { index: 1, total: 3 },
+        ),
+    ));
+    cards.push((
+        "movement 3",
+        guide_press(
+            shell,
+            runner,
+            action::STEP_DONE,
+            GuideStage::Step { index: 2, total: 3 },
+        ),
+    ));
+    cards.push((
+        "result",
+        guide_press(
+            shell,
+            runner,
+            action::STEP_DONE,
+            GuideStage::Result {
+                outcome: RoutineOutcome::Done,
+                done: 3,
+                skipped: 0,
+                total: 3,
+                stopped: false,
+            },
+        ),
+    ));
+    let (steps, results) = routine_events(runner);
+    let stored = steps == 3 && results == [(RoutineOutcome::Done, Some(RoutineVariant::Seated))];
+    // "OK" closes the result.
+    if let (_, Some(id)) = guide_shown(runner) {
+        let _ = on_main(shell, move |s| s.bubble_action(&id, action::OK));
+    }
+    let closed = wait_until(Duration::from_secs(5), || {
+        guide_shown(runner).0.is_none() && shell.open_bubble_id().is_none()
+    });
+    r.check(
+        "coach_guided_routine_recorded",
+        cards.iter().all(|(_, ok)| *ok) && stored && closed,
+        format!(
+            "cards shown inside the work area {cards:?}; movement.step events {steps}; results {results:?}; closed {closed}"
+        ),
+    );
 }

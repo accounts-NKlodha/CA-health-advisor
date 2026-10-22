@@ -85,12 +85,25 @@ export interface BubbleAction {
   style: 'normal' | 'primary' | 'link';
 }
 
+export interface BubbleFigure {
+  id: string;
+  label: string;
+}
+
 export interface Bubble {
   id: string;
   title: string;
   lines: string[];
   chips: BubbleChip[];
   actions: BubbleAction[];
+  /** Numbered steps (the movement guide). */
+  steps: string[];
+  /** An illustration drawn by the page (the movement guide). */
+  figure: BubbleFigure | null;
+  /** A small note, for example that the content is provisional. */
+  note: string | null;
+  /** The card continues after an answer, so the keyboard panel stays open. */
+  continues: boolean;
 }
 
 export type OpenView =

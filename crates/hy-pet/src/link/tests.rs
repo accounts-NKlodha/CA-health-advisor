@@ -8,15 +8,18 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use chrono::{NaiveDate, TimeZone, Utc};
+use chrono::{NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
 use hy_core::clock::ManualClock;
+use hy_core::coach::movement::PROVISIONAL_NOTICE;
 use hy_core::coach::{
-    Bubble as CoachBubble, CheckInAnswer, Chip, ChipStatus, CoachView, HiddenReason, Input,
-    PauseLength, PetMode, PomodoroPause, PomodoroPhase, PomodoroPreset, PomodoroView,
+    Bubble as CoachBubble, CheckInAnswer, Chip, ChipStatus, CoachView, GuideAction, GuideStage,
+    GuideView, HiddenReason, Input, PauseLength, PetMode, PomodoroPause, PomodoroPhase,
+    PomodoroPreset, PomodoroView, RecoveryAction, RecoveryPlan, RecoveryView, Reflection,
     ReminderReason, Response,
 };
 use hy_core::schema::{
-    Activity, EventPayload, GoalKind, ReminderOutcome, RoutineOutcome, SessionState,
+    Activity, EventPayload, GoalKind, ReminderOutcome, RoutineOutcome, RoutineVariant,
+    SessionState, StepOutcome,
 };
 use hy_core::store::Store;
 use proptest::prelude::*;
@@ -57,6 +60,42 @@ fn view(pet: PetMode) -> CoachView {
         pomodoro: None,
         focus_left: None,
         meeting: false,
+        guide: None,
+        recovery: RecoveryView {
+            today: oct(20),
+            marked_today: false,
+            plan: None,
+            recovery_day: false,
+            can_open: true,
+        },
+    }
+}
+
+fn oct(d: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(2026, 10, d).unwrap()
+}
+
+fn guide(stage: GuideStage, variant: Option<RoutineVariant>) -> GuideView {
+    GuideView {
+        day: Weekday::Tue,
+        today: Weekday::Tue,
+        variant,
+        stage,
+        from_reminder: true,
+        open: true,
+    }
+}
+
+fn plan(d: u32) -> RecoveryPlan {
+    RecoveryPlan {
+        date: oct(d),
+        more_breaks: true,
+        walk_at: NaiveTime::from_hms_opt(16, 0, 0),
+        walk_repeat: true,
+        lunch_away: true,
+        calm_pause: true,
+        finish_at: NaiveTime::from_hms_opt(18, 30, 0),
+        reflection: true,
     }
 }
 
@@ -105,6 +144,53 @@ fn all_bubbles() -> Vec<CoachBubble> {
         CoachBubble::PomodoroPausedByLock,
         CoachBubble::LongDayCheckIn { hours: 9 },
         CoachBubble::LighterSchedule,
+        CoachBubble::MovementGuide(guide(GuideStage::Intro, None)),
+        CoachBubble::MovementGuide(GuideView {
+            day: Weekday::Sun,
+            today: Weekday::Sun,
+            ..guide(GuideStage::Sunday, None)
+        }),
+        CoachBubble::MovementGuide(guide(GuideStage::ChooseDay, None)),
+        CoachBubble::MovementGuide(guide(
+            GuideStage::Step { index: 0, total: 3 },
+            Some(RoutineVariant::Standing),
+        )),
+        CoachBubble::MovementGuide(guide(
+            GuideStage::Step { index: 2, total: 3 },
+            Some(RoutineVariant::Seated),
+        )),
+        CoachBubble::MovementGuide(guide(
+            GuideStage::Result {
+                outcome: RoutineOutcome::Partial,
+                done: 1,
+                skipped: 1,
+                total: 3,
+                stopped: true,
+            },
+            Some(RoutineVariant::Seated),
+        )),
+        CoachBubble::MovementGuide(guide(
+            GuideStage::Result {
+                outcome: RoutineOutcome::None,
+                done: 0,
+                skipped: 3,
+                total: 3,
+                stopped: false,
+            },
+            Some(RoutineVariant::Seated),
+        )),
+        CoachBubble::DeadlineDay,
+        CoachBubble::RecoveryInvite { next: oct(21) },
+        CoachBubble::RecoveryDates {
+            dates: [Some(oct(22)), Some(oct(23)), Some(oct(24)), Some(oct(26))],
+        },
+        CoachBubble::RecoveryPlanned { plan: plan(21) },
+        CoachBubble::RecoveryMorning {
+            plan: plan(20),
+            water_goal_ml: Some(2000),
+        },
+        CoachBubble::RecoveryWalk,
+        CoachBubble::RecoveryReflection,
     ]
 }
 
@@ -355,6 +441,7 @@ fn menu_follows_the_engine_state_and_every_entry_routes() {
             "water_250",
             "movement_start",
             "break",
+            "deadline_day",
             "focus_30",
             "focus_60",
             "focus_90",
@@ -438,13 +525,56 @@ fn menu_follows_the_engine_state_and_every_entry_routes() {
     assert!(present::click_reopens(&waiting));
     views.push(waiting);
 
-    // Movement started from a reminder: the result entries replace "Today's movement".
+    // Movement started from a reminder: the guide answers it, so "Today's movement" is
+    // not offered; while the guide waits behind the pet, the menu brings it back.
     let mut moving = view(PetMode::Exercise);
     moving.chips[0] = chip(Activity::Movement, ChipStatus::InProgress);
+    moving.guide = Some(GuideView {
+        open: false,
+        ..guide(
+            GuideStage::Step { index: 1, total: 3 },
+            Some(RoutineVariant::Seated),
+        )
+    });
     let m = menu_actions(&moving);
-    assert!(ids(&m).contains(&"movement_done"));
+    assert_eq!(m[0].label, "Show movement guide");
+    assert!(present::click_reopens(&moving));
     assert!(!ids(&m).contains(&"movement_start"));
     views.push(moving);
+    // The same during a meeting the routine was started in.
+    let mut held = view(PetMode::Meeting);
+    held.meeting = true;
+    held.guide = Some(GuideView {
+        open: false,
+        ..guide(GuideStage::Intro, None)
+    });
+    assert_eq!(menu_actions(&held)[0].label, "Show movement guide");
+    views.push(held);
+
+    // Deadline day and the recovery plan.
+    let fresh = view(PetMode::Idle);
+    assert!(ids(&menu_actions(&fresh)).contains(&"deadline_day"));
+    let mut marked = view(PetMode::Idle);
+    marked.recovery.marked_today = true;
+    let m = menu_actions(&marked);
+    assert!(
+        m.iter()
+            .any(|a| a.id == "deadline_day" && a.label == "Plan a recovery day")
+    );
+    views.push(marked);
+    let mut planned = view(PetMode::Idle);
+    planned.recovery.marked_today = true;
+    planned.recovery.plan = Some(plan(22));
+    let m = menu_actions(&planned);
+    assert!(
+        m.iter()
+            .any(|a| a.id == "recovery_show" && a.label == "Recovery day: Thu 22 Oct")
+    );
+    assert!(!ids(&m).contains(&"deadline_day"));
+    views.push(planned);
+    let mut busy = view(PetMode::Idle);
+    busy.recovery.can_open = false;
+    assert!(!ids(&menu_actions(&busy)).contains(&"deadline_day"));
     // Eye rest running is not a movement routine.
     let mut eyes = view(PetMode::Exercise);
     eyes.chips[1] = chip(Activity::EyeRest, ChipStatus::InProgress);
@@ -514,13 +644,13 @@ fn menu_entries_route_to_engine_inputs() {
             resume_coaching: true
         })
     );
+    assert_eq!(menu_command("movement_start"), coach(Input::RoutineStarted));
+    assert_eq!(menu_command("deadline_day"), coach(Input::DeadlineDay));
     assert_eq!(
-        menu_command("movement_partial"),
-        coach(Input::RoutineFinished {
-            offer: None,
-            outcome: RoutineOutcome::Partial
-        })
+        menu_command("recovery_show"),
+        coach(Input::Recovery(RecoveryAction::ShowPlan))
     );
+    assert_eq!(menu_command("movement_partial"), None);
     assert_eq!(menu_command("meeting_on"), coach(Input::SetMeeting(true)));
     // Unknown, out-of-range or malformed entries route nowhere.
     for junk in [
@@ -1278,14 +1408,187 @@ fn menu_and_tray_entries_change_the_engine() {
         h.events()
             .contains(&EventPayload::WaterLogged { amount_ml: 250 })
     );
-    // Movement from the menu, then its result.
+    // Movement from the menu opens the guide.
     h.menu("movement_start");
     assert_eq!(h.shell.state().0, PetState::Exercise);
-    assert!(h.shell.menu_ids().contains(&"movement_done".to_owned()));
-    h.menu("movement_done");
-    assert_eq!(h.shell.state().0, PetState::Celebration);
+    assert!(!h.shell.menu_ids().contains(&"movement_start".to_owned()));
+    assert!(h.link.view().guide.is_some());
     // An entry the menu does not list is ignored by the shell.
     h.menu("movement_done");
+}
+
+fn movement_only(store: &Store) {
+    let config = hy_core::coach::CoachConfig {
+        categories: hy_core::coach::config::Categories {
+            movement: true,
+            eye_rest: false,
+            water: false,
+        },
+        ..hy_core::coach::CoachConfig::default()
+    };
+    store
+        .put_setting(hy_core::coach::config::CONFIG_KEY, &config)
+        .unwrap();
+}
+
+#[test]
+fn a_guided_routine_runs_end_to_end_through_the_shell() {
+    let mut h = H::with_store(movement_only);
+    let (_, a) = h.work_until_reminder(50);
+    assert_eq!(a, Activity::Movement);
+    h.press(action::START);
+    // Monday's routine, first screen.
+    let b = h.shell.open_bubble().unwrap();
+    assert_eq!(b.title, "Today's movement: Monday");
+    assert_eq!(b.note.as_deref(), Some(PROVISIONAL_NOTICE));
+    assert!(b.continues);
+    h.press(action::SEATED);
+    let b = h.shell.open_bubble().unwrap();
+    assert_eq!(b.title, "Movement 1 of 3: Neck side stretch");
+    assert_eq!(b.steps.len(), 4);
+    assert_eq!(b.figure.as_ref().unwrap().id, "neck");
+    assert_eq!(b.note.as_deref(), Some(PROVISIONAL_NOTICE));
+    let first_id = b.id.clone();
+    h.press(action::STEP_DONE);
+    // The next movement is a new bubble (redrawn, numbered afresh).
+    let b = h.shell.open_bubble().unwrap();
+    assert_eq!(b.title, "Movement 2 of 3: Shoulder rolls");
+    assert_ne!(b.id, first_id);
+    // Closing puts the routine behind the pet; a click brings it back.
+    h.close_button();
+    assert!(h.shell.open_bubble().is_none());
+    assert_eq!(
+        h.shell.menu_ids().first().map(String::as_str),
+        Some("open_pending")
+    );
+    h.click_pet();
+    assert_eq!(
+        h.shell.open_bubble().unwrap().title,
+        "Movement 2 of 3: Shoulder rolls"
+    );
+    h.press(action::STEP_SKIP);
+    h.press(action::STEP_DONE);
+    let b = h.shell.open_bubble().unwrap();
+    assert_eq!(b.title, "Saved as partial");
+    assert!(!b.continues);
+    h.press(action::OK);
+    assert!(h.shell.open_bubble().is_none());
+    let steps: Vec<_> = h
+        .events()
+        .into_iter()
+        .filter_map(|p| match p {
+            EventPayload::MovementStep {
+                step_index,
+                outcome,
+                ..
+            } => Some((step_index, outcome)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        steps,
+        vec![
+            (0, StepOutcome::Done),
+            (1, StepOutcome::Skipped),
+            (2, StepOutcome::Done)
+        ]
+    );
+    assert!(h.events().iter().any(|p| matches!(
+        p,
+        EventPayload::MovementSession {
+            outcome: RoutineOutcome::Partial,
+            steps_done: 2,
+            steps_skipped: 1,
+            ..
+        }
+    )));
+    assert_eq!(
+        h.link.view().chip(Activity::Movement).status,
+        ChipStatus::Partial
+    );
+}
+
+#[test]
+fn deadline_day_and_a_recovery_plan_run_through_the_shell() {
+    let mut h = H::with_store(movement_only);
+    h.menu("deadline_day");
+    assert_eq!(h.shell.open_bubble().unwrap().title, "Deadline day?");
+    h.press(action::CHECK_IN_YES);
+    let b = h.shell.open_bubble().unwrap();
+    assert_eq!(b.title, "Plan a gentler recovery day?");
+    assert_eq!(b.actions[0].label, "Tomorrow (Tue 27 Oct)");
+    assert_eq!(b.actions[0].id, "plan_2026-10-27");
+    h.press(action::CHOOSE_DATE);
+    let b = h.shell.open_bubble().unwrap();
+    assert_eq!(
+        b.actions
+            .iter()
+            .map(|a| a.label.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "Wed 28 Oct",
+            "Thu 29 Oct",
+            "Fri 30 Oct",
+            "Sat 31 Oct",
+            "Later"
+        ]
+    );
+    h.press("plan_2026-10-29");
+    let b = h.shell.open_bubble().unwrap();
+    assert_eq!(b.title, "Recovery day planned: Thu 29 Oct");
+    h.press(action::OK);
+    assert!(h.shell.open_bubble().is_none());
+    assert!(h.shell.menu_ids().contains(&"recovery_show".to_owned()));
+    let kinds: Vec<_> = h
+        .events()
+        .into_iter()
+        .map(|p| p.type_name())
+        .filter(|t| t.starts_with("recovery."))
+        .collect();
+    assert_eq!(kinds, vec!["recovery.check_in", "recovery.plan"]);
+    // The menu shows the plan again, and it can be cancelled there.
+    h.menu("recovery_show");
+    h.press(action::CANCEL_PLAN);
+    assert!(h.shell.open_bubble().is_none());
+    assert!(h.link.view().recovery.plan.is_none());
+}
+
+#[test]
+fn guide_and_recovery_actions_route_only_from_their_own_cards() {
+    let g = BubbleKind::MovementGuide;
+    let coach = |i| Some(Command::Coach(i));
+    assert_eq!(
+        bubble_command(g, "seated"),
+        coach(Input::Guide(GuideAction::Variant(RoutineVariant::Seated)))
+    );
+    assert_eq!(
+        bubble_command(g, "day_sat"),
+        coach(Input::Guide(GuideAction::Day(Weekday::Sat)))
+    );
+    assert_eq!(bubble_command(g, "day_sun"), None);
+    assert_eq!(bubble_command(g, "plan_2026-10-27"), None);
+    assert_eq!(
+        bubble_command(BubbleKind::RecoveryDates, "plan_2026-10-27"),
+        coach(Input::Recovery(RecoveryAction::PlanFor(oct(27))))
+    );
+    assert_eq!(
+        bubble_command(BubbleKind::RecoveryDates, "plan_2026-13-01"),
+        None
+    );
+    assert_eq!(bubble_command(BubbleKind::RecoveryDates, "no_thanks"), None);
+    assert_eq!(
+        bubble_command(BubbleKind::RecoveryReflection, "reflect_skip"),
+        coach(Input::Recovery(RecoveryAction::Reflect(Reflection::Skip)))
+    );
+    assert_eq!(
+        bubble_command(BubbleKind::DeadlineDay, "dont_ask"),
+        None,
+        "the menu's question has no \"Don't ask today\""
+    );
+    assert_eq!(
+        bubble_command(BubbleKind::DeadlineDay, "yes"),
+        coach(Input::CheckIn(CheckInAnswer::Yes))
+    );
 }
 
 #[derive(Debug, Clone)]

@@ -257,14 +257,11 @@ impl CoachLink {
             .as_ref()
             .map(|b| (BubbleKind::of(b), present::bubble(b, view)));
 
-        // The bubble to show: the same card stays as it is (its wording is not redrawn
-        // every tick) unless its chips or actions changed.
+        // The bubble to show: the same reminder stays as it is (its counted minutes are
+        // not redrawn every tick) unless its chips or actions changed; any other card is
+        // redrawn when anything in it changed (the guide's next movement, a new date).
         let show = match (&self.shown.bubble, want) {
-            (Some((k, old)), Some((k2, new)))
-                if *k == k2 && old.chips == new.chips && old.actions == new.actions =>
-            {
-                None
-            }
+            (Some((k, old)), Some((k2, new))) if *k == k2 && same_card(*k, old, &new) => None,
             (_, Some((k, mut b))) => {
                 self.rev += 1;
                 b.id = k.id(self.rev);
@@ -324,6 +321,19 @@ impl CoachLink {
             }
         }
         false
+    }
+}
+
+/// Whether `new` (without an id) shows the same card as `old`.
+fn same_card(kind: BubbleKind, old: &Bubble, new: &Bubble) -> bool {
+    match kind {
+        BubbleKind::Reminder { .. } => old.chips == new.chips && old.actions == new.actions,
+        _ => {
+            Bubble {
+                id: String::new(),
+                ..old.clone()
+            } == *new
+        }
     }
 }
 

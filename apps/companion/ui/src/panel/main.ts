@@ -3,6 +3,7 @@
 // the window that had it. Actions that open another window (Settings) leave focus there.
 // When the engine's bubble is open beside the pet (a reminder, a Pomodoro card, the
 // check-in), the panel shows the same bubble first so it can be answered by keyboard.
+import { renderFigure } from '../shared/figures';
 import { call, on, report } from '../shared/ipc';
 import { renderMenu } from '../shared/menu';
 import type { Bubble, PanelView } from '../shared/types';
@@ -21,6 +22,20 @@ function bubbleSection(b: Bubble): HTMLElement {
   h.id = 'panel-bubble-title';
   h.textContent = b.title;
   section.append(h);
+  if (b.figure) {
+    const fig = renderFigure(b.figure.id, b.figure.label);
+    if (fig) section.append(fig);
+  }
+  if (b.steps.length > 0) {
+    const ol = document.createElement('ol');
+    ol.className = 'steps';
+    for (const s of b.steps) {
+      const li = document.createElement('li');
+      li.textContent = s;
+      ol.append(li);
+    }
+    section.append(ol);
+  }
   for (const line of b.lines) {
     const p = document.createElement('p');
     p.textContent = line;
@@ -45,8 +60,12 @@ function bubbleSection(b: Bubble): HTMLElement {
     btn.className = a.style === 'primary' ? 'btn primary' : 'btn';
     btn.textContent = a.label;
     btn.addEventListener('click', () => {
+      // A card that continues (the movement guide's next screen) keeps the panel open;
+      // the new card arrives as a fresh panel view.
       call('bubble_action', { bubbleId: b.id, actionId: a.id })
-        .then(() => close(true))
+        .then(() => {
+          if (!b.continues) close(true);
+        })
         .catch(report);
     });
     row.append(btn);
@@ -62,6 +81,12 @@ function bubbleSection(b: Bubble): HTMLElement {
   });
   row.append(later);
   section.append(row);
+  if (b.note) {
+    const note = document.createElement('p');
+    note.className = 'note';
+    note.textContent = b.note;
+    section.append(note);
+  }
   return section;
 }
 

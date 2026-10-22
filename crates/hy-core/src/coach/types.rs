@@ -12,13 +12,14 @@
 
 use std::time::Duration;
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, Weekday};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::config::PomodoroPreset;
+use super::recovery::{RecoveryAction, RecoveryPlan, RecoveryView};
 use super::water::WaterPace;
-use crate::schema::{Activity, RoutineOutcome, SessionState};
+use crate::schema::{Activity, RoutineOutcome, RoutineVariant, SessionState};
 
 /// How long the user paused coaching for (wireframe B5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +66,33 @@ pub enum CheckInAnswer {
     DontAskToday,
 }
 
+/// What the user chose in the movement guide (wireframe B4, flow 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuideAction {
+    /// "Seated" or "Standing" on the first screen: starts the first movement.
+    Variant(RoutineVariant),
+    /// "Done" on a movement (self-reported).
+    Done,
+    /// "Skip this movement". Never counted as done.
+    Skip,
+    /// "Stop routine". Some done is partial; none done is "none recorded" and does not
+    /// restart the movement timer.
+    Stop,
+    /// "Later" on the first screen. From a reminder it snoozes movement.
+    Later,
+    /// "Skip today" on the first screen (recorded as skipped; no catch-up).
+    SkipToday,
+    /// "Other day": choose another day's routine.
+    OtherDay,
+    /// Choose this day's routine (Monday to Saturday).
+    Day(Weekday),
+    /// Back from the day chooser.
+    Back,
+    /// "OK" on the result.
+    Close,
+}
+
 /// Something the shell reports. Every input is applied at the time the driver stamps it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -107,7 +135,11 @@ pub enum Input {
     OpenPending,
     /// The movement guide was opened from the pet menu (not from a reminder).
     RoutineStarted,
-    /// The movement guide finished. `offer` is the reminder it was started from, if any.
+    /// An answer in the movement guide.
+    Guide(GuideAction),
+    /// A quick report of a whole routine without the guide's steps (no routine record is
+    /// written). It closes an open guide. `offer` is the reminder it was started from, if
+    /// any.
     RoutineFinished {
         /// The reminder that started the routine, if any.
         offer: Option<Uuid>,
@@ -157,8 +189,13 @@ pub enum Input {
     SkipPomodoroBreak,
     /// "Start next round" (auto-start is off by default).
     NextPomodoroRound,
-    /// Answer to the long-day check-in.
+    /// Answer to the long-day check-in or to "Deadline day?".
     CheckIn(CheckInAnswer),
+    /// "Deadline day" on the pet menu: asks "Deadline day?", or shows the recovery
+    /// invitation or the planned day if today is already marked.
+    DeadlineDay,
+    /// An answer on a recovery card, or a plan saved from the plan screen.
+    Recovery(RecoveryAction),
     /// Answer to "Fewer reminders?" after the third dismissal of the day.
     LighterSchedule {
         /// "Use Light".
@@ -361,6 +398,87 @@ pub enum Bubble {
     },
     /// "Fewer reminders?" after the third dismissal today.
     LighterSchedule,
+    /// The guided movement routine (wireframe B4). Its content is provisional, pending
+    /// the content review ([`super::movement::PROVISIONAL_NOTICE`]).
+    MovementGuide(GuideView),
+    /// "Deadline day?" opened from the pet menu.
+    DeadlineDay,
+    /// "Plan a gentler recovery day?" after a deadline day (not a leave request).
+    RecoveryInvite {
+        /// The first suggested date (the next working day).
+        next: NaiveDate,
+    },
+    /// "Choose a date": the next few working days.
+    RecoveryDates {
+        /// Up to four dates.
+        dates: [Option<NaiveDate>; 4],
+    },
+    /// "Recovery day planned".
+    RecoveryPlanned {
+        /// The plan.
+        plan: RecoveryPlan,
+    },
+    /// The recovery day's morning card, listing only the items in the plan.
+    RecoveryMorning {
+        /// The plan.
+        plan: RecoveryPlan,
+        /// The user's own water goal, which stays the same.
+        water_goal_ml: Option<u32>,
+    },
+    /// The optional walk suggestion on a recovery day.
+    RecoveryWalk,
+    /// "Did this routine feel helpful?" at the end of a recovery day.
+    RecoveryReflection,
+}
+
+/// Where the movement guide is (wireframe B4, flow 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuideStage {
+    /// The day's routine: its movements, the seating check, Seated or Standing, Later,
+    /// Skip today, Other day.
+    Intro,
+    /// Sunday: nothing is scheduled; any day's routine may be chosen.
+    Sunday,
+    /// Choosing another day's routine.
+    ChooseDay,
+    /// One movement: Done, Skip this movement, Stop routine.
+    Step {
+        /// Zero-based index.
+        index: u32,
+        /// Movements in the routine.
+        total: u32,
+    },
+    /// The result (complete, partial, or stopped with none recorded).
+    Result {
+        /// The outcome recorded.
+        outcome: RoutineOutcome,
+        /// Movements done.
+        done: u32,
+        /// Movements skipped.
+        skipped: u32,
+        /// Movements in the routine.
+        total: u32,
+        /// Stopped before the last movement.
+        stopped: bool,
+    },
+}
+
+/// The movement guide's state, for its card and the pet menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuideView {
+    /// The routine shown (Monday to Saturday), or Sunday before one is chosen.
+    pub day: Weekday,
+    /// Today's weekday.
+    pub today: Weekday,
+    /// Seated or standing, once chosen.
+    pub variant: Option<RoutineVariant>,
+    /// Where the guide is.
+    pub stage: GuideStage,
+    /// Started from a movement reminder ("Later" then snoozes it).
+    pub from_reminder: bool,
+    /// The card is open; when false it waits behind the pet (a click reopens it).
+    pub open: bool,
 }
 
 /// Why the pet is hidden.
@@ -447,6 +565,10 @@ pub struct CoachView {
     pub focus_left: Option<Duration>,
     /// The manual meeting toggle.
     pub meeting: bool,
+    /// The movement guide, open or waiting behind the pet.
+    pub guide: Option<GuideView>,
+    /// The deadline day and the recovery-day plan.
+    pub recovery: RecoveryView,
 }
 
 impl CoachView {

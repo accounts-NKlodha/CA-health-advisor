@@ -224,6 +224,52 @@ text_enum! {
 }
 
 text_enum! {
+    /// Where a deadline-day check-in came from (wireframe B7).
+    CheckInOrigin {
+        /// Offered after a long day of estimated PC activity (optional, 9 h by default).
+        LongDay => "long_day",
+        /// The user chose "Deadline day" on the pet menu.
+        Menu => "menu",
+    }
+}
+
+text_enum! {
+    /// The user's answer to a deadline-day check-in. Only the user decides; the app never
+    /// infers stress or tiredness (wireframe B7).
+    CheckInReply {
+        /// "Yes, it was": today is marked as deadline-heavy.
+        Yes => "yes",
+        /// "No".
+        No => "no",
+        /// "Don't ask today".
+        DontAskToday => "dont_ask_today",
+    }
+}
+
+text_enum! {
+    /// A change to the one pending recovery-day plan (wireframe W15, flow 4).
+    PlanChange {
+        /// Saved (a new plan, a new date or edited items). Replaces any earlier plan.
+        Saved => "saved",
+        /// Cancelled by the user.
+        Cancelled => "cancelled",
+    }
+}
+
+text_enum! {
+    /// The end-of-day reflection on a recovery day: "Did this routine feel helpful?"
+    /// It stays on this PC (architecture 6.2).
+    ReflectionAnswer {
+        /// Yes.
+        Yes => "yes",
+        /// Somewhat.
+        Somewhat => "somewhat",
+        /// No.
+        No => "no",
+    }
+}
+
+text_enum! {
     /// Label of a phone self-report (DIS-01).
     PhoneLabel {
         /// No label chosen.
@@ -403,6 +449,8 @@ pub enum EventPayload {
     /// One step of a movement routine.
     #[serde(rename = "movement.step")]
     MovementStep {
+        /// The guided routine this step belongs to (shared with its `movement.session`).
+        session_id: Uuid,
         /// Content id of the routine.
         routine_id: String,
         /// Content version of the routine.
@@ -419,6 +467,8 @@ pub enum EventPayload {
     /// The result of a movement routine.
     #[serde(rename = "movement.session")]
     MovementSession {
+        /// The guided routine (shared with its `movement.step` events).
+        session_id: Uuid,
         /// Content id of the routine.
         routine_id: String,
         /// Content version of the routine.
@@ -439,6 +489,29 @@ pub enum EventPayload {
     PhoneInterruption {
         /// Work, personal, unsure or unlabelled.
         label: PhoneLabel,
+    },
+    /// The answer to a deadline-day check-in. "Yes" marks the event's local date as
+    /// deadline-heavy. Stays on this PC (architecture 6.2).
+    #[serde(rename = "recovery.check_in")]
+    RecoveryCheckIn {
+        /// The long-day check-in or the pet menu.
+        origin: CheckInOrigin,
+        /// The answer.
+        answer: CheckInReply,
+    },
+    /// The one pending recovery-day plan was saved or cancelled. Stays on this PC.
+    #[serde(rename = "recovery.plan")]
+    RecoveryPlanChanged {
+        /// The planned recovery day.
+        plan_date: NaiveDate,
+        /// What changed.
+        change: PlanChange,
+    },
+    /// The end-of-day reflection on a recovery day. Stays on this PC.
+    #[serde(rename = "recovery.reflection")]
+    RecoveryReflection {
+        /// The answer ("Skip" records nothing).
+        answer: ReflectionAnswer,
     },
     /// A V2 posture observation (derived numbers only, never frames or landmarks).
     #[serde(rename = "posture.observation")]
@@ -472,6 +545,9 @@ impl EventPayload {
             Self::WaterLogged { .. } => "water.logged",
             Self::MovementStep { .. } => "movement.step",
             Self::MovementSession { .. } => "movement.session",
+            Self::RecoveryCheckIn { .. } => "recovery.check_in",
+            Self::RecoveryPlanChanged { .. } => "recovery.plan",
+            Self::RecoveryReflection { .. } => "recovery.reflection",
             Self::PhoneInterruption { .. } => "phone.interruption",
             Self::PostureObservation { .. } => "posture.observation",
             Self::SharingPolicyChanged { .. } => "sharing.policy_changed",
@@ -497,6 +573,9 @@ impl EventPayload {
                 | Self::EntryRetracted {}
                 | Self::MovementStep { .. }
                 | Self::MovementSession { .. }
+                | Self::RecoveryCheckIn { .. }
+                | Self::RecoveryPlanChanged { .. }
+                | Self::RecoveryReflection { .. }
         )
     }
 
@@ -587,6 +666,9 @@ impl EventPayload {
             Self::SessionState { .. }
             | Self::ReminderOffered { .. }
             | Self::ReminderResponse { .. }
+            | Self::RecoveryCheckIn { .. }
+            | Self::RecoveryPlanChanged { .. }
+            | Self::RecoveryReflection { .. }
             | Self::PhoneInterruption { .. }
             | Self::SharingPolicyChanged { .. }
             | Self::EntryRetracted {} => {}
@@ -818,6 +900,7 @@ mod tests {
 
     fn session(outcome: RoutineOutcome, done: u32, skipped: u32, total: u32) -> EventPayload {
         EventPayload::MovementSession {
+            session_id: Uuid::nil(),
             routine_id: "mon-neck-shoulders".into(),
             routine_version: 1,
             variant: Some(RoutineVariant::Seated),
@@ -845,6 +928,7 @@ mod tests {
             },
             water(250),
             EventPayload::MovementStep {
+                session_id: rid,
                 routine_id: "tue-back".into(),
                 routine_version: 2,
                 variant: RoutineVariant::Standing,
@@ -853,6 +937,17 @@ mod tests {
                 outcome: StepOutcome::Skipped,
             },
             session(RoutineOutcome::Partial, 2, 1, 3),
+            EventPayload::RecoveryCheckIn {
+                origin: CheckInOrigin::LongDay,
+                answer: CheckInReply::Yes,
+            },
+            EventPayload::RecoveryPlanChanged {
+                plan_date: NaiveDate::from_ymd_opt(2026, 10, 23).unwrap(),
+                change: PlanChange::Saved,
+            },
+            EventPayload::RecoveryReflection {
+                answer: ReflectionAnswer::Somewhat,
+            },
             EventPayload::PhoneInterruption {
                 label: PhoneLabel::Work,
             },
@@ -897,6 +992,10 @@ mod tests {
         check(RoutineVariant::ALL);
         check(RoutineOutcome::ALL);
         check(StepOutcome::ALL);
+        check(CheckInOrigin::ALL);
+        check(CheckInReply::ALL);
+        check(PlanChange::ALL);
+        check(ReflectionAnswer::ALL);
         check(PhoneLabel::ALL);
         check(SessionState::ALL);
         check(PostureKind::ALL);
@@ -984,6 +1083,7 @@ mod tests {
         assert!(session(RoutineOutcome::Done, 3, 1, 3).validate().is_err());
         assert!(session(RoutineOutcome::Done, 0, 0, 0).validate().is_err());
         let skipped_day = EventPayload::MovementSession {
+            session_id: Uuid::nil(),
             routine_id: "wed-hips".into(),
             routine_version: 1,
             variant: None,
@@ -994,6 +1094,7 @@ mod tests {
         };
         assert!(skipped_day.validate().is_ok());
         let done_without_variant = EventPayload::MovementSession {
+            session_id: Uuid::nil(),
             routine_id: "wed-hips".into(),
             routine_version: 1,
             variant: None,
@@ -1008,6 +1109,7 @@ mod tests {
     #[test]
     fn step_and_routine_ids_are_checked() {
         let step = |idx, total, id: &str| EventPayload::MovementStep {
+            session_id: Uuid::nil(),
             routine_id: id.into(),
             routine_version: 1,
             variant: RoutineVariant::Seated,

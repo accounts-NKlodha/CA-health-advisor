@@ -7,11 +7,12 @@
 
 use std::time::Duration;
 
-use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc, Weekday};
 use hy_core::coach::config::{CALM_GAP, Categories, LongDayCheckIn, SNOOZE};
 use hy_core::coach::*;
 use hy_core::schema::{
-    Activity, EventPayload, NewEvent, ReminderOutcome, RoutineOutcome, SessionState,
+    Activity, CheckInOrigin, CheckInReply, EventPayload, NewEvent, PlanChange, ReflectionAnswer,
+    ReminderOutcome, RoutineOutcome, RoutineVariant, SessionState, StepOutcome,
 };
 use hy_core::time::{UserZone, WeekdaySet, WorkSchedule};
 use uuid::Uuid;
@@ -496,7 +497,15 @@ fn routine(outcome: RoutineOutcome) -> H {
     h.respond(Response::Start);
     assert_eq!(h.status(Activity::Movement), ChipStatus::InProgress);
     assert_eq!(h.view().pet, PetMode::Exercise);
-    assert_eq!(h.view().bubble, None);
+    // The guide opens on today's routine.
+    assert!(matches!(
+        h.view().bubble,
+        Some(Bubble::MovementGuide(GuideView {
+            stage: GuideStage::Intro,
+            from_reminder: true,
+            ..
+        }))
+    ));
     h.wait(mins(1));
     let out = h.input(Input::RoutineFinished {
         offer: Some(offer),
@@ -605,7 +614,7 @@ fn routine_from_the_menu_holds_reminders_and_resets_on_done() {
     assert_eq!(h.view().hold, Some(Hold::ExerciseOrPomodoro));
     assert_eq!(h.view().pet, PetMode::Exercise);
     h.wait(mins(10)); // eye rest would be due at 10:20
-    assert_eq!(h.view().bubble, None);
+    assert!(matches!(h.view().bubble, Some(Bubble::MovementGuide(_))));
     h.input(Input::RoutineFinished {
         offer: None,
         outcome: RoutineOutcome::Partial,
@@ -616,6 +625,613 @@ fn routine_from_the_menu_holds_reminders_and_resets_on_done() {
     assert_eq!(h.status(Activity::EyeRest), ChipStatus::Due);
     assert_eq!(h.wait_until(mins(10), |v| v.reminder().is_some()), CALM_GAP);
     assert_eq!(h.shown(), Some(Activity::EyeRest));
+}
+
+// ------------------------------------------------------- guided movement routine
+
+impl H {
+    fn guide(&self) -> GuideView {
+        self.view().guide.expect("the movement guide is open")
+    }
+
+    fn stage(&self) -> GuideStage {
+        self.guide().stage
+    }
+
+    fn g(&mut self, a: GuideAction) -> StepOutput {
+        self.input(Input::Guide(a))
+    }
+
+    /// `movement.step` events: (routine id, routine, step index, outcome).
+    fn steps(&self) -> Vec<(Uuid, String, u32, StepOutcome)> {
+        self.events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                EventPayload::MovementStep {
+                    session_id,
+                    routine_id,
+                    step_index,
+                    steps_total,
+                    routine_version,
+                    outcome,
+                    ..
+                } => {
+                    assert_eq!((*steps_total, *routine_version), (3, 1));
+                    Some((*session_id, routine_id.clone(), *step_index, *outcome))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `movement.session` events: (routine id, routine, variant, outcome, done, skipped).
+    #[allow(clippy::type_complexity)]
+    fn sessions(
+        &self,
+    ) -> Vec<(
+        Uuid,
+        String,
+        Option<RoutineVariant>,
+        RoutineOutcome,
+        u32,
+        u32,
+    )> {
+        self.events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                EventPayload::MovementSession {
+                    session_id,
+                    routine_id,
+                    variant,
+                    outcome,
+                    steps_done,
+                    steps_skipped,
+                    steps_total,
+                    ..
+                } => {
+                    assert_eq!(*steps_total, 3);
+                    Some((
+                        *session_id,
+                        routine_id.clone(),
+                        *variant,
+                        *outcome,
+                        *steps_done,
+                        *steps_skipped,
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn restart(&mut self, elapsed: Duration) -> StepOutput {
+        self.wall += chrono::Duration::from_std(elapsed).unwrap();
+        let out = self.e.restart(&self.ctx(elapsed));
+        self.record(&out);
+        out
+    }
+}
+
+/// Movement offered at 10:45 on Tuesday 20 Oct, "Start movement", then `variant` chosen
+/// on the first screen: the guide is on the first movement.
+fn guided(variant: RoutineVariant) -> H {
+    let mut h = H::only(true, false, false);
+    h.wait_until(mins(50), |v| v.reminder().is_some());
+    h.respond(Response::Start);
+    let g = h.guide();
+    assert_eq!((g.day, g.today), (Weekday::Tue, Weekday::Tue));
+    assert_eq!(
+        (g.stage, g.variant, g.open),
+        (GuideStage::Intro, None, true)
+    );
+    assert!(g.from_reminder);
+    assert_eq!(
+        h.g(GuideAction::Variant(variant)).outcome,
+        InputOutcome::Applied
+    );
+    assert_eq!(h.stage(), GuideStage::Step { index: 0, total: 3 });
+    assert_eq!(h.guide().variant, Some(variant));
+    h
+}
+
+#[test]
+fn guide_every_movement_done_records_each_step_and_a_done_routine() {
+    let mut h = guided(RoutineVariant::Seated);
+    for i in 0..3 {
+        assert_eq!(h.stage(), GuideStage::Step { index: i, total: 3 });
+        h.wait(secs(40));
+        h.g(GuideAction::Done);
+    }
+    let steps = h.steps();
+    assert_eq!(steps.len(), 3);
+    let id = steps[0].0;
+    for (i, s) in steps.iter().enumerate() {
+        assert_eq!(s, &(id, "tue".to_owned(), i as u32, StepOutcome::Done));
+    }
+    assert_eq!(
+        h.sessions(),
+        vec![(
+            id,
+            "tue".to_owned(),
+            Some(RoutineVariant::Seated),
+            RoutineOutcome::Done,
+            3,
+            0
+        )]
+    );
+    assert_eq!(
+        h.stage(),
+        GuideStage::Result {
+            outcome: RoutineOutcome::Done,
+            done: 3,
+            skipped: 0,
+            total: 3,
+            stopped: false
+        }
+    );
+    assert_eq!(h.status(Activity::Movement), ChipStatus::Done);
+    assert_eq!(h.accum(Activity::Movement), Duration::ZERO);
+    assert_eq!(
+        h.count_notices(|n| *n == Notice::Celebrate(Activity::Movement)),
+        1
+    );
+    // The routine is over: the movement reminder is no longer in progress.
+    assert_eq!(h.view().hold, None);
+    assert_eq!(h.view().pet, PetMode::Idle);
+    // The result closes by itself after a minute; another answer changes nothing.
+    assert_eq!(
+        h.g(GuideAction::Done).outcome,
+        InputOutcome::Ignored("the routine is over")
+    );
+    h.wait(secs(60));
+    assert_eq!(h.view().guide, None);
+    assert_eq!(h.view().bubble, None);
+    assert_eq!(h.steps().len(), 3);
+    // The routine id is distinct from the reminder id.
+    let reminder = h
+        .events
+        .iter()
+        .find_map(|e| match e.payload {
+            EventPayload::ReminderOffered { reminder_id, .. } => Some(reminder_id),
+            _ => None,
+        })
+        .unwrap();
+    assert_ne!(reminder, id);
+}
+
+#[test]
+fn guide_stop_on_the_first_movement_is_none_and_keeps_the_timer() {
+    let mut h = guided(RoutineVariant::Standing);
+    h.wait(secs(20));
+    h.g(GuideAction::Stop);
+    assert!(h.steps().is_empty());
+    let s = h.sessions();
+    assert_eq!(s.len(), 1);
+    assert_eq!(
+        (s[0].2, s[0].3, s[0].4, s[0].5),
+        (Some(RoutineVariant::Standing), RoutineOutcome::None, 0, 0)
+    );
+    assert_eq!(
+        h.stage(),
+        GuideStage::Result {
+            outcome: RoutineOutcome::None,
+            done: 0,
+            skipped: 0,
+            total: 3,
+            stopped: true
+        }
+    );
+    assert_eq!(h.status(Activity::Movement), ChipStatus::NoneRecorded);
+    // Not reset: the 45 minutes before the reminder are still counted.
+    assert!(h.accum(Activity::Movement) >= mins(45));
+    assert_eq!(h.dismissals(), 0);
+    h.g(GuideAction::Close);
+    assert_eq!(h.view().guide, None);
+    // Rescheduled a full cycle after the stop (10:45:20), not restarted.
+    let (at, worked) = next_movement(&mut h);
+    assert_eq!(at, NaiveTime::from_hms_opt(11, 30, 20).unwrap());
+    assert!(worked >= mins(90));
+}
+
+#[test]
+fn guide_every_movement_skipped_is_none_and_not_a_dismissal() {
+    let mut h = guided(RoutineVariant::Seated);
+    for _ in 0..3 {
+        h.g(GuideAction::Skip);
+    }
+    let steps = h.steps();
+    assert_eq!(
+        steps.iter().map(|s| s.3).collect::<Vec<_>>(),
+        vec![StepOutcome::Skipped; 3]
+    );
+    let s = h.sessions();
+    assert_eq!((s[0].3, s[0].4, s[0].5), (RoutineOutcome::None, 0, 3));
+    assert!(matches!(
+        h.stage(),
+        GuideStage::Result {
+            outcome: RoutineOutcome::None,
+            stopped: false,
+            ..
+        }
+    ));
+    assert_eq!(h.status(Activity::Movement), ChipStatus::NoneRecorded);
+    assert!(h.accum(Activity::Movement) >= mins(45));
+    assert_eq!(h.dismissals(), 0);
+}
+
+#[test]
+fn guide_one_done_then_stop_is_partial_and_resets_the_timer() {
+    let mut h = guided(RoutineVariant::Standing);
+    h.g(GuideAction::Done);
+    h.g(GuideAction::Skip);
+    h.g(GuideAction::Stop);
+    assert_eq!(
+        h.steps().iter().map(|s| (s.2, s.3)).collect::<Vec<_>>(),
+        vec![(0, StepOutcome::Done), (1, StepOutcome::Skipped)]
+    );
+    let s = h.sessions();
+    assert_eq!((s[0].3, s[0].4, s[0].5), (RoutineOutcome::Partial, 1, 1));
+    assert_eq!(
+        h.stage(),
+        GuideStage::Result {
+            outcome: RoutineOutcome::Partial,
+            done: 1,
+            skipped: 1,
+            total: 3,
+            stopped: true
+        }
+    );
+    assert_eq!(h.status(Activity::Movement), ChipStatus::Partial);
+    assert_eq!(h.accum(Activity::Movement), Duration::ZERO);
+    assert_eq!(h.count_notices(|n| matches!(n, Notice::Celebrate(_))), 0);
+}
+
+#[test]
+fn guide_skip_today_is_a_skip_with_no_catch_up() {
+    let mut h = H::only(true, false, false);
+    h.wait_until(mins(50), |v| v.reminder().is_some());
+    h.respond(Response::Start);
+    h.g(GuideAction::SkipToday);
+    let s = h.sessions();
+    assert_eq!(
+        (s[0].1.as_str(), s[0].2, s[0].3, s[0].4, s[0].5),
+        ("tue", None, RoutineOutcome::Skipped, 0, 0)
+    );
+    assert!(h.steps().is_empty());
+    assert_eq!(h.status(Activity::Movement), ChipStatus::Skipped);
+    assert_eq!(h.dismissals(), 1);
+    assert!(h.accum(Activity::Movement) >= mins(45));
+    assert_eq!(next_movement(&mut h).0, hm(11, 30));
+}
+
+#[test]
+fn guide_later_from_a_reminder_snoozes_and_from_the_menu_records_nothing() {
+    let mut h = H::only(true, false, false);
+    h.wait_until(mins(50), |v| v.reminder().is_some());
+    h.respond(Response::Start);
+    h.g(GuideAction::Later);
+    assert_eq!(h.view().guide, None);
+    assert_eq!(h.status(Activity::Movement), ChipStatus::Snoozed);
+    assert!(h.sessions().is_empty());
+    h.wait_until(mins(11), |v| v.reminder().is_some());
+    assert_eq!(h.local(), hm(10, 55));
+
+    let mut m = H::only(true, false, false);
+    m.wait(mins(10));
+    m.input(Input::RoutineStarted);
+    assert!(!m.guide().from_reminder);
+    m.g(GuideAction::Later);
+    assert_eq!(m.view().guide, None);
+    assert_eq!(m.view().hold, None);
+    assert!(m.sessions().is_empty());
+    assert_eq!(m.accum(Activity::Movement), mins(10));
+}
+
+#[test]
+fn guide_from_the_menu_done_restarts_the_timer_and_none_changes_nothing() {
+    let mut h = H::only(true, false, false);
+    h.wait(mins(20));
+    h.input(Input::RoutineStarted);
+    assert_eq!(h.view().hold, Some(Hold::ExerciseOrPomodoro));
+    h.g(GuideAction::Variant(RoutineVariant::Seated));
+    for _ in 0..3 {
+        h.g(GuideAction::Done);
+    }
+    assert_eq!(h.sessions()[0].3, RoutineOutcome::Done);
+    assert_eq!(h.accum(Activity::Movement), Duration::ZERO);
+    assert_eq!(h.status(Activity::Movement), ChipStatus::Done);
+    assert_eq!(h.view().hold, None);
+    h.g(GuideAction::Close);
+
+    let mut n = H::only(true, false, false);
+    n.wait(mins(20));
+    n.input(Input::RoutineStarted);
+    n.g(GuideAction::Variant(RoutineVariant::Standing));
+    n.g(GuideAction::Stop);
+    assert_eq!(n.sessions()[0].3, RoutineOutcome::None);
+    assert_eq!(n.accum(Activity::Movement), mins(20));
+    assert_eq!(n.status(Activity::Movement), ChipStatus::NotDue);
+    // The movement reminder still comes at its usual time.
+    n.g(GuideAction::Close);
+    n.wait_until(mins(30), |v| v.reminder().is_some());
+    assert_eq!(n.local(), hm(10, 45));
+}
+
+#[test]
+fn guide_other_day_and_sunday_choose_any_routine() {
+    let mut h = H::only(true, false, false);
+    h.input(Input::RoutineStarted);
+    h.g(GuideAction::OtherDay);
+    assert_eq!(h.stage(), GuideStage::ChooseDay);
+    h.g(GuideAction::Back);
+    assert_eq!(h.stage(), GuideStage::Intro);
+    h.g(GuideAction::OtherDay);
+    assert_eq!(
+        h.g(GuideAction::Day(Weekday::Sun)).outcome,
+        InputOutcome::Invalid("choose a day from Monday to Saturday")
+    );
+    h.g(GuideAction::Day(Weekday::Sat));
+    assert_eq!(
+        (h.guide().day, h.stage()),
+        (Weekday::Sat, GuideStage::Intro)
+    );
+    h.g(GuideAction::Variant(RoutineVariant::Seated));
+    h.g(GuideAction::Done);
+    assert_eq!(h.steps()[0].1, "sat");
+
+    // Sunday 25 Oct: nothing is scheduled; any day's routine may be chosen.
+    let mut s = H::at(
+        ist(25, 11, 0),
+        cats(true, false, false),
+        WaterSnapshot::default(),
+    );
+    s.input(Input::RoutineStarted);
+    assert_eq!(
+        (s.guide().day, s.stage()),
+        (Weekday::Sun, GuideStage::Sunday)
+    );
+    // No routine yet: there is nothing to start or skip.
+    assert!(matches!(
+        s.g(GuideAction::Variant(RoutineVariant::Seated)).outcome,
+        InputOutcome::Ignored(_)
+    ));
+    assert!(matches!(
+        s.g(GuideAction::SkipToday).outcome,
+        InputOutcome::Ignored(_)
+    ));
+    s.g(GuideAction::Day(Weekday::Mon));
+    assert_eq!(s.stage(), GuideStage::Intro);
+    s.g(GuideAction::Variant(RoutineVariant::Standing));
+    s.g(GuideAction::Done);
+    s.g(GuideAction::Done);
+    s.g(GuideAction::Done);
+    let sess = s.sessions();
+    assert_eq!(
+        (sess[0].1.as_str(), sess[0].3),
+        ("mon", RoutineOutcome::Done)
+    );
+}
+
+#[test]
+fn guide_closed_waits_behind_the_pet_and_holds_every_reminder() {
+    let mut h = H::only(true, true, false);
+    h.wait(mins(15));
+    h.input(Input::RoutineStarted);
+    h.g(GuideAction::Variant(RoutineVariant::Seated));
+    h.g(GuideAction::Done);
+    h.input(Input::CloseBubble);
+    assert_eq!(h.view().bubble, None);
+    assert!(!h.guide().open);
+    assert_eq!(h.view().pet, PetMode::Exercise);
+    // Eye rest falls due at 10:20; nothing appears while the routine waits.
+    h.wait(mins(10));
+    assert_eq!(h.view().bubble, None);
+    assert!(h.offers().is_empty());
+    // A click on the pet brings the routine back at the same movement.
+    h.input(Input::OpenPending);
+    assert_eq!(h.stage(), GuideStage::Step { index: 1, total: 3 });
+    assert!(matches!(h.view().bubble, Some(Bubble::MovementGuide(_))));
+    h.g(GuideAction::Done);
+    h.g(GuideAction::Done);
+    // One at a time: the result, then the eye-rest reminder only after the calm gap.
+    h.g(GuideAction::Close);
+    assert_eq!(h.wait_until(mins(10), |v| v.reminder().is_some()), CALM_GAP);
+    assert_eq!(h.shown(), Some(Activity::EyeRest));
+}
+
+#[test]
+fn guide_result_card_keeps_the_bubble_until_it_closes_then_the_calm_gap_follows() {
+    let mut h = H::only(true, true, false);
+    h.wait(mins(15));
+    h.input(Input::RoutineStarted);
+    h.g(GuideAction::Variant(RoutineVariant::Seated));
+    h.wait(mins(10));
+    h.g(GuideAction::Done);
+    h.g(GuideAction::Done);
+    h.g(GuideAction::Done);
+    assert!(matches!(h.stage(), GuideStage::Result { .. }));
+    // The result stays a minute; the eye-rest reminder waits for the calm gap.
+    assert_eq!(h.wait_until(mins(10), |v| v.reminder().is_some()), CALM_GAP);
+    assert_eq!(h.view().guide, None);
+}
+
+#[test]
+fn guide_ended_by_a_new_hold_keeps_answered_movements_as_a_stop() {
+    for hold in [
+        NewHold::Lock,
+        NewHold::Suspend,
+        NewHold::Pause,
+        NewHold::OffHours,
+    ] {
+        let mut h = guided(RoutineVariant::Seated);
+        h.g(GuideAction::Done);
+        start_hold(&mut h, hold);
+        let s = h.sessions();
+        assert_eq!(s.len(), 1, "{hold:?}");
+        assert_eq!((s[0].3, s[0].4, s[0].5), (RoutineOutcome::Partial, 1, 0));
+        // No result card, and nothing comes back when the hold ends.
+        assert_eq!(h.view().guide, None, "{hold:?}");
+        assert_eq!(h.status(Activity::Movement), ChipStatus::Partial);
+        end_hold(&mut h, hold);
+        assert_eq!(h.view().guide, None);
+        assert!(h.view().reminder().is_none());
+    }
+}
+
+#[test]
+fn guide_ended_by_a_new_hold_before_any_answer_records_nothing() {
+    let holds = [
+        Input::Lock,
+        Input::SetMeeting(true),
+        Input::StartFocus {
+            minutes: 30,
+            replace_pomodoro: false,
+        },
+    ];
+    for hold in holds {
+        let mut h = guided(RoutineVariant::Seated);
+        h.input(hold.clone());
+        assert!(h.sessions().is_empty(), "{hold:?}");
+        assert!(h.steps().is_empty());
+        assert_eq!(h.view().guide, None);
+        // As before: a routine started from a reminder that ends unanswered is "none
+        // recorded", with the timer kept.
+        assert_eq!(h.status(Activity::Movement), ChipStatus::NoneRecorded);
+        assert!(h.accum(Activity::Movement) >= mins(45));
+    }
+}
+
+#[test]
+fn guide_opened_during_a_meeting_stays_for_that_meeting_only() {
+    let mut h = H::only(true, false, false);
+    h.input(Input::SetMeeting(true));
+    h.input(Input::RoutineStarted);
+    h.g(GuideAction::Variant(RoutineVariant::Seated));
+    h.wait(mins(1));
+    assert_eq!(h.stage(), GuideStage::Step { index: 0, total: 3 });
+    h.input(Input::SetMeeting(false));
+    h.g(GuideAction::Done);
+    assert_eq!(h.stage(), GuideStage::Step { index: 1, total: 3 });
+    // The meeting ended; starting it again is a new hold.
+    h.input(Input::SetMeeting(true));
+    assert_eq!(h.view().guide, None);
+    assert_eq!(h.sessions()[0].3, RoutineOutcome::Partial);
+}
+
+#[test]
+fn guide_ends_after_thirty_minutes_keeping_answered_movements() {
+    let mut h = guided(RoutineVariant::Seated);
+    h.g(GuideAction::Done);
+    h.g(GuideAction::Done);
+    h.wait(mins(29));
+    assert_eq!(h.stage(), GuideStage::Step { index: 2, total: 3 });
+    h.wait(mins(1));
+    assert_eq!(h.view().guide, None);
+    let s = h.sessions();
+    assert_eq!((s[0].3, s[0].4), (RoutineOutcome::Partial, 2));
+    assert_eq!(h.status(Activity::Movement), ChipStatus::Partial);
+}
+
+#[test]
+fn guide_restart_mid_routine_keeps_answered_movements_and_a_fresh_one_restarts_cleanly() {
+    let mut h = guided(RoutineVariant::Standing);
+    h.g(GuideAction::Done);
+    let out = h.restart(mins(1));
+    assert_eq!(
+        out.events
+            .iter()
+            .filter(|e| matches!(e.payload, EventPayload::MovementSession { .. }))
+            .count(),
+        1
+    );
+    let s = h.sessions();
+    assert_eq!((s[0].3, s[0].4), (RoutineOutcome::Partial, 1));
+    assert_eq!(h.view().guide, None);
+    assert_eq!(h.status(Activity::Movement), ChipStatus::Partial);
+
+    // Nothing answered: nothing recorded, "none recorded" as before.
+    let mut n = guided(RoutineVariant::Standing);
+    n.restart(mins(1));
+    assert!(n.sessions().is_empty());
+    assert_eq!(n.status(Activity::Movement), ChipStatus::NoneRecorded);
+    // A new routine gets a new id.
+    n.wait(mins(5));
+    n.input(Input::RoutineStarted);
+    n.g(GuideAction::Variant(RoutineVariant::Seated));
+    n.g(GuideAction::Done);
+    let mut m = guided(RoutineVariant::Standing);
+    m.g(GuideAction::Done);
+    assert_ne!(n.steps()[0].0, Uuid::nil());
+}
+
+#[test]
+fn guide_is_ended_by_starting_a_pomodoro_and_the_quick_report_replaces_it() {
+    let mut h = guided(RoutineVariant::Seated);
+    h.g(GuideAction::Done);
+    h.input(Input::StartPomodoro {
+        preset: PomodoroPreset::Classic,
+        replace_focus: false,
+        resume_coaching: false,
+    });
+    assert_eq!(h.view().guide, None);
+    assert_eq!(h.sessions()[0].3, RoutineOutcome::Partial);
+
+    // The quick report (no steps) closes the guide without a routine record.
+    let mut q = H::only(true, false, false);
+    q.wait_until(mins(50), |v| v.reminder().is_some());
+    let offer = q.offer();
+    q.respond(Response::Start);
+    q.input(Input::RoutineFinished {
+        offer: Some(offer),
+        outcome: RoutineOutcome::Done,
+    });
+    assert_eq!(q.view().guide, None);
+    assert!(q.sessions().is_empty());
+    assert_eq!(q.status(Activity::Movement), ChipStatus::Done);
+}
+
+#[test]
+fn guide_actions_without_a_guide_or_on_the_wrong_screen_change_nothing() {
+    let mut h = H::only(true, false, false);
+    assert_eq!(
+        h.g(GuideAction::Done).outcome,
+        InputOutcome::Ignored("no movement guide")
+    );
+    h.input(Input::RoutineStarted);
+    for a in [
+        GuideAction::Done,
+        GuideAction::Skip,
+        GuideAction::Stop,
+        GuideAction::Back,
+    ] {
+        assert!(matches!(h.g(a).outcome, InputOutcome::Ignored(_)), "{a:?}");
+    }
+    h.g(GuideAction::Variant(RoutineVariant::Seated));
+    for a in [
+        GuideAction::Later,
+        GuideAction::SkipToday,
+        GuideAction::OtherDay,
+        GuideAction::Close,
+    ] {
+        assert!(matches!(h.g(a).outcome, InputOutcome::Ignored(_)), "{a:?}");
+    }
+    assert!(h.steps().is_empty());
+    assert_eq!(h.stage(), GuideStage::Step { index: 0, total: 3 });
+    // A second routine cannot start over the first.
+    assert!(matches!(
+        h.input(Input::RoutineStarted).outcome,
+        InputOutcome::Ignored(_)
+    ));
+}
+
+#[test]
+fn guide_is_hidden_with_the_pet_during_a_presentation() {
+    let mut h = guided(RoutineVariant::Seated);
+    h.g(GuideAction::Done);
+    h.input(Input::PresentationChanged(true));
+    assert_eq!(h.view().bubble, None);
+    assert_eq!(h.view().guide, None);
+    assert_eq!(h.sessions()[0].3, RoutineOutcome::Partial);
 }
 
 #[test]
@@ -2019,6 +2635,421 @@ fn long_day_check_in_waits_for_focus_to_end() {
     assert_eq!(h.view().bubble, Some(Bubble::LongDayCheckIn { hours: 9 }));
 }
 
+// ------------------------------------------------- deadline day and recovery day
+
+impl H {
+    fn check_ins(&self) -> Vec<(CheckInOrigin, CheckInReply)> {
+        self.events
+            .iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::RecoveryCheckIn { origin, answer } => Some((origin, answer)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn plan_changes(&self) -> Vec<(NaiveDate, PlanChange)> {
+        self.events
+            .iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::RecoveryPlanChanged { plan_date, change } => {
+                    Some((plan_date, change))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn reflections(&self) -> Vec<ReflectionAnswer> {
+        self.events
+            .iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::RecoveryReflection { answer } => Some(answer),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn rec(&mut self, a: RecoveryAction) -> StepOutput {
+        self.input(Input::Recovery(a))
+    }
+}
+
+fn oct(d: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(2026, 10, d).unwrap()
+}
+
+/// No reminders and no long-day check-in, so only the recovery cards appear.
+fn quiet_config() -> CoachConfig {
+    CoachConfig {
+        long_day_check_in: LongDayCheckIn {
+            enabled: false,
+            hours: 9,
+        },
+        ..cats(false, false, false)
+    }
+}
+
+#[test]
+fn long_day_check_in_yes_is_recorded_and_invites_a_recovery_day() {
+    let mut h = long_day(LongDayCheckIn::default());
+    h.wait_until(mins(9 * 60 + 5), |v| v.bubble.is_some());
+    h.input(Input::CheckIn(CheckInAnswer::Yes));
+    assert_eq!(
+        h.check_ins(),
+        vec![(CheckInOrigin::LongDay, CheckInReply::Yes)]
+    );
+    assert!(h.view().recovery.marked_today);
+    // After hours, the invitation follows the answer (the user is there to see it).
+    assert_eq!(
+        h.view().bubble,
+        Some(Bubble::RecoveryInvite { next: oct(21) })
+    );
+    h.rec(RecoveryAction::PlanFor(oct(21)));
+    let plan = h.view().recovery.plan.unwrap();
+    assert_eq!(plan.date, oct(21));
+    assert_eq!(
+        (plan.walk_at, plan.finish_at),
+        (Some(hm(16, 0)), Some(hm(18, 30)))
+    );
+    assert_eq!(h.view().bubble, Some(Bubble::RecoveryPlanned { plan }));
+    assert_eq!(h.plan_changes(), vec![(oct(21), PlanChange::Saved)]);
+    h.rec(RecoveryAction::Ok);
+    assert_eq!(h.view().bubble, None);
+}
+
+#[test]
+fn long_day_check_in_no_and_dont_ask_today_are_recorded_and_ask_nothing_more() {
+    for (answer, reply) in [
+        (CheckInAnswer::No, CheckInReply::No),
+        (CheckInAnswer::DontAskToday, CheckInReply::DontAskToday),
+    ] {
+        let mut h = long_day(LongDayCheckIn::default());
+        h.wait_until(mins(9 * 60 + 5), |v| v.bubble.is_some());
+        h.input(Input::CheckIn(answer));
+        assert_eq!(h.check_ins(), vec![(CheckInOrigin::LongDay, reply)]);
+        assert!(!h.view().recovery.marked_today);
+        assert_eq!(h.view().recovery.plan, None);
+        h.wait(mins(180));
+        assert_eq!(h.view().bubble, None);
+        assert_eq!(h.check_ins().len(), 1);
+    }
+}
+
+#[test]
+fn deadline_day_from_the_menu_marks_today_and_plans_a_chosen_date() {
+    let mut h = H::at(ist(20, 15, 0), quiet_config(), WaterSnapshot::default());
+    assert!(h.view().recovery.can_open);
+    h.input(Input::DeadlineDay);
+    assert_eq!(h.view().bubble, Some(Bubble::DeadlineDay));
+    assert!(!h.view().recovery.can_open);
+    h.input(Input::CheckIn(CheckInAnswer::Yes));
+    assert_eq!(
+        h.check_ins(),
+        vec![(CheckInOrigin::Menu, CheckInReply::Yes)]
+    );
+    assert!(
+        h.notices
+            .iter()
+            .any(|(_, n)| *n == Notice::DeadlineDayConfirmed(oct(20)))
+    );
+    assert_eq!(
+        h.view().bubble,
+        Some(Bubble::RecoveryInvite { next: oct(21) })
+    );
+    h.rec(RecoveryAction::ChooseDate);
+    // The next working days after the first suggestion (Sunday is not a workday).
+    assert_eq!(
+        h.view().bubble,
+        Some(Bubble::RecoveryDates {
+            dates: [Some(oct(22)), Some(oct(23)), Some(oct(24)), Some(oct(26))]
+        })
+    );
+    h.rec(RecoveryAction::PlanFor(oct(24)));
+    assert!(matches!(
+        h.view().bubble,
+        Some(Bubble::RecoveryPlanned { plan }) if plan.date == oct(24)
+    ));
+    h.rec(RecoveryAction::Ok);
+    // Already marked with a plan pending: the menu shows the planned day again.
+    h.input(Input::DeadlineDay);
+    assert!(matches!(
+        h.view().bubble,
+        Some(Bubble::RecoveryPlanned { .. })
+    ));
+    h.input(Input::CloseBubble);
+    h.rec(RecoveryAction::ShowPlan);
+    assert!(matches!(
+        h.view().bubble,
+        Some(Bubble::RecoveryPlanned { .. })
+    ));
+    h.rec(RecoveryAction::CancelPlan);
+    assert_eq!(h.view().bubble, None);
+    assert_eq!(h.view().recovery.plan, None);
+    assert_eq!(
+        h.plan_changes(),
+        vec![
+            (oct(24), PlanChange::Saved),
+            (oct(24), PlanChange::Cancelled)
+        ]
+    );
+    // Marked, no plan: the invitation again ("Plan a recovery day").
+    h.wait(CALM_GAP);
+    h.input(Input::DeadlineDay);
+    assert!(matches!(
+        h.view().bubble,
+        Some(Bubble::RecoveryInvite { .. })
+    ));
+    h.rec(RecoveryAction::NoThanks);
+    assert_eq!(h.view().bubble, None);
+    assert_eq!(h.check_ins().len(), 1);
+}
+
+#[test]
+fn deadline_day_no_and_later_change_nothing() {
+    let mut h = H::at(ist(20, 15, 0), quiet_config(), WaterSnapshot::default());
+    h.input(Input::DeadlineDay);
+    h.input(Input::CheckIn(CheckInAnswer::No));
+    assert_eq!(h.check_ins(), vec![(CheckInOrigin::Menu, CheckInReply::No)]);
+    assert!(!h.view().recovery.marked_today);
+    assert_eq!(h.view().bubble, None);
+    h.input(Input::DeadlineDay);
+    h.input(Input::CheckIn(CheckInAnswer::Yes));
+    h.rec(RecoveryAction::Later);
+    assert_eq!(h.view().bubble, None);
+    assert!(h.view().recovery.marked_today);
+    assert!(h.plan_changes().is_empty());
+}
+
+#[test]
+fn deadline_day_waits_for_a_free_bubble_and_follows_the_one_at_a_time_rule() {
+    let mut h = H::only(true, false, false);
+    h.wait_until(mins(50), |v| v.reminder().is_some());
+    assert_eq!(
+        h.input(Input::DeadlineDay).outcome,
+        InputOutcome::Ignored("another card is open")
+    );
+    h.respond(Response::Skip);
+    // Asked for: it opens at once, even inside the calm gap.
+    h.input(Input::DeadlineDay);
+    assert_eq!(h.view().bubble, Some(Bubble::DeadlineDay));
+    // No reminder while the card is open.
+    h.input(Input::CheckIn(CheckInAnswer::Yes));
+    h.wait(mins(5));
+    assert!(matches!(
+        h.view().bubble,
+        Some(Bubble::RecoveryInvite { .. })
+    ));
+    assert_eq!(h.offers().len(), 1);
+    // Unanswered, the invitation closes quietly after 10 minutes, recording nothing.
+    h.wait(mins(5));
+    assert_eq!(h.view().bubble, None);
+    assert!(h.plan_changes().is_empty());
+    // Recovery answers with no card open are ignored.
+    assert!(matches!(
+        h.rec(RecoveryAction::PlanFor(oct(21))).outcome,
+        InputOutcome::Ignored(_)
+    ));
+    assert!(matches!(
+        h.input(Input::CheckIn(CheckInAnswer::Yes)).outcome,
+        InputOutcome::Ignored(_)
+    ));
+}
+
+#[test]
+fn deadline_day_card_stays_in_a_meeting_and_a_new_hold_withdraws_it() {
+    let mut h = H::at(ist(20, 15, 0), quiet_config(), WaterSnapshot::default());
+    h.input(Input::SetMeeting(true));
+    h.input(Input::DeadlineDay);
+    h.wait(mins(2));
+    assert_eq!(h.view().bubble, Some(Bubble::DeadlineDay));
+    h.input(Input::Lock);
+    assert_eq!(h.view().bubble, None);
+    h.step(secs(30), Input::Unlock);
+    assert_eq!(h.view().bubble, None);
+    assert!(h.check_ins().is_empty());
+}
+
+#[test]
+fn plan_dates_are_after_today_and_within_thirty_days() {
+    let mut h = H::at(ist(20, 15, 0), quiet_config(), WaterSnapshot::default());
+    let mut plan = RecoveryPlan::default_for(oct(20), &h.schedule, &h.zone);
+    assert!(matches!(
+        h.rec(RecoveryAction::SavePlan(plan)).outcome,
+        InputOutcome::Invalid(_)
+    ));
+    plan.date = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
+    assert!(matches!(
+        h.rec(RecoveryAction::SavePlan(plan)).outcome,
+        InputOutcome::Invalid(_)
+    ));
+    plan.date = oct(22);
+    assert_eq!(
+        h.rec(RecoveryAction::SavePlan(plan)).outcome,
+        InputOutcome::Applied
+    );
+    // One pending plan: a new date replaces it.
+    plan.date = oct(23);
+    h.rec(RecoveryAction::SavePlan(plan));
+    assert_eq!(h.view().recovery.plan.unwrap().date, oct(23));
+    assert_eq!(
+        h.plan_changes(),
+        vec![
+            (oct(22), PlanChange::Saved),
+            (oct(22), PlanChange::Cancelled),
+            (oct(23), PlanChange::Saved)
+        ]
+    );
+    assert!(h.e.recovery_plan().is_some());
+}
+
+/// Plan Wednesday 21 Oct from Tuesday evening (with `plan`'s items), sleep overnight and
+/// wake at 09:00 on the recovery day.
+fn recovery_day(config: CoachConfig, edit: impl FnOnce(&mut RecoveryPlan)) -> H {
+    let mut h = H::at(ist(20, 17, 0), config, WaterSnapshot::default());
+    let mut plan = RecoveryPlan::default_for(oct(21), &h.schedule, &h.zone);
+    edit(&mut plan);
+    assert_eq!(
+        h.rec(RecoveryAction::SavePlan(plan)).outcome,
+        InputOutcome::Applied
+    );
+    h.input(Input::Suspend);
+    h.step(mins(16 * 60), Input::Resume);
+    assert_eq!((h.today(), h.local()), (oct(21), hm(9, 0)));
+    assert!(h.view().recovery.recovery_day);
+    h.tick = secs(30);
+    h
+}
+
+#[test]
+fn recovery_day_morning_card_walk_and_end_of_day_question() {
+    let mut h = recovery_day(quiet_config(), |_| {});
+    h.water.goal_ml = Some(2000);
+    // The morning card, once, after the calm gap that follows the start of work hours.
+    h.wait_until(mins(40), |v| v.bubble.is_some());
+    assert_eq!(h.local(), hm(9, 35));
+    let plan = h.view().recovery.plan.unwrap();
+    assert_eq!(
+        h.view().bubble,
+        Some(Bubble::RecoveryMorning {
+            plan,
+            water_goal_ml: Some(2000)
+        })
+    );
+    h.rec(RecoveryAction::Ok);
+    // The walk suggestion at 16:00, once (no repeat chosen).
+    h.wait_until(mins(7 * 60), |v| v.bubble.is_some());
+    assert_eq!(
+        (h.local(), h.view().bubble),
+        (hm(16, 0), Some(Bubble::RecoveryWalk))
+    );
+    h.rec(RecoveryAction::WalkNotNow);
+    // The end-of-day question after the planned finish (18:30), once.
+    h.wait_until(mins(3 * 60), |v| v.bubble.is_some());
+    assert_eq!(
+        (h.local(), h.view().bubble),
+        (hm(18, 30), Some(Bubble::RecoveryReflection))
+    );
+    h.rec(RecoveryAction::Reflect(Reflection::Somewhat));
+    assert_eq!(h.reflections(), vec![ReflectionAnswer::Somewhat]);
+    h.wait(mins(5 * 60));
+    assert_eq!(h.view().bubble, None);
+    // The next day the plan is over; nothing is carried over.
+    h.wait(mins(60));
+    assert_eq!(h.today(), oct(22));
+    assert_eq!(h.view().recovery.plan, None);
+    assert!(!h.view().recovery.recovery_day);
+}
+
+#[test]
+fn recovery_day_skipping_the_question_records_nothing_and_cards_close_unanswered() {
+    let mut h = recovery_day(quiet_config(), |_| {});
+    h.wait_until(mins(40), |v| v.bubble.is_some());
+    // Unanswered, the morning card closes after 10 minutes and is not shown again.
+    h.wait(mins(10));
+    assert_eq!(h.view().bubble, None);
+    h.wait_until(mins(9 * 60), |v| {
+        v.bubble == Some(Bubble::RecoveryReflection)
+    });
+    h.rec(RecoveryAction::Reflect(Reflection::Skip));
+    assert!(h.reflections().is_empty());
+}
+
+#[test]
+fn recovery_day_breaks_come_a_step_more_often_and_water_is_unchanged() {
+    let mut h = recovery_day(cats(true, false, false), |_| {});
+    h.wait_until(mins(40), |v| v.bubble.is_some());
+    h.rec(RecoveryAction::Ok);
+    // Balanced is 45 minutes; on the recovery day movement comes every 30.
+    h.wait_until(mins(60), |v| v.reminder().is_some());
+    assert_eq!(h.local(), hm(10, 0));
+
+    let mut off = recovery_day(cats(true, false, false), |p| p.more_breaks = false);
+    off.wait_until(mins(40), |v| v.bubble.is_some());
+    off.rec(RecoveryAction::Ok);
+    off.wait_until(mins(60), |v| v.reminder().is_some());
+    assert_eq!(off.local(), hm(10, 15));
+}
+
+#[test]
+fn recovery_walk_repeats_every_ninety_minutes_and_a_held_one_is_not_replayed() {
+    let mut h = recovery_day(quiet_config(), |p| {
+        p.walk_at = Some(hm(11, 0));
+        p.walk_repeat = true;
+        p.reflection = false;
+    });
+    h.wait_until(mins(40), |v| v.bubble.is_some());
+    h.rec(RecoveryAction::Ok);
+    let mut walks = Vec::new();
+    // A meeting covers the 12:30 suggestion.
+    while h.local() < hm(18, 40) {
+        if h.local() == hm(12, 25) {
+            h.input(Input::SetMeeting(true));
+        }
+        if h.local() == hm(12, 45) {
+            h.input(Input::SetMeeting(false));
+        }
+        if h.view().bubble == Some(Bubble::RecoveryWalk) {
+            walks.push(h.local());
+            h.rec(RecoveryAction::WalkNow);
+        }
+        h.wait(h.tick);
+    }
+    // 11:00, (12:30 held), 14:00, 15:30, 17:00; none at or after the 18:30 finish.
+    assert_eq!(walks, vec![hm(11, 0), hm(14, 0), hm(15, 30), hm(17, 0)]);
+}
+
+#[test]
+fn recovery_day_cancelled_on_the_day_stops_its_cards() {
+    let mut h = recovery_day(quiet_config(), |_| {});
+    h.wait_until(mins(40), |v| v.bubble.is_some());
+    h.rec(RecoveryAction::CancelPlan);
+    assert_eq!(h.view().bubble, None);
+    assert_eq!(
+        h.plan_changes().last(),
+        Some(&(oct(21), PlanChange::Cancelled))
+    );
+    h.wait(mins(10 * 60));
+    assert_eq!(h.view().bubble, None);
+}
+
+#[test]
+fn recovery_plan_and_marks_survive_a_restart() {
+    let mut h = H::at(ist(20, 15, 0), quiet_config(), WaterSnapshot::default());
+    h.input(Input::DeadlineDay);
+    h.input(Input::CheckIn(CheckInAnswer::Yes));
+    h.rec(RecoveryAction::PlanFor(oct(21)));
+    let state = h.e.state().clone();
+    let json = serde_json::to_string(&state).unwrap();
+    let back: EngineState = serde_json::from_str(&json).unwrap();
+    h.e = Engine::from_state(back).unwrap();
+    h.restart(mins(1));
+    // The open card closes at the restart; the mark and the plan stay.
+    assert_eq!(h.view().bubble, None);
+    assert!(h.view().recovery.marked_today);
+    assert_eq!(h.view().recovery.plan.unwrap().date, oct(21));
+}
+
 // ---------------------------------------------------------- property: invariants
 
 mod property {
@@ -2056,6 +3087,10 @@ mod property {
         Lighter(bool),
         MarkBreak,
         ShowPet,
+        Guide(u8),
+        DeadlineDay,
+        Recovery(u8),
+        Restart(u16),
     }
 
     fn act() -> impl Strategy<Value = Act> {
@@ -2092,6 +3127,10 @@ mod property {
             1 => any::<bool>().prop_map(Act::Lighter),
             1 => Just(Act::MarkBreak),
             1 => Just(Act::ShowPet),
+            6 => (0u8..10).prop_map(Act::Guide),
+            1 => Just(Act::DeadlineDay),
+            3 => (0u8..9).prop_map(Act::Recovery),
+            1 => (0u16..30).prop_map(Act::Restart),
         ]
     }
 
@@ -2143,6 +3182,10 @@ mod property {
         /// Pomodoro, keyed by phase and round.
         user_card: Option<(PomodoroPhase, u32)>,
         prev_holds: SeenHolds,
+        /// Guided routines with a recorded result.
+        sessions: HashSet<Uuid>,
+        /// Answers recorded for each guided routine, in order.
+        steps: HashMap<Uuid, Vec<StepOutcome>>,
     }
 
     impl Checker {
@@ -2243,7 +3286,56 @@ mod property {
                         prop_assert_eq!(self.offered.get(&reminder_id), Some(&activity));
                         prop_assert!(self.answered.insert(reminder_id), "two responses");
                     }
+                    // A routine's answers come in order, each once, and never after its
+                    // result; its result is recorded once and matches its answers.
+                    EventPayload::MovementStep {
+                        session_id,
+                        step_index,
+                        outcome,
+                        ..
+                    } => {
+                        prop_assert!(!self.sessions.contains(&session_id), "step after result");
+                        let s = self.steps.entry(session_id).or_default();
+                        prop_assert_eq!(step_index as usize, s.len(), "steps out of order");
+                        s.push(outcome);
+                    }
+                    EventPayload::MovementSession {
+                        session_id,
+                        outcome,
+                        steps_done,
+                        steps_skipped,
+                        steps_total,
+                        ..
+                    } => {
+                        prop_assert!(self.sessions.insert(session_id), "two results");
+                        let s = self.steps.get(&session_id).cloned().unwrap_or_default();
+                        let done = s.iter().filter(|o| **o == StepOutcome::Done).count() as u32;
+                        let skipped = s.len() as u32 - done;
+                        prop_assert_eq!((steps_done, steps_skipped), (done, skipped));
+                        let ok = match outcome {
+                            RoutineOutcome::Done => done == steps_total,
+                            RoutineOutcome::Partial => done > 0 && done < steps_total,
+                            RoutineOutcome::None => done == 0,
+                            RoutineOutcome::Skipped => s.is_empty(),
+                        };
+                        prop_assert!(ok, "{:?} with {} done, {} skipped", outcome, done, skipped);
+                    }
                     _ => {}
+                }
+            }
+            // The guide is the one bubble while it runs: nothing else is offered and it
+            // holds reminders back like an exercise.
+            if let Some(g) = v.guide {
+                prop_assert!(v.reminder().is_none(), "reminder over the guide");
+                if !matches!(g.stage, GuideStage::Result { .. }) {
+                    prop_assert!(v.hold.is_some(), "running guide without a hold");
+                }
+                if g.open && v.visible {
+                    prop_assert!(
+                        matches!(v.bubble, Some(Bubble::MovementGuide(_))),
+                        "guide open but bubble {:?}",
+                        v.bubble
+                    );
                 }
             }
             if let Some((offer, a)) = v.reminder() {
@@ -2364,6 +3456,39 @@ mod property {
             Act::Lighter(b) => h.input(Input::LighterSchedule { accept: b }),
             Act::MarkBreak => h.input(Input::MarkBreak),
             Act::ShowPet => h.input(Input::ShowPet),
+            Act::Guide(k) => h.input(Input::Guide(match k {
+                0 => GuideAction::Variant(RoutineVariant::Seated),
+                1 => GuideAction::Variant(RoutineVariant::Standing),
+                2 | 3 => GuideAction::Done,
+                4 => GuideAction::Skip,
+                5 => GuideAction::Stop,
+                6 => GuideAction::Later,
+                7 => GuideAction::SkipToday,
+                8 => GuideAction::OtherDay,
+                _ => GuideAction::Day(Weekday::Thu),
+            })),
+            Act::DeadlineDay => h.input(Input::DeadlineDay),
+            Act::Recovery(k) => {
+                let tomorrow = h.today().succ_opt().unwrap();
+                h.input(Input::Recovery(match k {
+                    0 => RecoveryAction::PlanFor(tomorrow),
+                    1 => RecoveryAction::ChooseDate,
+                    2 => RecoveryAction::Later,
+                    3 => RecoveryAction::Ok,
+                    4 => RecoveryAction::CancelPlan,
+                    5 => RecoveryAction::WalkNow,
+                    6 => RecoveryAction::Reflect(Reflection::Yes),
+                    7 => RecoveryAction::ShowPlan,
+                    _ => RecoveryAction::NoThanks,
+                }))
+            }
+            Act::Restart(m) => {
+                // The restart closes what was open at the moment the app stopped, before
+                // the time it was closed.
+                let out = h.restart(mins(u64::from(m)));
+                let at = h.e.engine_time().saturating_sub(mins(u64::from(m)));
+                return vec![(at, out, off_hours(h))];
+            }
         };
         vec![(h.e.engine_time(), one, off_hours(h))]
     }
@@ -2398,6 +3523,8 @@ mod property {
                 prev_away: false,
                 user_card: None,
                 prev_holds: SeenHolds::default(),
+                sessions: HashSet::new(),
+                steps: HashMap::new(),
             };
             c.prev_holds = SeenHolds::of(h.view(), off_hours(&h));
             for e in h.events.clone() {
