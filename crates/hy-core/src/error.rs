@@ -34,6 +34,11 @@ pub enum Error {
     #[error("upload blocked: {0}")]
     UploadBlocked(String),
 
+    /// A write was based on state that another writer has since replaced (for example a
+    /// coaching-engine step committed against an older revision). Nothing was written.
+    #[error("stale: {0}")]
+    Stale(String),
+
     /// The database was written by a newer build whose schema this build cannot use.
     #[error(
         "database schema v{found} needs a reader of at least v{required_reader}; this build supports up to v{supported}"

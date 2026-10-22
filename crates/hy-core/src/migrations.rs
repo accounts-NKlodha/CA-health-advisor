@@ -54,12 +54,20 @@ impl Migration {
 }
 
 /// The migrations shipped in this build, in order.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial",
-    sql: include_str!("../migrations/0001_initial.sql"),
-    compat: Compat::Contract,
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial",
+        sql: include_str!("../migrations/0001_initial.sql"),
+        compat: Compat::Contract,
+    },
+    Migration {
+        version: 2,
+        name: "coach",
+        sql: include_str!("../migrations/0002_coach.sql"),
+        compat: Compat::Expand,
+    },
+];
 
 /// The schema version this build writes.
 #[must_use]
@@ -318,6 +326,7 @@ mod tests {
     /// of slice V1-0); after that, if this test fails, a released migration was edited:
     /// add a new migration instead.
     const V1_CHECKSUM: &str = "94477528e439b81e";
+    const V2_CHECKSUM: &str = "6d0b8382cc44f5c6";
 
     fn mem() -> Connection {
         Connection::open_in_memory().unwrap()
@@ -377,6 +386,8 @@ mod tests {
     #[test]
     fn released_migrations_are_frozen() {
         assert_eq!(MIGRATIONS[0].checksum(), V1_CHECKSUM);
+        assert_eq!(MIGRATIONS[1].checksum(), V2_CHECKSUM);
+        assert_eq!(MIGRATIONS[1].compat, Compat::Expand);
     }
 
     #[test]
@@ -412,6 +423,8 @@ mod tests {
             "consent_log",
             "outbox",
             "schema_migrations",
+            "coach_state",
+            "activity_day",
         ] {
             assert!(table_exists(&conn, t), "missing table {t}");
         }
