@@ -43,7 +43,11 @@ fn water_total(store: &Store, d: NaiveDate) -> u32 {
 
 fn enable(store: &mut Store, c: Category, share_from: NaiveDate) {
     let op = store.request_enable(c, "notice-1").unwrap();
-    store.accept_enable(op, 1, share_from).unwrap();
+    let next_seq = store.sharing_policy(c).unwrap().seq + 1;
+    assert_eq!(
+        store.accept_enable(op, next_seq, share_from).unwrap(),
+        EnableOutcome::Applied
+    );
 }
 
 // ------------------------------------------------------------------ opening
@@ -1057,6 +1061,248 @@ fn schema_triggers_guard_the_queue_even_without_this_api() {
     );
 }
 
+// ------------------------------- operation order and response freshness
+
+fn file_store(path: &std::path::Path, clock: &Arc<ManualClock>) -> Store {
+    Store::open(path, clock.clone()).unwrap()
+}
+
+fn assert_off_and_nothing_queued(s: &mut Store, c: Category, d: NaiveDate) {
+    assert!(
+        !s.sharing_policy(c).unwrap().enabled,
+        "sharing must stay off"
+    );
+    assert!(s.outbox().unwrap().is_empty(), "nothing may be queued");
+    assert!(matches!(
+        s.enqueue_upload(c, d, 1, &json!({"ml": 1})),
+        Err(Error::UploadBlocked(_))
+    ));
+    assert!(s.outbox().unwrap().is_empty());
+}
+
+#[test]
+fn old_enable_cannot_reenable_after_restart_with_clock_rollback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hy.db");
+    let clock = Arc::new(ManualClock::new(start()));
+    let today = date(2026, 10, 21);
+    let enable_op = {
+        let mut s = file_store(&path, &clock);
+        s.request_enable(Category::Hydration, "notice-1").unwrap()
+    };
+    // The PC restarts with its clock set back an hour, then the user switches off.
+    clock.shift_wall(Duration::hours(-1));
+    let mut s = file_store(&path, &clock);
+    let disable_op = s.disable_sharing(Category::Hydration).unwrap();
+    // The identifiers now sort the wrong way round; the durable order does not.
+    assert!(
+        disable_op < enable_op,
+        "wall-time ids are misordered by the rollback"
+    );
+    let (e, d) = (
+        s.policy_op(enable_op).unwrap().unwrap(),
+        s.policy_op(disable_op).unwrap().unwrap(),
+    );
+    assert!(d.local_seq > e.local_seq);
+    // The old acceptance arrives.
+    assert_eq!(
+        s.accept_enable(enable_op, 1, today).unwrap(),
+        EnableOutcome::SupersededByLocalDisable
+    );
+    assert_off_and_nothing_queued(&mut s, Category::Hydration, today);
+    // Still off after another restart.
+    drop(s);
+    let mut s = file_store(&path, &clock);
+    assert_off_and_nothing_queued(&mut s, Category::Hydration, today);
+}
+
+#[test]
+fn old_enable_cannot_reenable_after_same_millisecond_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hy.db");
+    let clock = Arc::new(ManualClock::new(start())); // never advanced
+    let today = date(2026, 10, 21);
+    let enable_op = {
+        let mut s = file_store(&path, &clock);
+        s.request_enable(Category::Outcomes, "notice-1").unwrap()
+    };
+    let mut s = file_store(&path, &clock);
+    s.disable_sharing(Category::Outcomes).unwrap();
+    assert_eq!(
+        s.accept_enable(enable_op, 1, today).unwrap(),
+        EnableOutcome::SupersededByLocalDisable
+    );
+    assert_off_and_nothing_queued(&mut s, Category::Outcomes, today);
+}
+
+#[test]
+fn enable_requested_after_a_disable_is_applied_despite_clock_rollback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hy.db");
+    let clock = Arc::new(ManualClock::new(start()));
+    {
+        let mut s = file_store(&path, &clock);
+        s.disable_sharing(Category::Hydration).unwrap();
+    }
+    clock.shift_wall(Duration::hours(-3));
+    let mut s = file_store(&path, &clock);
+    let op = s.request_enable(Category::Hydration, "notice-1").unwrap();
+    assert_eq!(
+        s.accept_enable(op, 1, date(2026, 10, 21)).unwrap(),
+        EnableOutcome::Applied
+    );
+    assert!(s.sharing_policy(Category::Hydration).unwrap().enabled);
+}
+
+#[test]
+fn policy_op_order_is_durable_across_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hy.db");
+    let clock = Arc::new(ManualClock::new(start()));
+    let mut seqs = Vec::new();
+    for round in 0..3 {
+        let mut s = file_store(&path, &clock);
+        let a = s.request_enable(Category::Hydration, "notice-1").unwrap();
+        let b = s.disable_sharing(Category::PhoneReports).unwrap();
+        seqs.push(s.policy_op(a).unwrap().unwrap().local_seq);
+        seqs.push(s.policy_op(b).unwrap().unwrap().local_seq);
+        clock.shift_wall(Duration::minutes(-10 * (round + 1)));
+    }
+    assert_eq!(seqs, vec![1, 2, 3, 4, 5, 6]);
+}
+
+#[test]
+fn a_failed_operation_does_not_consume_an_order_number() {
+    let (mut s, _) = store();
+    s.conn
+        .execute_batch(
+            "CREATE TEMP TRIGGER fail_consent BEFORE INSERT ON consent_log
+             BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+        )
+        .unwrap();
+    assert!(s.request_enable(Category::Hydration, "notice-1").is_err());
+    s.conn
+        .execute_batch("DROP TRIGGER temp.fail_consent")
+        .unwrap();
+    let op = s.request_enable(Category::Hydration, "notice-1").unwrap();
+    assert_eq!(s.policy_op(op).unwrap().unwrap().local_seq, 1);
+}
+
+#[test]
+fn out_of_order_enable_responses_never_roll_back_policy() {
+    let (mut s, clock) = store();
+    let older = s.request_enable(Category::Hydration, "notice-1").unwrap();
+    clock.advance(Duration::minutes(1));
+    let newer = s.request_enable(Category::Hydration, "notice-1").unwrap();
+    // The server sequenced them 10 and 20; the responses arrive newest first.
+    assert_eq!(
+        s.accept_enable(newer, 20, date(2026, 10, 22)).unwrap(),
+        EnableOutcome::Applied
+    );
+    assert_eq!(
+        s.accept_enable(older, 10, date(2026, 10, 1)).unwrap(),
+        EnableOutcome::StaleResponse
+    );
+    let p = s.sharing_policy(Category::Hydration).unwrap();
+    assert!(p.enabled);
+    assert_eq!(p.seq, 20);
+    assert_eq!(p.share_from, Some(date(2026, 10, 22)));
+    // The older acknowledgement is recorded on its operation all the same.
+    let o = s.policy_op(older).unwrap().unwrap();
+    assert_eq!((o.state, o.server_seq), (PolicyOpState::Accepted, Some(10)));
+    // Dates before the newer share_from stay blocked.
+    for d in [date(2026, 10, 1), date(2026, 10, 15), date(2026, 10, 21)] {
+        assert_eq!(
+            s.upload_block(Category::Hydration, d).unwrap(),
+            Some(UploadBlock::BeforeShareFrom),
+            "{d}"
+        );
+        assert!(matches!(
+            s.enqueue_upload(Category::Hydration, d, 1, &json!({"ml": 1})),
+            Err(Error::UploadBlocked(_))
+        ));
+    }
+    assert!(s.outbox().unwrap().is_empty());
+    s.enqueue_upload(
+        Category::Hydration,
+        date(2026, 10, 22),
+        1,
+        &json!({"ml": 1}),
+    )
+    .unwrap();
+    // Only one "enabled" consent entry and one sharing event were written.
+    let enabled = s
+        .consent_log()
+        .unwrap()
+        .iter()
+        .filter(|c| c.kind == ConsentKind::Enabled)
+        .count();
+    assert_eq!(enabled, 1);
+}
+
+#[test]
+fn in_order_enable_responses_move_share_from_forward() {
+    let (mut s, clock) = store();
+    let older = s.request_enable(Category::Hydration, "notice-1").unwrap();
+    clock.advance(Duration::minutes(1));
+    let newer = s.request_enable(Category::Hydration, "notice-1").unwrap();
+    assert_eq!(
+        s.accept_enable(older, 10, date(2026, 10, 1)).unwrap(),
+        EnableOutcome::Applied
+    );
+    s.enqueue_upload(
+        Category::Hydration,
+        date(2026, 10, 15),
+        1,
+        &json!({"ml": 1}),
+    )
+    .unwrap();
+    assert_eq!(
+        s.accept_enable(newer, 20, date(2026, 10, 22)).unwrap(),
+        EnableOutcome::Applied
+    );
+    let p = s.sharing_policy(Category::Hydration).unwrap();
+    assert_eq!((p.seq, p.share_from), (20, Some(date(2026, 10, 22))));
+    assert!(
+        s.outbox().unwrap().is_empty(),
+        "records before the new share_from are discarded"
+    );
+}
+
+#[test]
+fn a_response_with_an_already_applied_seq_is_stale() {
+    let (mut s, clock) = store();
+    let a = s.request_enable(Category::WorkSession, "notice-1").unwrap();
+    clock.advance(Duration::seconds(1));
+    let b = s.request_enable(Category::WorkSession, "notice-1").unwrap();
+    s.accept_enable(a, 7, date(2026, 10, 20)).unwrap();
+    assert_eq!(
+        s.accept_enable(b, 7, date(2026, 10, 1)).unwrap(),
+        EnableOutcome::StaleResponse
+    );
+    assert_eq!(
+        s.sharing_policy(Category::WorkSession).unwrap().share_from,
+        Some(date(2026, 10, 20))
+    );
+}
+
+#[test]
+fn a_stale_response_cannot_reenable_after_a_disable() {
+    let (mut s, clock) = store();
+    let a = s.request_enable(Category::Hydration, "notice-1").unwrap();
+    let b = s.request_enable(Category::Hydration, "notice-1").unwrap();
+    s.accept_enable(b, 20, date(2026, 10, 22)).unwrap();
+    clock.advance(Duration::seconds(1));
+    s.disable_sharing(Category::Hydration).unwrap();
+    assert_eq!(
+        s.accept_enable(a, 10, date(2026, 10, 1)).unwrap(),
+        EnableOutcome::StaleResponse
+    );
+    let p = s.sharing_policy(Category::Hydration).unwrap();
+    assert!(!p.enabled);
+    assert_eq!((p.seq, p.share_from), (20, Some(date(2026, 10, 22))));
+}
+
 // --------------------------------------------------------------- retention
 
 #[test]
@@ -1108,4 +1354,137 @@ fn prune_applies_retention_and_keeps_corrections_consistent() {
     assert_eq!(s.monthly_summaries(Category::Hydration).unwrap().len(), 1);
     // Pruning again removes nothing.
     assert_eq!(s.prune(today).unwrap(), PruneReport::default());
+}
+
+/// Water totals for every date from `from` to `to`.
+fn totals(s: &Store, from: NaiveDate, to: NaiveDate) -> Vec<(NaiveDate, u32)> {
+    from.iter_days()
+        .take_while(|d| *d <= to)
+        .map(|d| (d, water_total(s, d)))
+        .collect()
+}
+
+/// Prune and check that every kept date's current view is unchanged.
+fn prune_preserves_current_view(s: &mut Store) {
+    let today = date(2026, 10, 21);
+    let cutoff = date(2026, 7, 23); // today minus 90 days: the oldest kept date
+    let before = totals(s, cutoff, today);
+    let current_before: Vec<Vec<Uuid>> = cutoff
+        .iter_days()
+        .take_while(|d| *d <= today)
+        .map(|d| {
+            s.current_events_on(d)
+                .unwrap()
+                .iter()
+                .map(|e| e.id)
+                .collect()
+        })
+        .collect();
+    s.prune(today).unwrap();
+    assert_eq!(
+        totals(s, cutoff, today),
+        before,
+        "totals changed on a kept date"
+    );
+    let current_after: Vec<Vec<Uuid>> = cutoff
+        .iter_days()
+        .take_while(|d| *d <= today)
+        .map(|d| {
+            s.current_events_on(d)
+                .unwrap()
+                .iter()
+                .map(|e| e.id)
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        current_after, current_before,
+        "current view changed on a kept date"
+    );
+    assert!(
+        s.events_on(date(2026, 7, 22)).unwrap().is_empty(),
+        "expired date kept"
+    );
+}
+
+fn expired_time() -> DateTime<Utc> {
+    start() - Duration::days(91) // 22 Jul 2026, expired
+}
+
+fn kept_time() -> DateTime<Utc> {
+    start() - Duration::days(90) // 23 Jul 2026, the oldest kept date
+}
+
+#[test]
+fn prune_does_not_resurrect_an_entry_whose_correction_moved_it_earlier() {
+    let (mut s, _) = store();
+    let a = s.append_event(water(250).at(kept_time())).unwrap();
+    let b = s
+        .append_event(water(300).superseding(a.id).at(expired_time()))
+        .unwrap();
+    assert_eq!(b.local_date, date(2026, 7, 22));
+    assert_eq!(water_total(&s, a.local_date), 0);
+    prune_preserves_current_view(&mut s);
+    assert_eq!(
+        water_total(&s, a.local_date),
+        0,
+        "the corrected entry came back"
+    );
+    assert!(s.event(a.id).unwrap().is_none());
+    assert!(s.event(b.id).unwrap().is_none());
+}
+
+#[test]
+fn prune_keeps_a_correction_that_moved_an_entry_later() {
+    let (mut s, _) = store();
+    let a = s.append_event(water(250).at(expired_time())).unwrap();
+    let b = s
+        .append_event(water(400).superseding(a.id).at(kept_time()))
+        .unwrap();
+    prune_preserves_current_view(&mut s);
+    assert_eq!(water_total(&s, b.local_date), 400);
+    assert_eq!(s.event(b.id).unwrap().unwrap().supersedes, None);
+}
+
+#[test]
+fn prune_is_chain_safe_for_repeated_corrections_and_retractions() {
+    let (mut s, _) = store();
+    let later = kept_time() + Duration::days(1);
+    // Kept, then corrected onto an expired date, then corrected back onto a kept date.
+    let a1 = s.append_event(water(100).at(kept_time())).unwrap();
+    let a2 = s
+        .append_event(water(200).superseding(a1.id).at(expired_time()))
+        .unwrap();
+    let a3 = s
+        .append_event(water(300).superseding(a2.id).at(later))
+        .unwrap();
+    // Kept, corrected onto an expired date, then retracted there.
+    let b1 = s.append_event(water(150).at(later)).unwrap();
+    let b2 = s
+        .append_event(water(175).superseding(b1.id).at(expired_time()))
+        .unwrap();
+    s.append_event(NewEvent::manual(EventPayload::EntryRetracted {}).superseding(b2.id))
+        .unwrap();
+    // A chain entirely inside the kept window, with an undo.
+    let c1 = s.append_event(water(500).at(later)).unwrap();
+    let c2 = s.append_event(water(450).superseding(c1.id)).unwrap();
+    let c3 = s.append_event(water(425).superseding(c2.id)).unwrap();
+    let d1 = s.append_event(water(50).at(later)).unwrap();
+    s.append_event(NewEvent::manual(EventPayload::EntryRetracted {}).superseding(d1.id))
+        .unwrap();
+    // A plain kept entry and a plain expired one.
+    s.append_event(water(75).at(kept_time())).unwrap();
+    s.append_event(water(999).at(expired_time())).unwrap();
+    assert_eq!(water_total(&s, later.date_naive()), 300 + 425);
+
+    prune_preserves_current_view(&mut s);
+
+    assert_eq!(water_total(&s, a3.local_date), 300 + 425);
+    assert_eq!(water_total(&s, kept_time().date_naive()), 75);
+    assert!(s.event(a1.id).unwrap().is_none() && s.event(b1.id).unwrap().is_none());
+    // The fully kept chain keeps its whole history.
+    for id in [c1.id, c2.id, c3.id] {
+        assert!(s.event(id).unwrap().is_some());
+    }
+    assert_eq!(s.event(a3.id).unwrap().unwrap().supersedes, None);
 }

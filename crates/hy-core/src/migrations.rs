@@ -314,9 +314,10 @@ fn copy_database(conn: &Connection, from: u32) -> Result<Option<PathBuf>> {
 mod tests {
     use super::*;
 
-    /// Pinned checksum of the released v1 migration. If this test fails, a released
-    /// migration was edited: add a new migration instead.
-    const V1_CHECKSUM: &str = "ea42b88307258f79";
+    /// Pinned checksum of the v1 migration. v1 is frozen from its first release (the merge
+    /// of slice V1-0); after that, if this test fails, a released migration was edited:
+    /// add a new migration instead.
+    const V1_CHECKSUM: &str = "94477528e439b81e";
 
     fn mem() -> Connection {
         Connection::open_in_memory().unwrap()

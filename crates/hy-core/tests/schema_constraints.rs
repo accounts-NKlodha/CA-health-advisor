@@ -449,20 +449,78 @@ fn sharing_policy_and_operation_checks() {
         .is_err()
     );
     assert!(exec(&conn, "UPDATE sharing_policy SET seq = -1").is_err());
-    let op = |kind: &str, state: &str, seq: Option<i64>| {
+    let op = |id: &str, local_seq: i64, kind: &str, state: &str, seq: Option<i64>| {
         conn.execute(
-            "INSERT INTO policy_ops VALUES (?1, 'hydration', ?2, 0, ?3, ?4, 0, 0)",
-            params![ID1, kind, state, seq],
+            "INSERT INTO policy_ops VALUES (?1, ?2, 'hydration', ?3, 0, ?4, ?5, 0, 0)",
+            params![id, local_seq, kind, state, seq],
         )
     };
-    assert!(op("toggle", "pending", None).is_err());
-    assert!(op("enable", "done", None).is_err());
+    assert!(op(ID1, 1, "toggle", "pending", None).is_err());
+    assert!(op(ID1, 1, "enable", "done", None).is_err());
     assert!(
-        op("enable", "accepted", None).is_err(),
+        op(ID1, 1, "enable", "accepted", None).is_err(),
         "accepted needs a server seq"
     );
-    assert!(op("enable", "accepted", Some(0)).is_err());
-    op("enable", "accepted", Some(3)).unwrap();
+    assert!(op(ID1, 1, "enable", "accepted", Some(0)).is_err());
+    assert!(
+        op(ID1, 0, "enable", "pending", None).is_err(),
+        "local order starts at 1"
+    );
+    op(ID1, 1, "enable", "accepted", Some(3)).unwrap();
+    assert!(
+        op(ID2, 1, "disable", "pending", None).is_err(),
+        "local order is unique"
+    );
+    // The local order and identity of an operation never change; its state can.
+    assert!(exec(&conn, "UPDATE policy_ops SET local_seq = 9").is_err());
+    assert!(exec(&conn, "UPDATE policy_ops SET kind = 'disable'").is_err());
+    exec(
+        &conn,
+        "UPDATE policy_ops SET state = 'accepted', server_seq = 4",
+    )
+    .unwrap();
+}
+
+#[test]
+fn policy_operation_counter_only_increases() {
+    let conn = db();
+    let value = |conn: &Connection| -> String {
+        conn.query_row(
+            "SELECT value FROM store_meta WHERE key = 'policy_op_seq'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(value(&conn), "0");
+    exec(
+        &conn,
+        "UPDATE store_meta SET value = '5' WHERE key = 'policy_op_seq'",
+    )
+    .unwrap();
+    assert!(
+        exec(
+            &conn,
+            "UPDATE store_meta SET value = '4' WHERE key = 'policy_op_seq'"
+        )
+        .is_err()
+    );
+    assert!(
+        exec(
+            &conn,
+            "UPDATE store_meta SET value = '5' WHERE key = 'policy_op_seq'"
+        )
+        .is_err()
+    );
+    assert!(
+        exec(
+            &conn,
+            "UPDATE store_meta SET key = 'other' WHERE key = 'policy_op_seq'"
+        )
+        .is_err()
+    );
+    assert!(exec(&conn, "DELETE FROM store_meta WHERE key = 'policy_op_seq'").is_err());
+    assert_eq!(value(&conn), "5");
 }
 
 #[test]

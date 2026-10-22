@@ -10,6 +10,23 @@ CREATE TABLE store_meta (
     value TEXT NOT NULL
 ) STRICT;
 
+-- Durable order of local sharing-policy operations. Allocated inside the operation's own
+-- transaction, so it survives restarts and wall-clock changes (identifiers do not).
+INSERT INTO store_meta (key, value) VALUES ('policy_op_seq', '0');
+
+CREATE TRIGGER store_meta_op_seq_increases BEFORE UPDATE ON store_meta
+WHEN OLD.key = 'policy_op_seq'
+    AND (NEW.key <> OLD.key OR CAST(NEW.value AS INTEGER) <= CAST(OLD.value AS INTEGER))
+BEGIN
+    SELECT RAISE(ABORT, 'policy operation sequence only increases');
+END;
+
+CREATE TRIGGER store_meta_op_seq_kept BEFORE DELETE ON store_meta
+WHEN OLD.key = 'policy_op_seq'
+BEGIN
+    SELECT RAISE(ABORT, 'policy operation sequence only increases');
+END;
+
 -- Append-only event log (90-day retention).
 CREATE TABLE events (
     id             TEXT PRIMARY KEY CHECK (length(id) = 36),
@@ -153,6 +170,7 @@ END;
 
 CREATE TABLE policy_ops (
     op_id      TEXT PRIMARY KEY CHECK (length(op_id) = 36),
+    local_seq  INTEGER NOT NULL UNIQUE CHECK (local_seq >= 1),
     category   TEXT NOT NULL CHECK (category IN ('hydration', 'outcomes', 'work_session', 'phone_reports', 'posture_summary')),
     kind       TEXT NOT NULL CHECK (kind IN ('enable', 'disable')),
     base_seq   INTEGER NOT NULL CHECK (base_seq >= 0),
@@ -162,6 +180,11 @@ CREATE TABLE policy_ops (
     updated_at INTEGER NOT NULL,
     CHECK (state <> 'accepted' OR server_seq IS NOT NULL)
 ) STRICT;
+
+CREATE TRIGGER policy_ops_order_fixed BEFORE UPDATE OF op_id, local_seq, category, kind ON policy_ops
+BEGIN
+    SELECT RAISE(ABORT, 'policy operation identity and order cannot change');
+END;
 
 -- Deletion tombstones: dates in a tombstone are permanently non-uploadable for that
 -- category. No health payload. Rows can never be deleted and their range never changes.

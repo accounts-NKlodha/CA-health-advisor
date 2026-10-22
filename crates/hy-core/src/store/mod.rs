@@ -246,6 +246,9 @@ pub struct PolicyState {
 pub struct PolicyOp {
     /// Idempotency key.
     pub op_id: Uuid,
+    /// Durable local order: later user actions have higher numbers, across restarts and
+    /// wall-clock changes.
+    pub local_seq: u64,
     /// The category.
     pub category: Category,
     /// Enable or disable.
@@ -280,6 +283,18 @@ pub enum UploadBlock {
     BeforeShareFrom,
     /// The date is inside a deletion tombstone.
     Tombstoned,
+}
+
+/// What [`Store::accept_enable`] did with a server acknowledgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnableOutcome {
+    /// The category is now on from the response's `share_from`.
+    Applied,
+    /// The user switched the category off after asking, so it stays off.
+    SupersededByLocalDisable,
+    /// A response with the same or a higher server seq was already applied; the policy
+    /// is unchanged.
+    StaleResponse,
 }
 
 /// A queued upload record.
@@ -520,6 +535,37 @@ fn insert_event(conn: &Connection, e: EventInsert<'_>) -> Result<Event> {
         origin_device: e.origin_device,
         payload: e.new.payload.clone(),
     })
+}
+
+/// Allocate the next durable local operation number inside the caller's transaction.
+fn next_policy_op_seq(tx: &Connection) -> Result<i64> {
+    Ok(tx.query_row(
+        "UPDATE store_meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+         WHERE key = 'policy_op_seq' RETURNING CAST(value AS INTEGER)",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+fn load_policy_op(conn: &Connection, op_id: Uuid) -> Result<Option<PolicyOp>> {
+    let row: Option<(i64, Category, PolicyOpKind, i64, PolicyOpState, Option<i64>)> = conn
+        .query_row(
+            "SELECT local_seq, category, kind, base_seq, state, server_seq FROM policy_ops WHERE op_id = ?1",
+            [op_id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        )
+        .optional()?;
+    Ok(row.map(
+        |(local_seq, category, kind, base_seq, state, server_seq)| PolicyOp {
+            op_id,
+            local_seq: u64::try_from(local_seq).unwrap_or(0),
+            category,
+            kind,
+            base_seq: u64::try_from(base_seq).unwrap_or(0),
+            state,
+            server_seq: server_seq.and_then(|s| u64::try_from(s).ok()),
+        },
+    ))
 }
 
 fn sharing_event(
@@ -1108,24 +1154,7 @@ impl Store {
     /// # Errors
     /// [`Error::Sqlite`] on a read failure.
     pub fn policy_op(&self, op_id: Uuid) -> Result<Option<PolicyOp>> {
-        let row: Option<(Category, PolicyOpKind, i64, PolicyOpState, Option<i64>)> = self
-            .conn
-            .query_row(
-                "SELECT category, kind, base_seq, state, server_seq FROM policy_ops WHERE op_id = ?1",
-                [op_id.to_string()],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .optional()?;
-        Ok(
-            row.map(|(category, kind, base_seq, state, server_seq)| PolicyOp {
-                op_id,
-                category,
-                kind,
-                base_seq: u64::try_from(base_seq).unwrap_or(0),
-                state,
-                server_seq: server_seq.and_then(|s| u64::try_from(s).ok()),
-            }),
-        )
+        load_policy_op(&self.conn, op_id)
     }
 
     /// Switch sharing off for a category. Always accepted and effective at once, even
@@ -1147,9 +1176,15 @@ impl Store {
         )?;
         let op_id = self.ids.next(now);
         tx.execute(
-            "INSERT INTO policy_ops (op_id, category, kind, base_seq, state, server_seq, created_at, updated_at)
-             VALUES (?1, ?2, 'disable', ?3, 'pending', NULL, ?4, ?4)",
-            params![op_id.to_string(), category, i64::try_from(policy.seq).unwrap_or(i64::MAX), to_ms(now)],
+            "INSERT INTO policy_ops (op_id, local_seq, category, kind, base_seq, state, server_seq, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'disable', ?4, 'pending', NULL, ?5, ?5)",
+            params![
+                op_id.to_string(),
+                next_policy_op_seq(&tx)?,
+                category,
+                i64::try_from(policy.seq).unwrap_or(i64::MAX),
+                to_ms(now)
+            ],
         )?;
         insert_consent(
             &tx,
@@ -1177,9 +1212,15 @@ impl Store {
         let policy = read_policy(&tx, category)?;
         let op_id = self.ids.next(now);
         tx.execute(
-            "INSERT INTO policy_ops (op_id, category, kind, base_seq, state, server_seq, created_at, updated_at)
-             VALUES (?1, ?2, 'enable', ?3, 'pending', NULL, ?4, ?4)",
-            params![op_id.to_string(), category, i64::try_from(policy.seq).unwrap_or(i64::MAX), to_ms(now)],
+            "INSERT INTO policy_ops (op_id, local_seq, category, kind, base_seq, state, server_seq, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'enable', ?4, 'pending', NULL, ?5, ?5)",
+            params![
+                op_id.to_string(),
+                next_policy_op_seq(&tx)?,
+                category,
+                i64::try_from(policy.seq).unwrap_or(i64::MAX),
+                to_ms(now)
+            ],
         )?;
         insert_consent(
             &tx,
@@ -1201,26 +1242,25 @@ impl Store {
         Ok(op_id)
     }
 
-    /// Record the server's acceptance of an enable: the category turns on from
-    /// `share_from`. If the user switched the category off after asking, the operation is
-    /// marked accepted but the category stays off.
+    /// Record the server's acceptance of an enable.
+    ///
+    /// The acknowledgement is always recorded on the operation, but it changes the policy
+    /// only if it is fresh:
+    /// - if the user switched the category off after asking (a disable with a higher
+    ///   durable [`PolicyOp::local_seq`]), the category stays off;
+    /// - if a response with the same or a higher server seq was already applied, this
+    ///   older response changes nothing (no `enabled`, `share_from` or `seq` rollback).
     ///
     /// # Errors
     /// [`Error::NotFound`] if the operation does not exist; [`Error::Invalid`] if it is not
-    /// a pending enable.
+    /// a pending enable or the seq is 0.
     pub fn accept_enable(
         &mut self,
         op_id: Uuid,
         server_seq: u64,
         share_from: NaiveDate,
-    ) -> Result<()> {
+    ) -> Result<EnableOutcome> {
         let now = self.clock.now();
-        let op = self
-            .policy_op(op_id)?
-            .ok_or_else(|| Error::NotFound(format!("policy op {op_id}")))?;
-        if op.kind != PolicyOpKind::Enable || op.state != PolicyOpState::Pending {
-            return Err(Error::invalid("only a pending enable can be accepted"));
-        }
         let seq = i64::try_from(server_seq).map_err(|_| Error::invalid("server seq too large"))?;
         if seq < 1 {
             return Err(Error::invalid("server seq starts at 1"));
@@ -1228,38 +1268,56 @@ impl Store {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let op = load_policy_op(&tx, op_id)?
+            .ok_or_else(|| Error::NotFound(format!("policy op {op_id}")))?;
+        if op.kind != PolicyOpKind::Enable || op.state != PolicyOpState::Pending {
+            return Err(Error::invalid("only a pending enable can be accepted"));
+        }
+        let policy = read_policy(&tx, op.category)?;
         tx.execute(
             "UPDATE policy_ops SET state = 'accepted', server_seq = ?2, updated_at = ?3 WHERE op_id = ?1",
             params![op_id.to_string(), seq, to_ms(now)],
         )?;
-        // Identifiers are UUIDv7, so text order is creation order.
         let disabled_since: bool = tx.query_row(
             "SELECT EXISTS (SELECT 1 FROM policy_ops
-             WHERE category = ?1 AND kind = 'disable' AND op_id > ?2)",
-            params![op.category, op_id.to_string()],
+             WHERE category = ?1 AND kind = 'disable' AND local_seq > ?2)",
+            params![op.category, i64::try_from(op.local_seq).unwrap_or(i64::MAX)],
             |r| r.get(0),
         )?;
-        tx.execute(
-            "UPDATE sharing_policy SET seq = MAX(seq, ?2), updated_at = ?3 WHERE category = ?1",
-            params![op.category, seq, to_ms(now)],
-        )?;
-        if !disabled_since {
-            tx.execute(
-                "UPDATE sharing_policy SET enabled = 1, share_from = ?2 WHERE category = ?1",
-                params![op.category, date_text(share_from)],
-            )?;
-            insert_consent(
-                &tx,
-                now,
-                ConsentKind::Enabled,
-                Some(op.category),
-                None,
-                Some(op_id),
-            )?;
-            sharing_event(&tx, &self.ids, self.device_id, now, op.category, true)?;
+        let outcome = if server_seq <= policy.seq {
+            EnableOutcome::StaleResponse
+        } else if disabled_since {
+            EnableOutcome::SupersededByLocalDisable
+        } else {
+            EnableOutcome::Applied
+        };
+        match outcome {
+            EnableOutcome::StaleResponse => {}
+            EnableOutcome::SupersededByLocalDisable => {
+                tx.execute(
+                    "UPDATE sharing_policy SET seq = ?2, updated_at = ?3 WHERE category = ?1",
+                    params![op.category, seq, to_ms(now)],
+                )?;
+            }
+            EnableOutcome::Applied => {
+                tx.execute(
+                    "UPDATE sharing_policy SET enabled = 1, share_from = ?2, seq = ?3, updated_at = ?4
+                     WHERE category = ?1",
+                    params![op.category, date_text(share_from), seq, to_ms(now)],
+                )?;
+                insert_consent(
+                    &tx,
+                    now,
+                    ConsentKind::Enabled,
+                    Some(op.category),
+                    None,
+                    Some(op_id),
+                )?;
+                sharing_event(&tx, &self.ids, self.device_id, now, op.category, true)?;
+            }
         }
         tx.commit()?;
-        Ok(())
+        Ok(outcome)
     }
 
     /// Record a deletion of shared data for a date range. In one transaction the
@@ -1304,7 +1362,7 @@ impl Store {
     pub fn tombstones(&self, category: Category) -> Result<Vec<Tombstone>> {
         let mut stmt = self.conn.prepare(
             "SELECT request_id, from_date, to_date, state FROM tombstones
-             WHERE category = ?1 ORDER BY request_id",
+             WHERE category = ?1 ORDER BY rowid",
         )?;
         let rows = stmt
             .query_map([category], |r| {
@@ -1460,6 +1518,12 @@ impl Store {
     /// summaries older than 90 days before `today`, and monthly summaries older than 24
     /// months. Sharing state, tombstones and the consent log are not pruned here.
     ///
+    /// Event pruning is chain-safe. A correction can move an entry to another date, so an
+    /// expired correction may supersede a newer-dated entry. That superseded entry (and
+    /// anything it supersedes) is removed with it, early, rather than becoming current
+    /// again. [`Store::current_events_on`] therefore gives the same answer for every kept
+    /// date before and after pruning.
+    ///
     /// # Errors
     /// [`Error::Sqlite`] on a write failure, in which case nothing changed.
     pub fn prune(&mut self, today: NaiveDate) -> Result<PruneReport> {
@@ -1478,7 +1542,20 @@ impl Store {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let report = PruneReport {
-            events: tx.execute("DELETE FROM events WHERE local_date < ?1", [&day_cutoff])?,
+            // Chain-safe: an expired event takes every event it supersedes with it, however
+            // far back the chain goes. Those are all superseded history, so the current view
+            // never changes, and no corrected or retracted entry can become current again.
+            // Events that supersede an expired one stay current (their link is cleared).
+            events: tx.execute(
+                "WITH RECURSIVE expired(id) AS (
+                     SELECT id FROM events WHERE local_date < ?1
+                     UNION
+                     SELECT e.supersedes FROM events e JOIN expired x ON e.id = x.id
+                     WHERE e.supersedes IS NOT NULL
+                 )
+                 DELETE FROM events WHERE id IN (SELECT id FROM expired)",
+                [&day_cutoff],
+            )?,
             daily: tx.execute(
                 "DELETE FROM daily_summary WHERE local_date < ?1",
                 [&day_cutoff],
