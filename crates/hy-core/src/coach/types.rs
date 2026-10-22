@@ -101,7 +101,9 @@ pub enum Input {
     /// The bubble was closed without an answer (the x button or Escape).
     CloseBubble,
     /// The user clicked the pet while a reminder was waiting as a badge, or while a
-    /// Pomodoro card was pending: reopen it.
+    /// Pomodoro card was pending: reopen it. A Pomodoro card opened this way is shown even
+    /// under a pause, off-hours, focus or meeting hold, because the user asked for it; a
+    /// hold that starts later withdraws it.
     OpenPending,
     /// The movement guide was opened from the pet menu (not from a reminder).
     RoutineStarted,
@@ -335,6 +337,12 @@ pub enum Bubble {
         reason: ReminderReason,
     },
     /// "Break" card of a Pomodoro session; mentions water only if genuinely behind pace.
+    ///
+    /// The three Pomodoro cards never open by themselves under a hold above the Pomodoro
+    /// (pause, lock or sleep, off-hours, focus, presentation, meeting), and a hold that
+    /// starts withdraws an open one. They are not reopened when the hold ends; the phase is
+    /// kept in [`CoachView::pomodoro`] and the user can open the card with
+    /// [`Input::OpenPending`].
     PomodoroBreak {
         /// Break length.
         length: Duration,

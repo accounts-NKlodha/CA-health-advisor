@@ -205,6 +205,11 @@ struct Pomodoro {
     left_ms: u64,
     paused: Option<PomodoroPause>,
     card_open: bool,
+    /// The user opened the open card while a hold above the Pomodoro was already in
+    /// force (from the pet menu or the panel). Such a card stays until the user closes it
+    /// or that stretch of holds ends; any other card is withdrawn when a hold starts.
+    #[serde(default)]
+    card_opened_under_hold: bool,
 }
 
 /// The engine's complete saved state. Opaque; serialised by the driver into the store.
@@ -485,6 +490,14 @@ impl Engine {
                 .is_some_and(|o| matches!(o.phase, OfferPhase::InProgress { .. }))
     }
 
+    /// A hold above the Pomodoro (pause, lock, sleep, off-hours, focus, presentation or
+    /// meeting) is in force. Under it no Pomodoro card opens on its own and an open card
+    /// is withdrawn, unless the user opened it during this same stretch of holds. The
+    /// Pomodoro's phase is kept, so the panel and the pet menu still offer it.
+    fn pomodoro_card_held(&self, ctx: &Context) -> bool {
+        self.level1(ctx) || self.level2(ctx)
+    }
+
     /// The highest precedence level holding reminders back.
     fn hold(&self, ctx: &Context) -> Option<Hold> {
         if self.level1(ctx) {
@@ -752,7 +765,10 @@ impl Engine {
     }
 
     fn run_pomodoro(&mut self, ctx: &Context, out: &mut Out, e: u64) {
-        let visible = self.visible(ctx);
+        // A card opens on its own only when nothing above the Pomodoro holds it back; a
+        // card held back is not replayed when the hold ends (the pet still shows the
+        // phase, and the user can open it).
+        let visible = !self.pomodoro_card_held(ctx);
         let auto = ctx.config.pomodoro_auto_start;
         let Some(p) = self.s.pomodoro.as_mut() else {
             return;
@@ -768,9 +784,8 @@ impl Engine {
         match p.phase {
             PomodoroPhase::Work => {
                 p.phase = PomodoroPhase::BreakOffered;
-                // Shown only if the pet is visible now; during a presentation the card is
-                // not replayed afterwards (the pet's badge still says "Break time").
                 p.card_open = visible;
+                p.card_opened_under_hold = false;
                 out.notices.push(Notice::PomodoroRoundCounted);
                 let d = ctx.zone.local_date(ctx.wall);
                 self.s.days.entry(d).or_default().tally.pomodoro_rounds += 1;
@@ -785,6 +800,7 @@ impl Engine {
                 } else {
                     p.phase = PomodoroPhase::RoundDone;
                     p.card_open = visible;
+                    p.card_opened_under_hold = false;
                 }
             }
             PomodoroPhase::BreakOffered | PomodoroPhase::RoundDone => {}
@@ -828,11 +844,13 @@ impl Engine {
         self.s.away = None;
         self.s.idle_ms = 0;
         self.s.grace_until = self.s.now + ms(GRACE_AFTER_WAKE);
-        let visible = self.visible(ctx);
+        // The "paused while you were away" card, unless something else still holds.
+        let show = !self.pomodoro_card_held(ctx);
         if let Some(p) = self.s.pomodoro.as_mut()
             && p.paused == Some(PomodoroPause::LockOrSleep)
         {
-            p.card_open = visible;
+            p.card_open = show;
+            p.card_opened_under_hold = false;
         }
     }
 
@@ -1197,6 +1215,7 @@ impl Engine {
                 if !self.visible(ctx) {
                     return Ignored("the pet is hidden");
                 }
+                let held = self.pomodoro_card_held(ctx);
                 if let Some(o) = self.s.offer.as_mut()
                     && o.phase == OfferPhase::Waiting
                 {
@@ -1211,6 +1230,7 @@ impl Engine {
                     ) || p.paused == Some(PomodoroPause::LockOrSleep))
                 {
                     p.card_open = true;
+                    p.card_opened_under_hold = held;
                     Applied
                 } else {
                     Ignored("nothing waiting")
@@ -1345,6 +1365,7 @@ impl Engine {
                     left_ms: ms(work),
                     paused: None,
                     card_open: false,
+                    card_opened_under_hold: false,
                 });
                 Applied
             }
@@ -1395,6 +1416,8 @@ impl Engine {
             }
             Input::SkipPomodoroBreak => {
                 let auto = ctx.config.pomodoro_auto_start;
+                let held = self.pomodoro_card_held(ctx);
+                let visible = self.visible(ctx);
                 let Some(p) = self.s.pomodoro.as_mut() else {
                     return Ignored("no Pomodoro");
                 };
@@ -1407,8 +1430,11 @@ impl Engine {
                     p.left_ms = p.work_ms;
                     p.card_open = false;
                 } else {
+                    // The user acted: the next card answers them, even under a hold, but
+                    // only where they can see it (not while the pet is hidden).
                     p.phase = PomodoroPhase::RoundDone;
-                    p.card_open = true;
+                    p.card_open = visible;
+                    p.card_opened_under_hold = held;
                 }
                 Applied
             }
@@ -1467,6 +1493,20 @@ impl Engine {
         if self.s.prompt.is_some() && (self.prompt_blocked(ctx) || !self.visible(ctx)) {
             self.s.prompt = None;
             out.significant = true;
+        }
+        // A hold above the Pomodoro withdraws its card (break, round done, or paused while
+        // away) unless the user opened it during this stretch of holds. The phase stays;
+        // the card is not reopened when the hold ends.
+        let held = self.pomodoro_card_held(ctx);
+        if let Some(p) = self.s.pomodoro.as_mut()
+            && p.card_open
+        {
+            if held && !p.card_opened_under_hold {
+                p.card_open = false;
+                out.significant = true;
+            } else if !held {
+                p.card_opened_under_hold = false;
+            }
         }
         // End of a quiet period: nothing is replayed.
         let quiet = self.quiet_hold(ctx);
@@ -1715,7 +1755,11 @@ impl Engine {
                 Prompt::Lighter => Bubble::LighterSchedule,
             });
         }
-        let p = self.s.pomodoro.filter(|p| p.card_open)?;
+        let held = self.pomodoro_card_held(ctx);
+        let p = self
+            .s
+            .pomodoro
+            .filter(|p| p.card_open && (!held || p.card_opened_under_hold))?;
         if p.paused == Some(PomodoroPause::LockOrSleep) {
             return Some(Bubble::PomodoroPausedByLock);
         }

@@ -1482,6 +1482,210 @@ fn pomodoro_break_card_is_not_replayed_after_a_presentation() {
     ));
 }
 
+// ------------------------------------------------- Pomodoro cards under quiet holds
+
+fn classic_pomodoro(h: &mut H) {
+    h.input(Input::StartPomodoro {
+        preset: PomodoroPreset::Classic,
+        replace_focus: false,
+        resume_coaching: false,
+    });
+}
+
+fn is_pomodoro_card(b: Option<Bubble>) -> bool {
+    matches!(
+        b,
+        Some(
+            Bubble::PomodoroBreak { .. } | Bubble::PomodoroRoundDone | Bubble::PomodoroPausedByLock
+        )
+    )
+}
+
+#[test]
+fn pomodoro_break_due_during_a_meeting_opens_no_card_and_is_not_replayed() {
+    let mut h = H::new();
+    classic_pomodoro(&mut h);
+    h.wait(mins(20));
+    h.input(Input::SetMeeting(true));
+    h.wait(mins(10)); // the work phase ends at 10:25, inside the meeting
+    assert_eq!(h.view().hold, Some(Hold::FocusPresentationMeeting));
+    assert_eq!(h.view().pet, PetMode::Meeting);
+    assert_eq!(
+        h.view().pomodoro.unwrap().phase,
+        PomodoroPhase::BreakOffered
+    );
+    assert_eq!(h.view().bubble, None);
+    // The user may still open it on purpose during the meeting, and close it again.
+    h.input(Input::OpenPending);
+    assert!(matches!(
+        h.view().bubble,
+        Some(Bubble::PomodoroBreak { .. })
+    ));
+    h.wait(mins(1));
+    assert!(matches!(
+        h.view().bubble,
+        Some(Bubble::PomodoroBreak { .. })
+    ));
+    h.input(Input::CloseBubble);
+    h.wait(mins(5));
+    h.input(Input::SetMeeting(false));
+    // Nothing comes back when the meeting ends; the phase is kept for the user.
+    assert_eq!(h.view().bubble, None);
+    h.wait(mins(1));
+    assert!(!is_pomodoro_card(h.view().bubble));
+    assert_eq!(
+        h.view().pomodoro.unwrap().phase,
+        PomodoroPhase::BreakOffered
+    );
+    h.input(Input::OpenPending);
+    assert!(matches!(
+        h.view().bubble,
+        Some(Bubble::PomodoroBreak { .. })
+    ));
+}
+
+#[test]
+fn pomodoro_round_done_during_a_meeting_opens_no_card() {
+    let mut h = H::new();
+    h.input(Input::StartPomodoro {
+        preset: PomodoroPreset::Custom {
+            work_min: 10,
+            break_min: 5,
+        },
+        replace_focus: false,
+        resume_coaching: false,
+    });
+    h.wait(mins(10));
+    h.input(Input::StartPomodoroBreak);
+    h.input(Input::SetMeeting(true));
+    h.wait(mins(6));
+    assert_eq!(h.view().pomodoro.unwrap().phase, PomodoroPhase::RoundDone);
+    assert_eq!(h.view().bubble, None);
+    h.input(Input::SetMeeting(false));
+    assert_eq!(h.view().bubble, None);
+}
+
+#[test]
+fn pomodoro_break_due_after_hours_opens_no_card_and_is_not_replayed_next_morning() {
+    let mut h = H::at(
+        ist(20, 18, 15),
+        CoachConfig::default(),
+        WaterSnapshot::default(),
+    );
+    classic_pomodoro(&mut h);
+    h.wait(mins(25)); // ends at 18:40, after the 18:30 end of work hours
+    assert_eq!(h.view().hold, Some(Hold::PauseLockOffHours));
+    assert_eq!(
+        h.view().pomodoro.unwrap().phase,
+        PomodoroPhase::BreakOffered
+    );
+    assert_eq!(h.view().bubble, None);
+    // Through the night and into the next working morning, the card never opens itself.
+    h.tick = mins(1);
+    let start = h.today();
+    while h.today() == start || h.local() < hm(9, 45) {
+        h.wait(mins(1));
+        assert!(!is_pomodoro_card(h.view().bubble), "card at {}", h.local());
+    }
+    assert_ne!(h.view().hold, Some(Hold::PauseLockOffHours));
+}
+
+#[test]
+fn entering_pause_lock_or_meeting_withdraws_an_open_pomodoro_card_without_replay() {
+    #[derive(Debug, Clone, Copy)]
+    enum Q {
+        Pause,
+        Lock,
+        Meeting,
+    }
+    for card_is_round_done in [false, true] {
+        for q in [Q::Pause, Q::Lock, Q::Meeting] {
+            let mut h = H::new();
+            h.input(Input::StartPomodoro {
+                preset: PomodoroPreset::Custom {
+                    work_min: 10,
+                    break_min: 2,
+                },
+                replace_focus: false,
+                resume_coaching: false,
+            });
+            h.wait(mins(10));
+            if card_is_round_done {
+                h.input(Input::SkipPomodoroBreak);
+                assert_eq!(h.view().bubble, Some(Bubble::PomodoroRoundDone));
+            } else {
+                assert!(matches!(
+                    h.view().bubble,
+                    Some(Bubble::PomodoroBreak { .. })
+                ));
+            }
+            let phase = h.view().pomodoro.unwrap().phase;
+            let ctx = format!("{q:?}, round done {card_is_round_done}");
+            match q {
+                Q::Pause => h.input(Input::Pause(PauseLength::Minutes(30))),
+                Q::Lock => h.input(Input::Lock),
+                Q::Meeting => h.input(Input::SetMeeting(true)),
+            };
+            assert_eq!(h.view().bubble, None, "{ctx}: card withdrawn on entry");
+            h.wait(mins(5));
+            assert_eq!(h.view().bubble, None, "{ctx}: stays withdrawn");
+            assert_eq!(h.view().pomodoro.unwrap().phase, phase, "{ctx}: phase kept");
+            match q {
+                Q::Pause => h.input(Input::ResumeCoaching),
+                Q::Lock => h.input(Input::Unlock),
+                Q::Meeting => h.input(Input::SetMeeting(false)),
+            };
+            assert_eq!(h.view().bubble, None, "{ctx}: no replay on exit");
+            h.wait(mins(1));
+            assert!(!is_pomodoro_card(h.view().bubble), "{ctx}: no replay later");
+            // The phase is still there for the user to open on purpose.
+            h.input(Input::OpenPending);
+            assert!(is_pomodoro_card(h.view().bubble), "{ctx}: user can open it");
+        }
+    }
+}
+
+#[test]
+fn a_card_opened_on_purpose_is_withdrawn_by_a_new_hold() {
+    let mut h = H::new();
+    classic_pomodoro(&mut h);
+    h.wait(mins(20));
+    h.input(Input::SetMeeting(true));
+    h.wait(mins(10));
+    h.input(Input::OpenPending); // opened on purpose during the meeting
+    h.input(Input::SetMeeting(false)); // the card stays: the user asked for it
+    assert!(matches!(
+        h.view().bubble,
+        Some(Bubble::PomodoroBreak { .. })
+    ));
+    h.input(Input::Pause(PauseLength::Minutes(30))); // a new hold starts
+    assert_eq!(h.view().bubble, None);
+    h.input(Input::ResumeCoaching);
+    assert_eq!(h.view().bubble, None);
+}
+
+#[test]
+fn pomodoro_unlock_card_waits_for_no_other_hold() {
+    let mut h = H::new();
+    classic_pomodoro(&mut h);
+    h.wait(mins(10));
+    h.input(Input::SetMeeting(true));
+    h.input(Input::Lock);
+    h.step(secs(30), Input::Tick { idle: secs(30) });
+    h.input(Input::Unlock);
+    // Still in the meeting: the "paused while you were away" card does not open itself.
+    assert_eq!(h.view().bubble, None);
+    let p = h.view().pomodoro.unwrap();
+    assert_eq!(p.paused, Some(PomodoroPause::LockOrSleep));
+    h.input(Input::SetMeeting(false));
+    assert_eq!(h.view().bubble, None);
+    // The explicit resume path still works.
+    h.input(Input::OpenPending);
+    assert_eq!(h.view().bubble, Some(Bubble::PomodoroPausedByLock));
+    h.input(Input::ResumePomodoro);
+    assert_eq!(h.view().pomodoro.unwrap().paused, None);
+}
+
 // --------------------------------------------------------------- clock changes
 
 #[test]
@@ -1702,11 +1906,42 @@ mod property {
         last_wake: Option<Duration>,
         prev_bubble: Option<Bubble>,
         prev_away: bool,
+        /// A Pomodoro card the user opened during the current stretch of holds above the
+        /// Pomodoro, keyed by phase and round.
+        user_card: Option<(PomodoroPhase, u32)>,
     }
 
     impl Checker {
-        fn check(&mut self, now: Duration, out: &StepOutput) -> Result<(), TestCaseError> {
+        fn check(
+            &mut self,
+            now: Duration,
+            out: &StepOutput,
+            user_open: bool,
+        ) -> Result<(), TestCaseError> {
             let v = &out.view;
+            // No Pomodoro card under a hold above the Pomodoro unless the user opened it
+            // during this stretch of holds (entering a hold withdraws any open card).
+            let held = matches!(
+                v.hold,
+                Some(Hold::PauseLockOffHours | Hold::FocusPresentationMeeting)
+            );
+            let key = v.pomodoro.map(|p| (p.phase, p.round));
+            let card = super::is_pomodoro_card(v.bubble);
+            if !held {
+                self.user_card = None;
+            } else if user_open && card {
+                self.user_card = key;
+            } else if self.user_card != key {
+                self.user_card = None;
+            }
+            if held && card {
+                prop_assert!(
+                    self.user_card.is_some(),
+                    "unsolicited Pomodoro card {:?} under {:?}",
+                    v.bubble,
+                    v.hold
+                );
+            }
             // One bubble at most (by type), never while hidden.
             prop_assert!(v.bubble.is_none() || v.visible, "bubble while hidden");
             let busy = v
@@ -1886,7 +2121,8 @@ mod property {
         })]
 
         /// Never two visible, never a burst, calm gap, grace after wake, no replay after a
-        /// hold, one response per offer, and an answer changes only its own activity.
+        /// hold, one response per offer, an answer changes only its own activity, and no
+        /// Pomodoro card the user did not open under a hold above the Pomodoro.
         #[test]
         fn engine_invariants_hold_for_any_trace(
             acts in prop::collection::vec(act(), 1..160),
@@ -1904,6 +2140,7 @@ mod property {
                 last_wake: None,
                 prev_bubble: None,
                 prev_away: false,
+                user_card: None,
             };
             for e in h.events.clone() {
                 if let EventPayload::ReminderOffered { reminder_id, activity } = e.payload {
@@ -1914,8 +2151,9 @@ mod property {
             for a in &acts {
                 let shown = h.view().reminder().map(|(_, a)| a);
                 let before: Vec<_> = Activity::ALL.iter().map(|x| *h.e.activity(*x)).collect();
+                let user_open = matches!(a, Act::OpenPending | Act::PomoSkip);
                 for (now, out) in run(&mut h, a) {
-                    c.check(now, &out)?;
+                    c.check(now, &out, user_open)?;
                 }
                 if let (Act::Respond(_), Some(s)) = (a, shown) {
                     for (i, x) in Activity::ALL.iter().enumerate() {
