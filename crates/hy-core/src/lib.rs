@@ -10,11 +10,14 @@
 //! - [`migrations`]: the forward-only, checksummed, versioned migration runner;
 //! - [`store`]: the local SQLite store (architecture 6.1).
 //!
-//! Later slices add the coaching engine, tracker, reviews and sync on top of this crate.
+//! Slice V1-2 adds [`coach`]: the activity tracker, the coaching engine (one reminder at a
+//! time, suppression and precedence, focus, pause, meeting, presentation, Pomodoro) and
+//! its persistence. Later slices add reviews and sync on top of this crate.
 //! Pairing, the server link (certificate pin and token) and the signed receipt are not
 //! part of V1-0: they wait for the pairing security gate before V1-5.
 
 pub mod clock;
+pub mod coach;
 pub mod error;
 pub mod ids;
 pub mod migrations;

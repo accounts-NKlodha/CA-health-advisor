@@ -32,8 +32,11 @@ use crate::schema::{
 };
 use crate::time::{UserZone, WorkSchedule};
 
+mod coach;
 #[cfg(test)]
 mod tests;
+
+pub use coach::{ActivityDay, CoachCommit, SavedCoachState};
 
 /// Setting keys with typed accessors.
 pub mod keys {

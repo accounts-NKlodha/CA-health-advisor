@@ -39,7 +39,8 @@ mod tests {
     #[test]
     fn opens_a_store_headless() {
         let line = super::run().unwrap();
-        assert!(line.contains("schema v1"));
+        let schema = format!("schema v{}", hy_core::migrations::latest_version());
+        assert!(line.contains(&schema));
         assert!(line.contains("Asia/Kolkata"));
     }
 }
