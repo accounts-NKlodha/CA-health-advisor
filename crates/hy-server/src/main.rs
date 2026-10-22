@@ -23,6 +23,7 @@ mod tests {
     fn banner_names_the_slice() {
         let b = super::banner();
         assert!(b.contains("V1-5"));
-        assert!(b.contains("schema v1"));
+        let schema = format!("schema v{}", hy_core::migrations::latest_version());
+        assert!(b.contains(&schema));
     }
 }
