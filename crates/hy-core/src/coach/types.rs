@@ -12,14 +12,14 @@
 
 use std::time::Duration;
 
-use chrono::{NaiveDate, Weekday};
+use chrono::{NaiveDate, NaiveTime, Weekday};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::config::PomodoroPreset;
 use super::recovery::{RecoveryAction, RecoveryPlan, RecoveryView};
-use super::water::WaterPace;
-use crate::schema::{Activity, RoutineOutcome, RoutineVariant, SessionState};
+use super::water::{WaterEntry, WaterPace};
+use crate::schema::{Activity, PhoneLabel, RoutineOutcome, RoutineVariant, SessionState};
 
 /// How long the user paused coaching for (wireframe B5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +91,76 @@ pub enum GuideAction {
     Back,
     /// "OK" on the result.
     Close,
+}
+
+/// Water the user logged, corrected or looked at (wireframe B3, flow 2). The shell
+/// records an entry in the store first (an entry, a correction or a removal is a user
+/// event that supersedes the old one), then tells the engine, which shows the
+/// confirmation or the water panel in the one bubble.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaterInput {
+    /// Water was logged from the pet menu or the water panel and stored as `entry`. Shows
+    /// the quick confirmation ("Logged 250 ml, 750 / 2000 ml", Undo, Details); in the open
+    /// panel, the panel stays and lists it.
+    Logged {
+        /// The stored `water.logged` event.
+        entry: Uuid,
+        /// Amount, 1 to 2000 ml.
+        ml: u32,
+    },
+    /// Undo on the quick confirmation: its entry was removed.
+    Undone,
+    /// "Water..." on the pet menu or "Details" on the confirmation: the water panel.
+    OpenPanel,
+    /// "Edit" on one of today's entries in the panel.
+    Edit(Uuid),
+    /// "-50 ml" or "+50 ml" on the entry being edited in the panel.
+    StepEdit {
+        /// Up (+50 ml) or down (-50 ml).
+        up: bool,
+    },
+    /// "-50 ml" or "+50 ml" on the panel's other amount.
+    StepOther {
+        /// Up (+50 ml) or down (-50 ml).
+        up: bool,
+    },
+    /// "Cancel" on the entry being edited.
+    CancelEdit,
+    /// An entry in the panel was corrected ("Save") or removed ("Remove"); the store
+    /// already has the change.
+    Changed,
+}
+
+/// The phone interruption note (wireframe B8, DIS-01). As for water, the shell records
+/// the self-report first, then tells the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhoneInput {
+    /// "Phone interruption" on the pet menu: noted (unlabelled) as `entry`.
+    Noted {
+        /// The stored `phone.interruption` event.
+        entry: Uuid,
+    },
+    /// "Work", "Personal" or "Unsure" on the note: the label was saved as a correction,
+    /// stored as `entry`.
+    Labelled {
+        /// The correction that now holds the report.
+        entry: Uuid,
+        /// The label chosen.
+        label: PhoneLabel,
+    },
+    /// Undo on the note: the report was removed.
+    Undone,
+}
+
+/// The entry being edited in the water panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaterEdit {
+    /// The entry (its current event).
+    pub entry: Uuid,
+    /// The amount chosen so far, in ml.
+    pub ml: u32,
 }
 
 /// Something the shell reports. Every input is applied at the time the driver stamps it.
@@ -201,6 +271,10 @@ pub enum Input {
         /// "Use Light".
         accept: bool,
     },
+    /// Water logged, corrected or looked at (wireframe B3).
+    Water(WaterInput),
+    /// The phone interruption note (wireframe B8).
+    Phone(PhoneInput),
 }
 
 impl Input {
@@ -429,6 +503,34 @@ pub enum Bubble {
     RecoveryWalk,
     /// "Did this routine feel helpful?" at the end of a recovery day.
     RecoveryReflection,
+    /// The quick log's confirmation (wireframe B3): "Logged 250 ml, 750 / 2000 ml" with
+    /// Undo and Details. The user asked for it, so it opens in place of the card on show
+    /// (closed as its close button would) and stays only under the holds it opened under.
+    WaterLogged {
+        /// The entry; `None` once Undo removed it.
+        entry: Option<Uuid>,
+        /// The amount logged.
+        ml: u32,
+    },
+    /// The water panel (wireframe B3): today's total against the user's own goal, the
+    /// serving buttons, another amount, and today's entries ([`CoachView::water_entries`])
+    /// with Edit and Remove.
+    WaterPanel {
+        /// The entry being edited.
+        edit: Option<WaterEdit>,
+        /// The other amount, chosen with -50 / +50.
+        other_ml: u32,
+    },
+    /// The phone interruption note (wireframe B8): "Phone interruption noted, 11:52", an
+    /// optional work, personal or unsure label, and Undo.
+    PhoneNote {
+        /// The report; `None` once Undo removed it.
+        entry: Option<Uuid>,
+        /// Local time it was noted.
+        at: NaiveTime,
+        /// The label chosen, if any.
+        label: Option<PhoneLabel>,
+    },
 }
 
 /// Where the movement guide is (wireframe B4, flow 3).
@@ -577,6 +679,10 @@ pub struct CoachView {
     pub guide: Option<GuideView>,
     /// The deadline day and the recovery-day plan.
     pub recovery: RecoveryView,
+    /// Today's water entries as they stand (after corrections and removals), oldest first,
+    /// for the water panel.
+    #[serde(default)]
+    pub water_entries: Vec<WaterEntry>,
 }
 
 /// A movement routine or eye rest in progress (precedence level 3).

@@ -17,7 +17,11 @@
 //! next reminder, with nothing replayed when it ends. Finally it runs the guided movement
 //! routine from the pet menu on the real bubble (Seated, then Done on each movement) and
 //! checks each movement card is laid out inside the work area and the store holds three
-//! `movement.step` events and a done `movement.session`.
+//! `movement.step` events and a done `movement.session`. Last, water and the phone note
+//! (wireframes B3 and B8) on the real bubble: "+250 ml water" from the pet menu shows the
+//! confirmation, Undo stores a retraction, Details opens the water panel (laid out inside
+//! the work area with its entry rows), and an entry is logged, corrected and removed
+//! there; "Phone interruption" is noted, labelled and undone, each checked in the store.
 //!
 //! A CI runner is not an office PC: focus checks that depend on an interactive desktop
 //! are recorded as informational, and real Windows acceptance of focus and DPI remains a
@@ -30,8 +34,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeZone, Utc};
 use hy_core::clock::ManualClock;
-use hy_core::coach::{CoachView, GuideStage, Input};
-use hy_core::schema::{EventPayload, ReminderOutcome, RoutineOutcome, RoutineVariant};
+use hy_core::coach::{Bubble as CoachBubble, CoachView, GuideStage, Input};
+use hy_core::schema::{EventPayload, PhoneLabel, ReminderOutcome, RoutineOutcome, RoutineVariant};
 use hy_pet::geometry::{Monitor, Rect};
 use hy_pet::link::present::{BubbleKind, action};
 use hy_pet::placement::{SCALE_MAX, SCALE_MIN, SCALE_STEP, bring_above_clock, pet_window_physical};
@@ -611,7 +615,10 @@ fn coach_end_to_end(
     // 4. The guided movement routine from the pet menu, answered on the real bubble.
     guided_routine_end_to_end(r, shell, runner);
 
-    // 5. The engine's state is saved (as on exit).
+    // 5. Water and the phone note from the pet menu, answered on the real bubble.
+    water_and_phone_end_to_end(r, shell, runner);
+
+    // 6. The engine's state is saved (as on exit).
     let saved = runner.call(|l| l.flush().is_ok()) == Some(true);
     r.check("coach_state_saved", saved, "flush of the engine state");
 }
@@ -739,6 +746,223 @@ fn guided_routine_end_to_end(r: &mut Report, shell: &Arc<Shell>, runner: &CoachR
         cards.iter().all(|(_, ok)| *ok) && stored && closed,
         format!(
             "cards shown inside the work area {cards:?}; movement.step events {steps}; results {results:?}; closed {closed}"
+        ),
+    );
+}
+
+// ------------------------------------------------------- water and phone (B3, B8)
+
+/// The engine's card and the bubble id the link last showed for it.
+fn card(runner: &CoachRunner) -> (Option<CoachBubble>, Option<String>) {
+    runner
+        .call(|l| (l.view().bubble, l.shown_bubble_id().map(str::to_owned)))
+        .unwrap_or_default()
+}
+
+/// Today's current water amounts, the phone notes standing, and the retractions stored.
+fn entries(runner: &CoachRunner) -> (Vec<u32>, Vec<PhoneLabel>, usize) {
+    runner
+        .call(|l| {
+            let store = l.coach().store();
+            let Ok(day) = store.today() else {
+                return (Vec::new(), Vec::new(), 0);
+            };
+            let water = store
+                .water_entries_on(day)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| e.amount_ml)
+                .collect();
+            let phone = store
+                .current_events_on(day)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|e| match e.payload {
+                    EventPayload::PhoneInterruption { label } => Some(label),
+                    _ => None,
+                })
+                .collect();
+            let retracted = store
+                .events_on(day)
+                .unwrap_or_default()
+                .iter()
+                .filter(|e| matches!(e.payload, EventPayload::EntryRetracted {}))
+                .count();
+            (water, phone, retracted)
+        })
+        .unwrap_or_default()
+}
+
+/// Wait until the engine's card is `kind`, is not the card shown as `old`, and is laid out
+/// beside the pet inside the work area.
+fn card_on_show_after(
+    shell: &Arc<Shell>,
+    runner: &CoachRunner,
+    kind: BubbleKind,
+    old: Option<&str>,
+) -> bool {
+    wait_until(Duration::from_secs(10), || {
+        let (_, id) = card(runner);
+        id.is_some_and(|id| {
+            Some(id.as_str()) != old
+                && BubbleKind::parse(&id) == Some(kind)
+                && engine_bubble_on_show(shell, &id)
+        })
+    })
+}
+
+fn card_on_show(shell: &Arc<Shell>, runner: &CoachRunner, kind: BubbleKind) -> bool {
+    card_on_show_after(shell, runner, kind, None)
+}
+
+/// Press `action_id` on the card on show, then wait for the stored entries to match
+/// `want` and the redrawn card (each answer changes it, so it gets a new id) of `kind`
+/// to be on show, so the next press is made on it.
+fn card_press(
+    shell: &Arc<Shell>,
+    runner: &CoachRunner,
+    action_id: String,
+    kind: BubbleKind,
+    want: impl Fn(&(Vec<u32>, Vec<PhoneLabel>, usize)) -> bool,
+) -> bool {
+    let (_, id) = card(runner);
+    let Some(id) = id else {
+        return false;
+    };
+    let pressed = id.clone();
+    let _ = on_main(shell, move |s| s.bubble_action(&id, &action_id));
+    wait_until(Duration::from_secs(10), || want(&entries(runner)))
+        && card_on_show_after(shell, runner, kind, Some(&pressed))
+}
+
+/// The id of today's water entry in the panel, if exactly one stands.
+fn only_entry(runner: &CoachRunner) -> Option<String> {
+    runner
+        .call(|l| match l.view().water_entries.as_slice() {
+            [e] => Some(e.id.to_string()),
+            _ => None,
+        })
+        .flatten()
+}
+
+fn water_and_phone_end_to_end(r: &mut Report, shell: &Arc<Shell>, runner: &CoachRunner) {
+    let (_, _, retracted0) = entries(runner);
+    // The quick log and its Undo.
+    let _ = on_main(shell, |s| s.menu_action(action::WATER));
+    let logged = wait_until(Duration::from_secs(10), || entries(runner).0 == [250])
+        && card_on_show(shell, runner, BubbleKind::WaterLogged);
+    let undone = card_press(
+        shell,
+        runner,
+        action::UNDO.to_owned(),
+        BubbleKind::WaterLogged,
+        |e| e.0.is_empty() && e.2 == retracted0 + 1,
+    );
+    // Details: the panel, then a serving, a correction and a removal.
+    let panel = card_press(
+        shell,
+        runner,
+        action::DETAILS.to_owned(),
+        BubbleKind::WaterPanel,
+        |e| e.0.is_empty(),
+    );
+    let added = card_press(
+        shell,
+        runner,
+        format!("{}500", action::ADD_PREFIX),
+        BubbleKind::WaterPanel,
+        |e| e.0 == [500],
+    );
+    let edit = only_entry(runner).is_some_and(|id| {
+        card_press(
+            shell,
+            runner,
+            format!("{}{id}", action::ENTRY_EDIT_PREFIX),
+            BubbleKind::WaterPanel,
+            |e| e.0 == [500],
+        )
+    });
+    let more = card_press(
+        shell,
+        runner,
+        action::EDIT_MORE.to_owned(),
+        BubbleKind::WaterPanel,
+        |e| e.0 == [500],
+    ) && wait_until(
+        Duration::from_secs(5),
+        || matches!(card(runner).0, Some(CoachBubble::WaterPanel { edit: Some(e), .. }) if e.ml == 550),
+    );
+    let corrected = card_press(
+        shell,
+        runner,
+        action::EDIT_SAVE.to_owned(),
+        BubbleKind::WaterPanel,
+        |e| e.0 == [550],
+    );
+    let removed = only_entry(runner).is_some_and(|id| {
+        card_press(
+            shell,
+            runner,
+            format!("{}{id}", action::ENTRY_REMOVE_PREFIX),
+            BubbleKind::WaterPanel,
+            |e| e.0.is_empty() && e.2 == retracted0 + 2,
+        )
+    });
+    let _ = on_main(shell, |s| s.bubble_close());
+    let closed = wait_until(Duration::from_secs(5), || shell.open_bubble_id().is_none());
+    let steps = [
+        ("logged", logged),
+        ("undo", undone),
+        ("panel", panel),
+        ("add", added),
+        ("edit", edit),
+        ("step", more),
+        ("save", corrected),
+        ("remove", removed),
+        ("closed", closed),
+    ];
+    r.check(
+        "water_panel_end_to_end",
+        steps.iter().all(|(_, ok)| *ok),
+        format!(
+            "cards inside the work area and stored entries {steps:?}; now {:?}",
+            entries(runner)
+        ),
+    );
+
+    // The phone note, a label, then Undo.
+    let _ = on_main(shell, |s| s.menu_action(action::PHONE_NOTE));
+    let noted = wait_until(Duration::from_secs(10), || {
+        entries(runner).1 == [PhoneLabel::Unlabelled]
+    }) && card_on_show(shell, runner, BubbleKind::PhoneNote);
+    let labelled = card_press(
+        shell,
+        runner,
+        format!("{}work", action::LABEL_PREFIX),
+        BubbleKind::PhoneNote,
+        |e| e.1 == [PhoneLabel::Work],
+    );
+    let undone = card_press(
+        shell,
+        runner,
+        action::UNDO.to_owned(),
+        BubbleKind::PhoneNote,
+        |e| e.1.is_empty() && e.2 == retracted0 + 3,
+    );
+    let _ = on_main(shell, |s| s.bubble_close());
+    let closed = wait_until(Duration::from_secs(5), || shell.open_bubble_id().is_none());
+    let steps = [
+        ("noted", noted),
+        ("labelled", labelled),
+        ("undo", undone),
+        ("closed", closed),
+    ];
+    r.check(
+        "phone_note_end_to_end",
+        steps.iter().all(|(_, ok)| *ok),
+        format!(
+            "cards inside the work area and stored notes {steps:?}; now {:?}",
+            entries(runner)
         ),
     );
 }

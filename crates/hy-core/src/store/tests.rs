@@ -1489,3 +1489,77 @@ fn prune_is_chain_safe_for_repeated_corrections_and_retractions() {
     }
     assert_eq!(s.event(a3.id).unwrap().unwrap().supersedes, None);
 }
+
+// ------------------------------------------------- water entries (B3)
+
+#[test]
+fn water_entries_list_todays_current_entries_in_time_order() {
+    let (mut s, clock) = store();
+    let today = date(2026, 10, 21);
+    assert!(s.water_entries_on(today).unwrap().is_empty());
+    let first = s.append_event(water(250)).unwrap();
+    clock.advance(Duration::minutes(30));
+    let second = s.append_event(water(500)).unwrap();
+    clock.advance(Duration::minutes(30));
+    let third = s.append_event(water(150)).unwrap();
+    s.append_event(NewEvent::manual(EventPayload::PhoneInterruption {
+        label: PhoneLabel::Unlabelled,
+    }))
+    .unwrap();
+    // Edit the first (a correction keeps its time), remove the second.
+    let edited = s.append_event(water(300).superseding(first.id)).unwrap();
+    s.append_event(NewEvent::manual(EventPayload::EntryRetracted {}).superseding(second.id))
+        .unwrap();
+    let entries = s.water_entries_on(today).unwrap();
+    let got: Vec<(Uuid, String, u32)> = entries
+        .iter()
+        .map(|e| (e.id, e.time.format("%H:%M").to_string(), e.amount_ml))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (edited.id, "10:00".to_owned(), 300),
+            (third.id, "11:00".to_owned(), 150)
+        ]
+    );
+    assert_eq!(water_total(&s, today), 450);
+    // Another day has its own entries.
+    assert!(s.water_entries_on(date(2026, 10, 22)).unwrap().is_empty());
+}
+
+#[test]
+fn a_correction_keeps_the_entry_type_and_a_retraction_is_final() {
+    let (mut s, _) = store();
+    let phone = s
+        .append_event(NewEvent::manual(EventPayload::PhoneInterruption {
+            label: PhoneLabel::Unlabelled,
+        }))
+        .unwrap();
+    // A water entry cannot correct a phone note.
+    assert!(s.append_event(water(250).superseding(phone.id)).is_err());
+    let labelled = s
+        .append_event(
+            NewEvent::manual(EventPayload::PhoneInterruption {
+                label: PhoneLabel::Work,
+            })
+            .superseding(phone.id),
+        )
+        .unwrap();
+    let gone = s
+        .append_event(NewEvent::manual(EventPayload::EntryRetracted {}).superseding(labelled.id))
+        .unwrap();
+    // Nothing supersedes a retraction.
+    assert!(
+        s.append_event(NewEvent::manual(EventPayload::EntryRetracted {}).superseding(gone.id))
+            .is_err()
+    );
+    assert!(
+        s.append_event(
+            NewEvent::manual(EventPayload::PhoneInterruption {
+                label: PhoneLabel::Personal,
+            })
+            .superseding(gone.id)
+        )
+        .is_err()
+    );
+}

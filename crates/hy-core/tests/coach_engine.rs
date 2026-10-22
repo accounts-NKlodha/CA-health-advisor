@@ -11,8 +11,8 @@ use chrono::{DateTime, NaiveDate, NaiveTime, Utc, Weekday};
 use hy_core::coach::config::{CALM_GAP, Categories, LongDayCheckIn, SNOOZE};
 use hy_core::coach::*;
 use hy_core::schema::{
-    Activity, CheckInOrigin, CheckInReply, EventPayload, NewEvent, PlanChange, ReflectionAnswer,
-    ReminderOutcome, RoutineOutcome, RoutineVariant, SessionState, StepOutcome,
+    Activity, CheckInOrigin, CheckInReply, EventPayload, NewEvent, PhoneLabel, PlanChange,
+    ReflectionAnswer, ReminderOutcome, RoutineOutcome, RoutineVariant, SessionState, StepOutcome,
 };
 use hy_core::time::{UserZone, WeekdaySet, WorkSchedule};
 use uuid::Uuid;
@@ -47,6 +47,10 @@ struct H {
     schedule: WorkSchedule,
     config: CoachConfig,
     water: WaterSnapshot,
+    /// Today's water entries, as the store lists them.
+    entries: Vec<WaterEntry>,
+    /// Entries recorded so far (for their ids).
+    seq: u128,
     idle: Duration,
     active: bool,
     tick: Duration,
@@ -66,6 +70,7 @@ impl H {
             zone,
             schedule: schedule.clone(),
             water,
+            water_entries: Vec::new(),
             config,
         };
         let last = e.step(&ctx, Input::Refresh);
@@ -77,6 +82,8 @@ impl H {
             schedule,
             config,
             water,
+            entries: Vec::new(),
+            seq: 0,
             idle: Duration::ZERO,
             active: true,
             tick: secs(5),
@@ -110,6 +117,7 @@ impl H {
             zone: self.zone,
             schedule: self.schedule.clone(),
             water: self.water,
+            water_entries: self.entries.clone(),
             config: self.config,
         }
     }
@@ -2316,6 +2324,13 @@ fn classic_pomodoro(h: &mut H) {
     });
 }
 
+fn is_note(b: Option<Bubble>) -> bool {
+    matches!(
+        b,
+        Some(Bubble::WaterLogged { .. } | Bubble::WaterPanel { .. } | Bubble::PhoneNote { .. })
+    )
+}
+
 fn is_pomodoro_card(b: Option<Bubble>) -> bool {
     matches!(
         b,
@@ -3356,6 +3371,449 @@ fn recovery_plan_and_marks_survive_a_restart() {
     assert_eq!(h.view().recovery.plan.unwrap().date, oct(21));
 }
 
+// ------------------------------------------- water and phone notes (B3, B8)
+
+impl H {
+    /// The shell recorded a water entry: it joins today's entries and the total, and the
+    /// engine is told.
+    fn log(&mut self, ml: u32) -> (Uuid, StepOutput) {
+        self.seq += 1;
+        let id = Uuid::from_u128(0x0190_0000_0000_7000_8000_0000_0000_0000 + self.seq);
+        self.entries.push(WaterEntry {
+            id,
+            time: self.local(),
+            amount_ml: ml,
+        });
+        self.water.logged_ml += ml;
+        let out = self.input(Input::Water(WaterInput::Logged { entry: id, ml }));
+        (id, out)
+    }
+
+    /// The shell removed entry `id` (Undo or Remove).
+    fn unlog(&mut self, id: Uuid) {
+        let i = self.entries.iter().position(|e| e.id == id).unwrap();
+        let e = self.entries.remove(i);
+        self.water.logged_ml = self.water.logged_ml.saturating_sub(e.amount_ml);
+    }
+
+    fn w(&mut self, input: WaterInput) -> StepOutput {
+        self.input(Input::Water(input))
+    }
+
+    fn note(&self) -> Option<Bubble> {
+        self.view().bubble.filter(|b| {
+            matches!(
+                b,
+                Bubble::WaterLogged { .. } | Bubble::WaterPanel { .. } | Bubble::PhoneNote { .. }
+            )
+        })
+    }
+}
+
+fn water_goal() -> H {
+    H::at(
+        ist(20, 10, 0),
+        cats(false, false, true),
+        WaterSnapshot {
+            logged_ml: 0,
+            goal_ml: Some(2000),
+        },
+    )
+}
+
+#[test]
+fn a_logged_entry_opens_its_confirmation_and_undo_keeps_it_open() {
+    let mut h = water_goal();
+    let (id, out) = h.log(250);
+    assert_eq!(out.outcome, InputOutcome::Applied);
+    assert_eq!(
+        h.note(),
+        Some(Bubble::WaterLogged {
+            entry: Some(id),
+            ml: 250
+        })
+    );
+    assert_eq!(h.view().water_entries.len(), 1);
+    h.unlog(id);
+    assert_eq!(h.w(WaterInput::Undone).outcome, InputOutcome::Applied);
+    assert_eq!(
+        h.note(),
+        Some(Bubble::WaterLogged {
+            entry: None,
+            ml: 250
+        })
+    );
+    // A second Undo has nothing to undo.
+    assert!(matches!(
+        h.w(WaterInput::Undone).outcome,
+        InputOutcome::Ignored(_)
+    ));
+    // Out-of-range amounts are refused.
+    assert!(matches!(
+        h.w(WaterInput::Logged {
+            entry: Uuid::nil(),
+            ml: 0
+        })
+        .outcome,
+        InputOutcome::Invalid(_)
+    ));
+    assert!(matches!(
+        h.w(WaterInput::Logged {
+            entry: Uuid::nil(),
+            ml: 2001
+        })
+        .outcome,
+        InputOutcome::Invalid(_)
+    ));
+    // Details opens the panel; it closes after three minutes without an answer, then the
+    // calm gap follows.
+    h.w(WaterInput::OpenPanel);
+    assert!(matches!(
+        h.note(),
+        Some(Bubble::WaterPanel {
+            edit: None,
+            other_ml: 250
+        })
+    ));
+    h.wait(mins(2) + secs(55));
+    assert!(h.note().is_some());
+    h.wait(secs(10));
+    assert_eq!(h.note(), None);
+    assert!(h.count_notices(|n| matches!(n, Notice::Celebrate(_))) == 0);
+}
+
+#[test]
+fn the_panel_edits_steps_and_cancels_within_its_range() {
+    let mut h = water_goal();
+    let (a, _) = h.log(250);
+    let (b, _) = h.log(1990);
+    h.w(WaterInput::OpenPanel);
+    // Editing needs an entry that stands today.
+    assert!(matches!(
+        h.w(WaterInput::Edit(Uuid::nil())).outcome,
+        InputOutcome::Ignored(_)
+    ));
+    assert!(matches!(
+        h.w(WaterInput::StepEdit { up: true }).outcome,
+        InputOutcome::Ignored(_)
+    ));
+    h.w(WaterInput::Edit(b));
+    h.w(WaterInput::StepEdit { up: true });
+    h.w(WaterInput::StepEdit { up: true });
+    assert_eq!(
+        h.note(),
+        Some(Bubble::WaterPanel {
+            edit: Some(WaterEdit { entry: b, ml: 2000 }),
+            other_ml: 250
+        }),
+        "the amount stays within 2000 ml"
+    );
+    // The other amount steps on its own while an entry is edited.
+    h.w(WaterInput::StepOther { up: false });
+    for _ in 0..10 {
+        h.w(WaterInput::StepOther { up: false });
+    }
+    assert_eq!(
+        h.note(),
+        Some(Bubble::WaterPanel {
+            edit: Some(WaterEdit { entry: b, ml: 2000 }),
+            other_ml: 50
+        }),
+        "and stays at 50 ml or more"
+    );
+    h.w(WaterInput::CancelEdit);
+    assert!(matches!(
+        h.note(),
+        Some(Bubble::WaterPanel { edit: None, .. })
+    ));
+    // An entry removed elsewhere stops being edited.
+    h.w(WaterInput::Edit(a));
+    h.unlog(a);
+    h.wait(secs(5));
+    assert!(matches!(
+        h.note(),
+        Some(Bubble::WaterPanel { edit: None, .. })
+    ));
+    // Changed (a save or a removal) ends editing too; the panel stays.
+    h.w(WaterInput::Edit(b));
+    assert_eq!(h.w(WaterInput::Changed).outcome, InputOutcome::Applied);
+    assert!(matches!(
+        h.note(),
+        Some(Bubble::WaterPanel { edit: None, .. })
+    ));
+    // An answer restarts the panel's timer.
+    h.wait(mins(2));
+    h.w(WaterInput::StepOther { up: true });
+    h.wait(mins(2));
+    assert!(h.note().is_some());
+    // Logged in the panel: the panel stays and lists it.
+    let (c, _) = h.log(150);
+    assert!(matches!(h.note(), Some(Bubble::WaterPanel { .. })));
+    assert!(h.view().water_entries.iter().any(|e| e.id == c));
+}
+
+#[test]
+fn reaching_the_goal_celebrates_once_and_hydration_reminders_pause() {
+    let mut h = water_goal();
+    h.log(1900);
+    h.log(150);
+    h.log(150);
+    let celebrations = h.count_notices(|n| matches!(n, Notice::Celebrate(Activity::Water)));
+    assert_eq!(celebrations, 1);
+    assert!(h.view().water.unwrap().goal_reached);
+    let before = h.offers().len();
+    h.input(Input::CloseBubble);
+    h.wait(mins(240));
+    assert_eq!(
+        h.offers().len(),
+        before,
+        "no hydration reminder after the goal"
+    );
+}
+
+#[test]
+fn logging_and_undoing_moves_the_water_pace() {
+    // 13:00: well behind a 2000 ml pace with nothing logged.
+    let mut h = H::at(
+        ist(20, 13, 0),
+        cats(false, false, true),
+        WaterSnapshot {
+            logged_ml: 0,
+            goal_ml: Some(2000),
+        },
+    );
+    assert!(h.view().water.unwrap().is_behind());
+    let (id, _) = h.log(2000);
+    assert!(!h.view().water.unwrap().is_behind());
+    h.unlog(id);
+    h.w(WaterInput::Undone);
+    assert!(h.view().water.unwrap().is_behind());
+}
+
+#[test]
+fn a_phone_note_takes_a_label_and_undo() {
+    let mut h = H::new();
+    let first = Uuid::from_u128(1);
+    let second = Uuid::from_u128(2);
+    assert!(matches!(
+        h.input(Input::Phone(PhoneInput::Labelled {
+            entry: second,
+            label: PhoneLabel::Work
+        }))
+        .outcome,
+        InputOutcome::Ignored(_)
+    ));
+    h.input(Input::Phone(PhoneInput::Noted { entry: first }));
+    assert_eq!(
+        h.note(),
+        Some(Bubble::PhoneNote {
+            entry: Some(first),
+            at: hm(10, 0),
+            label: None
+        })
+    );
+    h.input(Input::Phone(PhoneInput::Labelled {
+        entry: second,
+        label: PhoneLabel::Work,
+    }));
+    assert_eq!(
+        h.note(),
+        Some(Bubble::PhoneNote {
+            entry: Some(second),
+            at: hm(10, 0),
+            label: Some(PhoneLabel::Work)
+        })
+    );
+    h.input(Input::Phone(PhoneInput::Undone));
+    assert!(matches!(
+        h.note(),
+        Some(Bubble::PhoneNote { entry: None, .. })
+    ));
+    // Nothing to label or undo once removed.
+    assert!(matches!(
+        h.input(Input::Phone(PhoneInput::Undone)).outcome,
+        InputOutcome::Ignored(_)
+    ));
+    assert!(matches!(
+        h.input(Input::Phone(PhoneInput::Labelled {
+            entry: first,
+            label: PhoneLabel::Unsure
+        }))
+        .outcome,
+        InputOutcome::Ignored(_)
+    ));
+    // It closes after a minute; the calm gap follows.
+    h.wait(secs(65));
+    assert_eq!(h.note(), None);
+}
+
+#[test]
+fn a_note_replaces_a_reminder_and_holds_back_the_next_until_the_calm_gap() {
+    let mut h = H::only(false, true, false);
+    h.wait_until(mins(25), |v| v.reminder().is_some());
+    let offer = h.offer();
+    h.input(Input::Phone(PhoneInput::Noted {
+        entry: Uuid::from_u128(1),
+    }));
+    assert!(h.note().is_some());
+    assert_eq!(h.status(Activity::EyeRest), ChipStatus::Waiting);
+    assert!(h.responses().is_empty());
+    // Closing the note: the reminder waits as its badge, nothing pops up within the gap.
+    h.input(Input::CloseBubble);
+    assert_eq!(h.view().bubble, None);
+    h.wait(CALM_GAP - secs(10));
+    assert_eq!(h.view().bubble, None);
+    // The user can bring it back; the same offer.
+    h.input(Input::OpenPending);
+    assert_eq!(h.offer(), offer);
+    // ...which replaces a note too.
+    h.log(250);
+    assert!(h.note().is_some());
+    h.input(Input::OpenPending);
+    assert_eq!(h.offer(), offer);
+    assert_eq!(h.note(), None);
+}
+
+#[test]
+fn while_a_note_is_open_no_reminder_opens_by_itself() {
+    let mut h = H::only(false, true, false);
+    h.wait(mins(19));
+    h.w(WaterInput::OpenPanel);
+    // Eye rest falls due at 20 minutes; the panel is open, so it waits.
+    for _ in 0..30 {
+        h.wait(secs(5));
+        h.w(WaterInput::StepOther { up: true });
+        h.w(WaterInput::StepOther { up: false });
+    }
+    assert!(h.offers().is_empty());
+    assert!(h.note().is_some());
+    // The panel closes; a reminder only after the calm gap.
+    h.input(Input::CloseBubble);
+    let waited = h.wait_until(mins(10), |v| v.reminder().is_some());
+    assert!(waited >= CALM_GAP - secs(5), "{waited:?}");
+}
+
+#[test]
+fn a_new_hold_or_a_hidden_pet_closes_a_note_and_it_never_returns() {
+    let mut h = water_goal();
+    h.log(250);
+    h.input(Input::SetMeeting(true));
+    assert_eq!(h.note(), None);
+    h.input(Input::SetMeeting(false));
+    h.wait(mins(1));
+    assert_eq!(h.note(), None);
+    // Opened during a meeting, it stays while the meeting lasts...
+    h.input(Input::SetMeeting(true));
+    h.w(WaterInput::OpenPanel);
+    h.wait(secs(30));
+    assert!(h.note().is_some());
+    // ...and closes for focus, a further hold.
+    h.input(Input::StartFocus {
+        minutes: 30,
+        replace_pomodoro: true,
+    });
+    assert_eq!(h.note(), None);
+    h.input(Input::EndFocus);
+    h.input(Input::SetMeeting(false));
+    // A meeting that ended and starts again closes a note opened after it ended.
+    h.input(Input::SetMeeting(true));
+    h.input(Input::SetMeeting(false));
+    h.w(WaterInput::OpenPanel);
+    h.input(Input::SetMeeting(true));
+    assert_eq!(h.note(), None);
+    h.input(Input::SetMeeting(false));
+    // A presentation hides the pet and closes it; nothing opens while hidden.
+    h.w(WaterInput::OpenPanel);
+    h.input(Input::PresentationChanged(true));
+    assert_eq!(h.view().bubble, None);
+    let (_, out) = h.log(250);
+    assert_eq!(
+        out.outcome,
+        InputOutcome::Applied,
+        "logging never needs the card"
+    );
+    assert_eq!(h.view().bubble, None);
+    assert!(matches!(
+        h.w(WaterInput::OpenPanel).outcome,
+        InputOutcome::Ignored(_)
+    ));
+    h.input(Input::PresentationChanged(false));
+    assert_eq!(h.view().bubble, None);
+    // A lock closes it too.
+    h.w(WaterInput::OpenPanel);
+    h.input(Input::Lock);
+    h.input(Input::Unlock);
+    assert_eq!(h.note(), None);
+}
+
+#[test]
+fn a_note_and_the_guide_or_a_pomodoro_card_take_turns() {
+    let mut h = H::only(true, false, false);
+    // The guide waits behind the pet while the user logs water, and comes back on request.
+    h.input(Input::RoutineStarted);
+    assert!(matches!(h.view().bubble, Some(Bubble::MovementGuide(_))));
+    h.log(250);
+    assert!(h.note().is_some());
+    assert!(!h.view().guide.unwrap().open);
+    h.input(Input::OpenPending);
+    assert!(matches!(h.view().bubble, Some(Bubble::MovementGuide(_))));
+    h.input(Input::Guide(GuideAction::Stop));
+    h.input(Input::Guide(GuideAction::Close));
+    // A Pomodoro break that falls due while a note is open waits for it.
+    h.input(Input::StartPomodoro {
+        preset: PomodoroPreset::Classic,
+        replace_focus: true,
+        resume_coaching: true,
+    });
+    h.wait(mins(24) + secs(50));
+    h.input(Input::Phone(PhoneInput::Noted {
+        entry: Uuid::from_u128(9),
+    }));
+    h.wait(secs(20));
+    assert!(matches!(h.view().bubble, Some(Bubble::PhoneNote { .. })));
+    h.input(Input::CloseBubble);
+    h.wait(secs(5));
+    assert!(matches!(
+        h.view().bubble,
+        Some(Bubble::PomodoroBreak { .. })
+    ));
+    // A note replaces the Pomodoro card, which stays in the menu.
+    h.log(150);
+    assert!(h.note().is_some());
+    h.input(Input::OpenPending);
+    assert!(matches!(
+        h.view().bubble,
+        Some(Bubble::PomodoroBreak { .. })
+    ));
+}
+
+#[test]
+fn already_did_it_on_a_water_reminder_opens_the_panel() {
+    let mut h = H::at(
+        ist(20, 13, 0),
+        cats(false, false, true),
+        WaterSnapshot {
+            logged_ml: 0,
+            goal_ml: Some(2000),
+        },
+    );
+    h.wait_until(mins(30), |v| v.reminder().is_some());
+    h.respond(Response::Done);
+    assert!(
+        h.responses()
+            .contains(&(Activity::Water, ReminderOutcome::Done))
+    );
+    assert!(matches!(h.note(), Some(Bubble::WaterPanel { .. })));
+}
+
+#[test]
+fn a_restart_closes_a_note() {
+    let mut h = water_goal();
+    h.log(250);
+    h.restart(secs(30));
+    assert_eq!(h.note(), None);
+}
+
 // ---------------------------------------------------------- property: invariants
 
 mod property {
@@ -3397,6 +3855,8 @@ mod property {
         DeadlineDay,
         Recovery(u8),
         Restart(u16),
+        Log(u8),
+        Note(u8),
     }
 
     fn act() -> impl Strategy<Value = Act> {
@@ -3437,6 +3897,8 @@ mod property {
             1 => Just(Act::DeadlineDay),
             3 => (0u8..9).prop_map(Act::Recovery),
             1 => (0u16..30).prop_map(Act::Restart),
+            2 => (0u8..3).prop_map(Act::Log),
+            4 => (0u8..10).prop_map(Act::Note),
         ]
     }
 
@@ -3492,6 +3954,8 @@ mod property {
         sessions: HashSet<Uuid>,
         /// Answers recorded for each guided routine, in order.
         steps: HashMap<Uuid, Vec<StepOutcome>>,
+        /// The step being checked is time passing with the user at the desk.
+        ticking: bool,
     }
 
     impl Checker {
@@ -3519,10 +3983,17 @@ mod property {
                     holds
                 );
                 self.user_card = None;
-                // The movement guide goes behind the pet the same way.
+                // The movement guide goes behind the pet the same way, and a water or
+                // phone note closes.
                 prop_assert!(
                     !matches!(v.bubble, Some(Bubble::MovementGuide(_))),
                     "guide card kept when a new hold started ({:?})",
+                    holds
+                );
+                prop_assert!(
+                    !super::is_note(v.bubble),
+                    "note {:?} kept when a new hold started ({:?})",
+                    v.bubble,
                     holds
                 );
             }
@@ -3659,6 +4130,19 @@ mod property {
                         v.bubble
                     );
                 }
+            }
+            // Nothing opens by itself over a note while time passes: only the user
+            // replaces it. A Pomodoro card waits for the note, and may open in the step
+            // where the note's own time ends (the deterministic traces check the wait).
+            if super::is_note(self.prev_bubble) && self.ticking {
+                prop_assert!(
+                    v.bubble.is_none()
+                        || super::is_note(v.bubble)
+                        || super::is_pomodoro_card(v.bubble),
+                    "{:?} replaced the note {:?} by itself",
+                    v.bubble,
+                    self.prev_bubble
+                );
             }
             if let Some((offer, a)) = v.reminder() {
                 prop_assert_eq!(v.chip(a).status, ChipStatus::Showing);
@@ -3804,6 +4288,37 @@ mod property {
                     _ => RecoveryAction::NoThanks,
                 }))
             }
+            Act::Log(k) => h.log([150, 250, 500][usize::from(k)]).1,
+            Act::Note(k) => {
+                let last = h.entries.last().map(|e| e.id);
+                match k {
+                    0 => {
+                        if let Some(id) = last {
+                            h.unlog(id);
+                        }
+                        h.w(WaterInput::Undone)
+                    }
+                    1 => h.w(WaterInput::OpenPanel),
+                    2 => h.w(WaterInput::Edit(last.unwrap_or_else(Uuid::nil))),
+                    3 => h.w(WaterInput::StepEdit { up: true }),
+                    4 => h.w(WaterInput::StepOther { up: false }),
+                    5 => h.w(WaterInput::CancelEdit),
+                    6 => {
+                        if let Some(id) = last {
+                            h.unlog(id);
+                        }
+                        h.w(WaterInput::Changed)
+                    }
+                    7 => h.input(Input::Phone(PhoneInput::Noted {
+                        entry: Uuid::from_u128(0xf00 + u128::from(k)),
+                    })),
+                    8 => h.input(Input::Phone(PhoneInput::Labelled {
+                        entry: Uuid::from_u128(0xf01),
+                        label: PhoneLabel::Work,
+                    })),
+                    _ => h.input(Input::Phone(PhoneInput::Undone)),
+                }
+            }
             Act::Restart(m) => {
                 // The restart closes what was open at the moment the app stopped, before
                 // the time it was closed.
@@ -3847,6 +4362,7 @@ mod property {
                 prev_holds: SeenHolds::default(),
                 sessions: HashSet::new(),
                 steps: HashMap::new(),
+                ticking: false,
             };
             c.prev_holds = SeenHolds::of(h.view(), off_hours(&h));
             for e in h.events.clone() {
@@ -3859,6 +4375,7 @@ mod property {
                 let shown = h.view().reminder().map(|(_, a)| a);
                 let before: Vec<_> = Activity::ALL.iter().map(|x| *h.e.activity(*x)).collect();
                 let user_open = matches!(a, Act::OpenPending | Act::PomoSkip);
+                c.ticking = matches!(a, Act::Wait(..));
                 for (now, out, off) in run(&mut h, a) {
                     let new_lock = matches!(a, Act::Lock | Act::Suspend)
                         && out.outcome == InputOutcome::Applied;

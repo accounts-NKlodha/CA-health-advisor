@@ -244,11 +244,13 @@ fn menu_actions_reach_the_engine_and_the_tray() {
             id: "water".into(),
             label: "+250 ml".into(),
             in_tray: false,
+            continues: true,
         },
         MenuAction {
             id: "pause".into(),
             label: "Pause...".into(),
             in_tray: true,
+            continues: false,
         },
     ]);
     assert!(fx.contains(&Effect::UpdateTray));
@@ -284,6 +286,97 @@ fn invalid_bubbles_are_refused() {
         .collect();
     assert_eq!(m.show_bubble(b).0, BubbleOutcome::Invalid);
     assert_eq!(m.open(), &Open::None);
+}
+
+fn act(id: &str) -> BubbleAction {
+    BubbleAction {
+        id: id.into(),
+        label: "Edit".into(),
+        style: ActionStyle::Link,
+    }
+}
+
+fn panel(id: &str) -> Bubble {
+    Bubble {
+        id: id.into(),
+        title: "Water today".into(),
+        progress: Some(BubbleProgress {
+            value: 750,
+            max: 2000,
+            label: "750 of 2000 ml".into(),
+        }),
+        rows: vec![
+            BubbleRow {
+                text: "09:50, 250 ml".into(),
+                actions: vec![act("edit_1"), act("remove_1")],
+            },
+            BubbleRow {
+                text: "Other amount: 300 ml".into(),
+                actions: vec![act("less"), act("more"), act("add")],
+            },
+        ],
+        actions: vec![act("w_250")],
+        ..Bubble::default()
+    }
+}
+
+#[test]
+fn row_actions_reach_the_engine_like_any_action() {
+    let mut m = ShellModel::new();
+    assert_eq!(m.show_bubble(panel("p")).0, BubbleOutcome::Shown);
+    for a in ["edit_1", "add", "w_250"] {
+        assert_eq!(
+            emitted(&m.bubble_action("p", a)),
+            [&ShellEvent::BubbleAction {
+                bubble_id: "p".into(),
+                action_id: a.into()
+            }]
+        );
+    }
+    assert!(
+        m.bubble_action("p", "edit_2").is_empty(),
+        "unknown row action"
+    );
+}
+
+#[test]
+fn rows_and_progress_have_limits() {
+    assert_eq!(panel("p").validate(), Ok(()));
+    // Action ids are unique across the bubble's actions and every row.
+    let mut b = panel("p");
+    b.rows[1].actions.push(act("w_250"));
+    assert!(b.validate().is_err());
+    let mut b = panel("p");
+    b.rows[0].actions = (0..=MAX_ROW_ACTIONS)
+        .map(|i| act(&format!("r{i}")))
+        .collect();
+    assert!(b.validate().is_err());
+    let mut b = panel("p");
+    b.rows[0].text = " ".into();
+    assert!(b.validate().is_err());
+    let mut b = panel("p");
+    b.rows = (0..=MAX_BUBBLE_ROWS)
+        .map(|i| BubbleRow {
+            text: format!("row {i}"),
+            actions: Vec::new(),
+        })
+        .collect();
+    assert!(b.validate().is_err());
+    let mut b = panel("p");
+    b.progress = Some(BubbleProgress {
+        value: 1,
+        max: 0,
+        label: "1 of 0".into(),
+    });
+    assert!(b.validate().is_err());
+    // Over the maximum is fine: the bar is full.
+    let mut b = panel("p");
+    b.progress = Some(BubbleProgress {
+        value: 2500,
+        max: 2000,
+        label: "2500 of 2000 ml".into(),
+    });
+    assert_eq!(b.validate(), Ok(()));
 }
 
 #[test]

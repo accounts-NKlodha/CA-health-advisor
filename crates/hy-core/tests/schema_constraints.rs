@@ -235,6 +235,47 @@ fn an_event_is_superseded_at_most_once() {
 }
 
 #[test]
+fn a_correction_keeps_the_entry_type_and_a_retraction_is_final() {
+    let conn = db();
+    let id3 = "0199f0a0-0000-7000-8000-0000000000a3";
+    let id4 = "0199f0a0-0000-7000-8000-0000000000a4";
+    insert_event(&conn, &Ev::default()).unwrap();
+    // Another type does not correct a water entry.
+    let phone = Ev {
+        id: ID2,
+        type_name: "phone.interruption",
+        payload: r#"{"label":"work"}"#,
+        supersedes: Some(ID1),
+        ..Ev::default()
+    };
+    let err = insert_event(&conn, &phone).unwrap_err().to_string();
+    assert!(err.contains("keeps the entry's type"), "{err}");
+    // A retraction does.
+    let retraction = Ev {
+        id: ID2,
+        type_name: "entry.retracted",
+        payload: "{}",
+        supersedes: Some(ID1),
+        ..Ev::default()
+    };
+    insert_event(&conn, &retraction).unwrap();
+    // Nothing supersedes a retraction: neither a correction nor another retraction.
+    for (id, type_name, payload) in [
+        (id3, "entry.retracted", "{}"),
+        (id4, "water.logged", r#"{"amount_ml":250}"#),
+    ] {
+        let e = Ev {
+            id,
+            type_name,
+            payload,
+            supersedes: Some(ID2),
+            ..Ev::default()
+        };
+        assert!(insert_event(&conn, &e).is_err(), "{type_name}");
+    }
+}
+
+#[test]
 fn a_guided_routine_has_one_result_and_each_step_once_before_it() {
     let conn = db();
     let step = |id, i: u32, session: &str| {

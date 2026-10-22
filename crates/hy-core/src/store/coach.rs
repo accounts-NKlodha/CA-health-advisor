@@ -9,10 +9,14 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
-use super::{EventInsert, Store, date_text, from_ms, insert_event, read_zone, to_ms};
+use super::{
+    EVENT_COLUMNS, EventInsert, Store, date_text, from_ms, insert_event, query_events, read_zone,
+    to_ms,
+};
 use crate::coach::DayTally;
+use crate::coach::water::WaterEntry;
 use crate::error::{Error, Result};
-use crate::schema::{FUTURE_TOLERANCE, NewEvent};
+use crate::schema::{EventPayload, FUTURE_TOLERANCE, NewEvent};
 
 /// The saved engine state row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,5 +258,31 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok(u32::try_from(total).unwrap_or(u32::MAX))
+    }
+
+    /// Today's water entries on `date` as they stand (after corrections; removed entries
+    /// are left out), oldest first, each with the local time of the zone it was recorded
+    /// in. The same view as [`Store::water_total_on`].
+    ///
+    /// # Errors
+    /// [`Error::Sqlite`] or [`Error::Json`] on a read failure.
+    pub fn water_entries_on(&self, date: NaiveDate) -> Result<Vec<WaterEntry>> {
+        let sql = format!(
+            "SELECT {EVENT_COLUMNS} FROM events e
+             WHERE e.local_date = ?1 AND e.type = 'water.logged'
+               AND NOT EXISTS (SELECT 1 FROM events s WHERE s.supersedes = e.id)
+             ORDER BY e.occurred_at, e.id"
+        );
+        Ok(query_events(&self.conn, &sql, [date_text(date)])?
+            .into_iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::WaterLogged { amount_ml } => Some(WaterEntry {
+                    id: e.id,
+                    time: e.zone.local_datetime(e.occurred_at).time(),
+                    amount_ml,
+                }),
+                _ => None,
+            })
+            .collect())
     }
 }

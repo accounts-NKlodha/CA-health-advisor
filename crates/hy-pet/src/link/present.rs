@@ -8,22 +8,39 @@
 
 use std::time::Duration;
 
-use chrono::{NaiveDate, Weekday};
+use chrono::{NaiveDate, NaiveTime, Weekday};
 use hy_core::coach::movement::{
     INTRO_SAFETY, PROVISIONAL, PROVISIONAL_NOTICE, STEP_SAFETY, routine_for,
 };
+use hy_core::coach::water::{WATER_DEFAULT_SERVING_ML, WATER_SERVINGS_ML, WATER_STEP_ML};
 use hy_core::coach::{
     Bubble as CoachBubble, Chip, ChipStatus, CoachView, GuideStage, GuideView, PetMode,
-    PomodoroPause, PomodoroPhase, PomodoroView, RecoveryPlan, ReminderReason,
+    PomodoroPause, PomodoroPhase, PomodoroView, RecoveryPlan, ReminderReason, WaterEdit,
 };
-use hy_core::schema::{Activity, RoutineOutcome, SessionState};
+use hy_core::schema::{Activity, PhoneLabel, RoutineOutcome, SessionState};
 use uuid::Uuid;
 
-use crate::shell::{ActionStyle, Bubble, BubbleAction, BubbleChip, BubbleFigure, MenuAction};
+use crate::shell::{
+    ActionStyle, Bubble, BubbleAction, BubbleChip, BubbleFigure, BubbleProgress, BubbleRow,
+    MAX_BUBBLE_ROWS, MenuAction,
+};
 use crate::state::PetState;
 
 /// The serving logged by "Log 250 ml" and "+250 ml water" (wireframe B2 and B1).
-pub const WATER_SERVING_ML: u32 = 250;
+pub const WATER_SERVING_ML: u32 = WATER_DEFAULT_SERVING_ML;
+
+/// Most of today's water entries the panel lists (the latest), so the card stays a
+/// readable size beside the pet (D). The shell allows more rows than this.
+pub const PANEL_ENTRIES: usize = 12;
+const _: () = assert!(PANEL_ENTRIES < MAX_BUBBLE_ROWS);
+
+/// The phone labels offered on the note, in order (wireframe B8).
+pub const PHONE_LABELS: [PhoneLabel; 3] =
+    [PhoneLabel::Work, PhoneLabel::Personal, PhoneLabel::Unsure];
+
+/// "Your logging goal is reached; hydration reminders are paused" (wireframe B3 and section
+/// 8 item 11), with manual logging still available.
+pub const GOAL_REACHED: &str = "Your logging goal is reached; hydration reminders are paused. You can still log water by hand.";
 
 /// Action ids used in bubbles and menus.
 pub mod action {
@@ -104,12 +121,45 @@ pub mod action {
     pub const REFLECT_NO: &str = "reflect_no";
     /// "Skip" (nothing is recorded).
     pub const REFLECT_SKIP: &str = "reflect_skip";
+    // Water confirmation, water panel and phone note (B3, B8).
+    /// "Undo" on the water confirmation or the phone note.
+    pub const UNDO: &str = "undo";
+    /// "Details" on the water confirmation: the water panel.
+    pub const DETAILS: &str = "details";
+    /// Prefix of a serving button in the panel: `add_150`, `add_250`, `add_500`.
+    pub const ADD_PREFIX: &str = "add_";
+    /// "-50 ml" on the panel's other amount.
+    pub const OTHER_LESS: &str = "other_less";
+    /// "+50 ml" on the panel's other amount.
+    pub const OTHER_MORE: &str = "other_more";
+    /// "Add N ml" for the other amount.
+    pub const OTHER_ADD: &str = "other_add";
+    /// Prefix of "Edit" on an entry, followed by the entry's id.
+    pub const ENTRY_EDIT_PREFIX: &str = "entry_edit_";
+    /// Prefix of "Remove" on an entry, followed by the entry's id.
+    pub const ENTRY_REMOVE_PREFIX: &str = "entry_remove_";
+    /// "-50 ml" on the entry being edited.
+    pub const EDIT_LESS: &str = "edit_less";
+    /// "+50 ml" on the entry being edited.
+    pub const EDIT_MORE: &str = "edit_more";
+    /// "Save" on the entry being edited (a correction).
+    pub const EDIT_SAVE: &str = "edit_save";
+    /// "Cancel" on the entry being edited.
+    pub const EDIT_CANCEL: &str = "edit_cancel";
+    /// Prefix of a phone label: `label_work`, `label_personal`, `label_unsure`.
+    pub const LABEL_PREFIX: &str = "label_";
 
     // Pet menu, keyboard panel and tray (B1, B5, B6, T1).
     /// "Show waiting reminder" or "Show Pomodoro card".
     pub const OPEN_PENDING: &str = "open_pending";
     /// "+250 ml water".
     pub const WATER: &str = "water_250";
+    /// Prefix of a serving on the pet menu: `water_150`, `water_250`, `water_500`.
+    pub const WATER_PREFIX: &str = "water_";
+    /// "Water..." (the water panel).
+    pub const WATER_PANEL: &str = "water_panel";
+    /// "Phone interruption".
+    pub const PHONE_NOTE: &str = "phone_note";
     /// "Today's movement".
     pub const MOVEMENT_START: &str = "movement_start";
     /// "Movement done".
@@ -194,6 +244,12 @@ pub enum BubbleKind {
     RecoveryWalk,
     /// "Did this routine feel helpful?"
     RecoveryReflection,
+    /// The water confirmation ("Logged 250 ml").
+    WaterLogged,
+    /// The water panel.
+    WaterPanel,
+    /// The phone interruption note.
+    PhoneNote,
 }
 
 impl BubbleKind {
@@ -215,11 +271,14 @@ impl BubbleKind {
             CoachBubble::RecoveryMorning { .. } => Self::RecoveryMorning,
             CoachBubble::RecoveryWalk => Self::RecoveryWalk,
             CoachBubble::RecoveryReflection => Self::RecoveryReflection,
+            CoachBubble::WaterLogged { .. } => Self::WaterLogged,
+            CoachBubble::WaterPanel { .. } => Self::WaterPanel,
+            CoachBubble::PhoneNote { .. } => Self::PhoneNote,
         }
     }
 
     /// The fixed keys (every kind but a reminder, whose key carries its offer).
-    const FIXED: [(Self, &'static str); 13] = [
+    const FIXED: [(Self, &'static str); 16] = [
         (Self::PomodoroBreak, "pomodoro-break"),
         (Self::PomodoroRoundDone, "pomodoro-round"),
         (Self::PomodoroPaused, "pomodoro-paused"),
@@ -233,6 +292,9 @@ impl BubbleKind {
         (Self::RecoveryMorning, "recovery-morning"),
         (Self::RecoveryWalk, "recovery-walk"),
         (Self::RecoveryReflection, "recovery-reflection"),
+        (Self::WaterLogged, "water-logged"),
+        (Self::WaterPanel, "water-panel"),
+        (Self::PhoneNote, "phone-note"),
     ];
 
     fn key(self) -> String {
@@ -690,6 +752,208 @@ fn plan_action(d: NaiveDate, label: &str, style: ActionStyle) -> BubbleAction {
     )
 }
 
+/// Today's water: the total logged (current entries) and the user's own goal, if set.
+#[must_use]
+pub fn water_today(view: &CoachView) -> (u32, Option<u32>) {
+    view.water.map_or_else(
+        || {
+            let sum = view
+                .water_entries
+                .iter()
+                .fold(0u32, |s, e| s.saturating_add(e.amount_ml));
+            (sum, None)
+        },
+        |w| (w.logged_ml, Some(w.goal_ml)),
+    )
+}
+
+/// "750 / 2000 ml (your goal)" or "750 ml today (no goal set)".
+fn water_total_words(logged: u32, goal: Option<u32>) -> String {
+    goal.map_or_else(
+        || format!("{logged} ml today (no goal set)"),
+        |g| format!("{logged} / {g} ml (your goal)"),
+    )
+}
+
+const fn phone_label_name(l: PhoneLabel) -> &'static str {
+    match l {
+        PhoneLabel::Work => "Work",
+        PhoneLabel::Personal => "Personal",
+        PhoneLabel::Unsure => "Unsure",
+        PhoneLabel::Unlabelled => "No label",
+    }
+}
+
+/// The action id suffix for a phone label.
+#[must_use]
+pub const fn phone_label_key(l: PhoneLabel) -> &'static str {
+    l.as_str()
+}
+
+const SELF_REPORTED_WATER: &str = "Self-reported. A change is saved as a correction.";
+
+fn water_logged_card(entry: Option<Uuid>, ml: u32, view: &CoachView) -> Bubble {
+    use ActionStyle::{Link, Normal, Primary};
+    let (logged, goal) = water_today(view);
+    let mut b = Bubble {
+        note: Some(SELF_REPORTED_WATER.to_owned()),
+        continues: true,
+        ..Bubble::default()
+    };
+    if entry.is_some() {
+        b.title = goal.map_or_else(
+            || format!("Logged {ml} ml, {logged} ml today"),
+            |g| format!("Logged {ml} ml, {logged} / {g} ml"),
+        );
+        if goal.is_some_and(|g| logged >= g) {
+            b.lines.push(GOAL_REACHED.to_owned());
+        }
+        b.actions = vec![
+            act(action::UNDO, "Undo", Normal),
+            act(action::DETAILS, "Details", Link),
+        ];
+    } else {
+        b.title = format!("Removed {ml} ml");
+        b.lines
+            .push(format!("Today: {}.", water_total_words(logged, goal)));
+        b.actions = vec![
+            act(action::OK, "OK", Primary),
+            act(action::DETAILS, "Details", Link),
+        ];
+    }
+    b
+}
+
+fn amount(ml: u32) -> String {
+    format!("{ml} ml")
+}
+
+fn water_panel_card(edit: Option<WaterEdit>, other_ml: u32, view: &CoachView) -> Bubble {
+    use ActionStyle::{Link, Normal, Primary};
+    let (logged, goal) = water_today(view);
+    let less = format!("\u{2212}{WATER_STEP_ML} ml");
+    let more = format!("+{WATER_STEP_ML} ml");
+    let mut lines = vec![water_total_words(logged, goal)];
+    if goal.is_some_and(|g| logged >= g) {
+        lines.push(GOAL_REACHED.to_owned());
+    }
+    let entries = &view.water_entries;
+    if entries.is_empty() {
+        lines.push("No entries yet today. That means nothing logged, not zero water.".to_owned());
+    } else if entries.len() > PANEL_ENTRIES {
+        lines.push(format!(
+            "Showing the latest {PANEL_ENTRIES} of {} entries.",
+            entries.len()
+        ));
+    }
+    let mut rows: Vec<BubbleRow> = entries[entries.len().saturating_sub(PANEL_ENTRIES)..]
+        .iter()
+        .map(|e| {
+            let when = e.time.format("%H:%M");
+            match edit.filter(|x| x.entry == e.id) {
+                Some(x) => BubbleRow {
+                    text: format!("{when}, {} ml, change to {}", e.amount_ml, amount(x.ml)),
+                    actions: vec![
+                        act(action::EDIT_LESS, &less, Normal),
+                        act(action::EDIT_MORE, &more, Normal),
+                        act(action::EDIT_SAVE, "Save", Primary),
+                        act(action::EDIT_CANCEL, "Cancel", Link),
+                    ],
+                },
+                None => BubbleRow {
+                    text: format!("{when}, {} ml", e.amount_ml),
+                    actions: vec![
+                        act(
+                            &format!("{}{}", action::ENTRY_EDIT_PREFIX, e.id),
+                            "Edit",
+                            Link,
+                        ),
+                        act(
+                            &format!("{}{}", action::ENTRY_REMOVE_PREFIX, e.id),
+                            "Remove",
+                            Link,
+                        ),
+                    ],
+                },
+            }
+        })
+        .collect();
+    rows.push(BubbleRow {
+        text: format!("Other amount: {}", amount(other_ml)),
+        actions: vec![
+            act(action::OTHER_LESS, &less, Normal),
+            act(action::OTHER_MORE, &more, Normal),
+            act(
+                action::OTHER_ADD,
+                &format!("Add {}", amount(other_ml)),
+                Normal,
+            ),
+        ],
+    });
+    Bubble {
+        title: "Water today".to_owned(),
+        lines,
+        progress: goal.map(|g| BubbleProgress {
+            value: logged,
+            max: g,
+            label: format!("{logged} of {g} ml"),
+        }),
+        rows,
+        actions: WATER_SERVINGS_ML
+            .iter()
+            .map(|ml| {
+                act(
+                    &format!("{}{ml}", action::ADD_PREFIX),
+                    &format!("+{ml} ml"),
+                    if *ml == WATER_SERVING_ML {
+                        Primary
+                    } else {
+                        Normal
+                    },
+                )
+            })
+            .collect(),
+        note: Some(SELF_REPORTED_WATER.to_owned()),
+        continues: true,
+        ..Bubble::default()
+    }
+}
+
+fn phone_note_card(entry: Option<Uuid>, at: NaiveTime, label: Option<PhoneLabel>) -> Bubble {
+    use ActionStyle::{Link, Normal, Primary};
+    if entry.is_none() {
+        return Bubble {
+            title: "Phone note removed".to_owned(),
+            actions: vec![act(action::OK, "OK", Primary)],
+            continues: true,
+            ..Bubble::default()
+        };
+    }
+    let line = label.map_or_else(
+        || "Optional: what was it?".to_owned(),
+        |l| format!("Saved as {}.", phone_label_name(l).to_lowercase()),
+    );
+    let mut actions: Vec<_> = PHONE_LABELS
+        .iter()
+        .map(|l| {
+            act(
+                &format!("{}{}", action::LABEL_PREFIX, phone_label_key(*l)),
+                phone_label_name(*l),
+                if label == Some(*l) { Primary } else { Normal },
+            )
+        })
+        .collect();
+    actions.push(act(action::UNDO, "Undo", Link));
+    Bubble {
+        title: format!("Phone interruption noted, {}", at.format("%H:%M")),
+        lines: vec![line],
+        actions,
+        note: Some("Self-reported. The app does not detect phone use.".to_owned()),
+        continues: true,
+        ..Bubble::default()
+    }
+}
+
 /// The shell bubble for the engine's bubble, without its id (the link numbers each show;
 /// see [`BubbleKind::id`]).
 #[must_use]
@@ -859,6 +1123,9 @@ pub fn bubble(b: &CoachBubble, view: &CoachView) -> Bubble {
                 act(action::REFLECT_SKIP, "Skip", Link),
             ],
         ),
+        CoachBubble::WaterLogged { entry, ml } => water_logged_card(entry, ml, view),
+        CoachBubble::WaterPanel { edit, other_ml } => water_panel_card(edit, other_ml, view),
+        CoachBubble::PhoneNote { entry, at, label } => phone_note_card(entry, at, label),
     }
 }
 
@@ -899,6 +1166,15 @@ fn menu(id: &str, label: &str, in_tray: bool) -> MenuAction {
         id: id.to_owned(),
         label: label.to_owned(),
         in_tray,
+        continues: false,
+    }
+}
+
+/// An entry that opens a card, so the keyboard panel stays open to show it.
+fn menu_card(id: &str, label: &str) -> MenuAction {
+    MenuAction {
+        continues: true,
+        ..menu(id, label, false)
     }
 }
 
@@ -927,11 +1203,20 @@ pub fn menu_actions(view: &CoachView) -> Vec<MenuAction> {
         };
         m.push(menu(a::OPEN_PENDING, label, false));
     }
-    m.push(menu(
-        a::WATER,
-        &format!("+{WATER_SERVING_ML} ml water"),
-        false,
-    ));
+    // Water (B1, B3): the serving buttons and the panel, with today's total against the
+    // user's own goal. Each opens its card, which the keyboard panel then shows.
+    for ml in WATER_SERVINGS_ML {
+        m.push(menu_card(
+            &format!("{}{ml}", a::WATER_PREFIX),
+            &format!("+{ml} ml water"),
+        ));
+    }
+    let (logged, goal) = water_today(view);
+    let total = goal.map_or_else(
+        || format!("{logged} ml today"),
+        |g| format!("{logged} / {g} ml"),
+    );
+    m.push(menu_card(a::WATER_PANEL, &format!("Water... ({total})")));
 
     // The engine's routine state, not the pet's look: a pause, off-hours, focus, meeting
     // or presentation shows its own state over a running routine, and the user must
@@ -1021,6 +1306,7 @@ pub fn menu_actions(view: &CoachView) -> Vec<MenuAction> {
         }
     }
 
+    m.push(menu_card(a::PHONE_NOTE, "Phone interruption"));
     if view.meeting {
         m.push(menu(a::MEETING_OFF, "Meeting over", false));
     } else {

@@ -811,3 +811,65 @@ fn an_unreadable_saved_state_restarts_coaching_without_losing_history() {
     assert_eq!(c.revision(), Some(rev + 2));
     assert_eq!(reminder_events(c.store(), date(20)).len(), 1);
 }
+
+// ------------------------------------------- water entries and notes (B3, B8)
+
+#[test]
+fn water_corrections_and_removals_move_the_total_and_pace_and_a_note_ends_on_restart() {
+    let env = Env::new(ist(20, 13, 0));
+    let store = env.store();
+    store
+        .set_goal(GoalKind::WaterDailyMl, 2000, date(20))
+        .unwrap();
+    store
+        .put_setting(CONFIG_KEY, &only(false, false, true))
+        .unwrap();
+    let (mut c, _) = Coach::open(store).unwrap();
+    assert!(c.view().water.unwrap().is_behind());
+    // The shell records the entry, then tells the engine.
+    let e = c
+        .store_mut()
+        .append_event(NewEvent::manual(EventPayload::WaterLogged {
+            amount_ml: 1500,
+        }))
+        .unwrap();
+    c.handle(Input::Water(WaterInput::Logged {
+        entry: e.id,
+        ml: 1500,
+    }))
+    .unwrap();
+    let v = c.view().clone();
+    assert_eq!(v.water.unwrap().logged_ml, 1500);
+    assert!(!v.water.unwrap().is_behind());
+    assert_eq!(v.water_entries.len(), 1);
+    assert_eq!(v.water_entries[0].time, env.local());
+    assert!(matches!(v.bubble, Some(Bubble::WaterLogged { .. })));
+    // A correction down to 200 ml: behind pace again.
+    c.handle(Input::Water(WaterInput::OpenPanel)).unwrap();
+    c.handle(Input::Water(WaterInput::Edit(e.id))).unwrap();
+    let fixed = c
+        .store_mut()
+        .append_event(
+            NewEvent::manual(EventPayload::WaterLogged { amount_ml: 200 }).superseding(e.id),
+        )
+        .unwrap();
+    c.handle(Input::Water(WaterInput::Changed)).unwrap();
+    let v = c.view().clone();
+    assert_eq!(v.water.unwrap().logged_ml, 200);
+    assert!(v.water.unwrap().is_behind());
+    assert_eq!(v.water_entries[0].id, fixed.id);
+    // Removed: nothing logged.
+    c.store_mut()
+        .append_event(NewEvent::manual(EventPayload::EntryRetracted {}).superseding(fixed.id))
+        .unwrap();
+    c.handle(Input::Water(WaterInput::Changed)).unwrap();
+    assert_eq!(c.view().water.unwrap().logged_ml, 0);
+    assert!(c.view().water_entries.is_empty());
+    assert!(matches!(c.view().bubble, Some(Bubble::WaterPanel { .. })));
+    // The panel does not survive a restart.
+    c.flush().unwrap();
+    drop(c);
+    env.clock.advance(chrono::Duration::seconds(20));
+    let c = env.open();
+    assert!(!matches!(c.view().bubble, Some(Bubble::WaterPanel { .. })));
+}

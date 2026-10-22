@@ -25,6 +25,14 @@
 //! while that bubble is still the one on show ([`Command::Answer`]): two quick clicks on
 //! one card, or a click queued before the card changed, count at most once.
 //!
+//! The user's own entries (water, phone interruptions; wireframes B3 and B8) are written
+//! by the link through [`Store::append_event`], which keeps the correction rules (a
+//! change supersedes the entry, Undo and Remove retract it), and the engine is then told
+//! what was recorded ([`WaterInput`], [`PhoneInput`]) with the stored entry's id, so it
+//! shows the confirmation, the panel or the note. A change asked on a card is applied
+//! only while that card is on show ([`Command::Change`]), and its amounts and ids come
+//! from the engine's view at that moment.
+//!
 //! If the shell refuses a bubble because the user hid the pet, the reminder is collapsed
 //! to its waiting badge ([`Input::CloseBubble`]) instead of popping up later.
 
@@ -36,12 +44,16 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use hy_core::coach::Coach;
-use hy_core::coach::{CoachView, Input, InputOutcome, Notice, StepOutput};
+use hy_core::coach::{
+    Bubble as CoachBubble, CoachView, Input, InputOutcome, Notice, PhoneInput, StepOutput,
+    WaterInput,
+};
 use hy_core::error::Result;
-use hy_core::schema::{EventPayload, NewEvent};
+use hy_core::schema::{EventPayload, NewEvent, PhoneLabel};
 use hy_core::store::Store;
+use uuid::Uuid;
 
-pub use route::{Command, RouteState, Routed, route};
+pub use route::{Command, EntryChange, RouteState, Routed, route};
 
 use self::present::BubbleKind;
 use crate::shell::{
@@ -193,23 +205,131 @@ impl CoachLink {
                 } else {
                     // The card was answered, replaced or withdrawn after this answer was
                     // routed: nothing changes, and nothing needs redrawing.
-                    Ok(StepOutput {
-                        outcome: InputOutcome::Ignored("that card was already answered"),
-                        view: self.coach.view().clone(),
-                        notices: Vec::new(),
-                        events: Vec::new(),
-                        touched_days: Vec::new(),
-                        significant: false,
-                    })
+                    Ok(self.unchanged("that card was already answered"))
                 }
             }
             Command::LogWater { ml } => {
-                let now = self.coach.store().clock().now();
-                let event = NewEvent::manual(EventPayload::WaterLogged { amount_ml: ml }).at(now);
-                self.coach.store_mut().append_event(event)?;
-                self.input(Input::Refresh)
+                let input = self.log_water(ml)?;
+                self.input(input)
+            }
+            Command::NotePhone => {
+                let entry = self.record(EventPayload::PhoneInterruption {
+                    label: PhoneLabel::Unlabelled,
+                })?;
+                self.input(Input::Phone(PhoneInput::Noted { entry }))
+            }
+            Command::Change { bubble_id, change } => {
+                if self.shown_bubble_id() != Some(bubble_id.as_str()) {
+                    return Ok(self.unchanged("that card was already answered"));
+                }
+                match self.change(change)? {
+                    Some(input) => self.input(input),
+                    None => Ok(self.unchanged("nothing to change")),
+                }
             }
         }
+    }
+
+    /// The output of a command that changed nothing.
+    fn unchanged(&self, why: &'static str) -> StepOutput {
+        StepOutput {
+            outcome: InputOutcome::Ignored(why),
+            view: self.coach.view().clone(),
+            notices: Vec::new(),
+            events: Vec::new(),
+            touched_days: Vec::new(),
+            significant: false,
+        }
+    }
+
+    /// Record a new self-reported entry now; returns its id.
+    fn record(&mut self, payload: EventPayload) -> Result<Uuid> {
+        let now = self.coach.store().clock().now();
+        let event = NewEvent::manual(payload).at(now);
+        Ok(self.coach.store_mut().append_event(event)?.id)
+    }
+
+    /// Record a new version of entry `id` (a correction, or a retraction); returns its id.
+    fn supersede(&mut self, id: Uuid, payload: EventPayload) -> Result<Uuid> {
+        let event = NewEvent::manual(payload).superseding(id);
+        Ok(self.coach.store_mut().append_event(event)?.id)
+    }
+
+    fn log_water(&mut self, ml: u32) -> Result<Input> {
+        let entry = self.record(EventPayload::WaterLogged { amount_ml: ml })?;
+        Ok(Input::Water(WaterInput::Logged { entry, ml }))
+    }
+
+    /// Record `change` against the card on show; returns what to tell the engine, or
+    /// `None` if the card offers nothing to change (an entry already undone, the label
+    /// already chosen).
+    fn change(&mut self, change: EntryChange) -> Result<Option<Input>> {
+        let view = self.coach.view();
+        let bubble = view.bubble;
+        let retract = EventPayload::EntryRetracted {};
+        let input = match (change, bubble) {
+            (EntryChange::LogWater { ml }, Some(CoachBubble::WaterPanel { .. })) => {
+                self.log_water(ml)?
+            }
+            (EntryChange::AddOther, Some(CoachBubble::WaterPanel { other_ml, .. })) => {
+                self.log_water(other_ml)?
+            }
+            (
+                EntryChange::UndoWater,
+                Some(CoachBubble::WaterLogged {
+                    entry: Some(id), ..
+                }),
+            ) => {
+                self.supersede(id, retract)?;
+                Input::Water(WaterInput::Undone)
+            }
+            (
+                EntryChange::SaveEdit,
+                Some(CoachBubble::WaterPanel {
+                    edit: Some(edit), ..
+                }),
+            ) => {
+                let Some(now) = view.water_entries.iter().find(|e| e.id == edit.entry) else {
+                    return Ok(None);
+                };
+                if now.amount_ml != edit.ml {
+                    self.supersede(edit.entry, EventPayload::WaterLogged { amount_ml: edit.ml })?;
+                }
+                Input::Water(WaterInput::Changed)
+            }
+            (EntryChange::RemoveWater(id), Some(CoachBubble::WaterPanel { .. })) => {
+                if !view.water_entries.iter().any(|e| e.id == id) {
+                    return Ok(None);
+                }
+                self.supersede(id, retract)?;
+                Input::Water(WaterInput::Changed)
+            }
+            (
+                EntryChange::LabelPhone(label),
+                Some(CoachBubble::PhoneNote {
+                    entry: Some(id),
+                    label: chosen,
+                    ..
+                }),
+            ) => {
+                if chosen == Some(label) {
+                    return Ok(None);
+                }
+                let entry = self.supersede(id, EventPayload::PhoneInterruption { label })?;
+                Input::Phone(PhoneInput::Labelled { entry, label })
+            }
+            (
+                EntryChange::UndoPhone,
+                Some(CoachBubble::PhoneNote {
+                    entry: Some(id), ..
+                }),
+            ) => {
+                self.supersede(id, retract)?;
+                Input::Phone(PhoneInput::Undone)
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(input))
     }
 
     /// Save anything not yet saved (on exit).

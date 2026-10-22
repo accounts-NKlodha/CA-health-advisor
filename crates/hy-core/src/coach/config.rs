@@ -42,6 +42,11 @@ pub const EYE_REST_LENGTH: Duration = Duration::from_secs(20);
 /// A movement routine started from a reminder that reports no result within this time is
 /// treated as stopped with none recorded, without writing a routine record (D).
 pub const ROUTINE_TIMEOUT: Duration = min(30);
+/// The water confirmation and the phone note close by themselves this long after the
+/// user's last answer on them (D). While one is open no reminder or card opens on its own.
+pub const NOTE_SHOWN_FOR: Duration = Duration::from_secs(60);
+/// The water panel closes by itself this long after the user's last answer in it (D).
+pub const WATER_PANEL_SHOWN_FOR: Duration = min(3);
 /// Dismissals or skips in one day that trigger the offer of the Light schedule (D, 4.3).
 pub const DISMISSALS_FOR_LIGHTER: u32 = 3;
 /// Water is "behind pace" when the logged amount is at least this far below the amount

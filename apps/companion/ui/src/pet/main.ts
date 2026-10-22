@@ -3,11 +3,12 @@
 // draws the latest view, measures the bubble, and reports pointer input. The window never
 // takes focus (WS_EX_NOACTIVATE), so clicks here never move the user's caret.
 import { insertArt, setPalette } from '../shared/art';
+import { renderProgress, renderRows } from '../shared/bubble';
 import { renderBadge } from '../shared/icons';
 import { renderFigure } from '../shared/figures';
 import { call, on, report } from '../shared/ipc';
 import { renderMenu } from '../shared/menu';
-import type { Bubble, OpenView, PetView } from '../shared/types';
+import type { Bubble, BubbleAction, OpenView, PetView } from '../shared/types';
 
 const VIEW_BOX = 128;
 /** Pointer travel (CSS px) before a press becomes a drag. */
@@ -95,6 +96,19 @@ function bubbleBody(b: Bubble, engine: boolean): HTMLElement {
   const body = el('div', 'bubble-body');
   const h = el('h2', '', body);
   h.textContent = b.title;
+  const action = (a: BubbleAction, describedBy: string | null): HTMLButtonElement => {
+    const cls = a.style === 'primary' ? 'btn primary' : a.style === 'link' ? 'link' : 'btn';
+    const btn = button(a.label, cls, () => {
+      const p = engine
+        ? call('bubble_action', { bubbleId: b.id, actionId: a.id })
+        : call('bubble_close');
+      p.catch(report);
+    });
+    if (describedBy) btn.setAttribute('aria-describedby', describedBy);
+    return btn;
+  };
+  const meter = renderProgress(b);
+  if (meter) body.append(meter);
   if (b.steps.length > 0 || b.figure) {
     // The movement guide: the illustration beside the numbered steps.
     const guide = el('div', 'guide', body);
@@ -118,19 +132,11 @@ function bubbleBody(b: Bubble, engine: boolean): HTMLElement {
       status.textContent = c.status;
     }
   }
+  const rows = renderRows(b, action);
+  if (rows) body.append(rows);
   if (b.actions.length > 0) {
     const row = el('div', 'row', body);
-    for (const a of b.actions) {
-      const cls = a.style === 'primary' ? 'btn primary' : a.style === 'link' ? 'link' : 'btn';
-      row.append(
-        button(a.label, cls, () => {
-          const p = engine
-            ? call('bubble_action', { bubbleId: b.id, actionId: a.id })
-            : call('bubble_close');
-          p.catch(report);
-        }),
-      );
-    }
+    for (const a of b.actions) row.append(action(a, null));
   }
   if (b.note) el('p', 'note', body).textContent = b.note;
   return body;

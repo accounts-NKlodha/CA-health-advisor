@@ -73,6 +73,12 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/0003_movement_routine.sql"),
         compat: Compat::Expand,
     },
+    Migration {
+        version: 4,
+        name: "entry_corrections",
+        sql: include_str!("../migrations/0004_entry_corrections.sql"),
+        compat: Compat::Expand,
+    },
 ];
 
 /// The schema version this build writes.
@@ -335,6 +341,8 @@ mod tests {
     const V2_CHECKSUM: &str = "6d0b8382cc44f5c6";
     /// v3 (slice V1-3) is frozen once released.
     const V3_CHECKSUM: &str = "bdee60776c4c2f38";
+    /// v4 (the V1-3 water panel and phone note) is frozen once released.
+    const V4_CHECKSUM: &str = "902adf35de7113c1";
 
     fn mem() -> Connection {
         Connection::open_in_memory().unwrap()
@@ -398,6 +406,8 @@ mod tests {
         assert_eq!(MIGRATIONS[1].compat, Compat::Expand);
         assert_eq!(MIGRATIONS[2].checksum(), V3_CHECKSUM);
         assert_eq!(MIGRATIONS[2].compat, Compat::Expand);
+        assert_eq!(MIGRATIONS[3].checksum(), V4_CHECKSUM);
+        assert_eq!(MIGRATIONS[3].compat, Compat::Expand);
     }
 
     #[test]
