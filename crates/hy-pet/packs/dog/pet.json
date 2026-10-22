@@ -1,0 +1,73 @@
+{
+  "format": 1,
+  "id": "dog",
+  "version": "0.1.0",
+  "name": "Cheerful dog",
+  "default_name": "Dog",
+  "art_status": "pending_review",
+  "provenance": {
+    "origin": "Placeholder only: a labelled outline. No pet art has been drawn for this slot.",
+    "licence": "Placeholder shapes made for the project; no third-party or paid assets.",
+    "review": "Art pending review. This pet cannot be chosen until its art is drawn and passes the art review."
+  },
+  "default_tone": "gentle",
+  "palette": [
+    {
+      "name": "Grey",
+      "a": "#8a969c",
+      "b": "#eef1f2"
+    },
+    {
+      "name": "Light grey",
+      "a": "#b9c4c9",
+      "b": "#f6f8f9"
+    },
+    {
+      "name": "Dark grey",
+      "a": "#55646c",
+      "b": "#dde3e6"
+    }
+  ],
+  "hitbox": {
+    "x": 20,
+    "y": 20,
+    "width": 88,
+    "height": 88
+  },
+  "art": "art.svg",
+  "states": {
+    "idle": {
+      "animation": "none",
+      "eyes": "open"
+    },
+    "cue": {
+      "animation": "none",
+      "eyes": "open"
+    },
+    "exercise": {
+      "animation": "none",
+      "eyes": "open"
+    },
+    "waiting": {
+      "animation": "none",
+      "eyes": "open"
+    },
+    "celebration": {
+      "animation": "none",
+      "eyes": "open"
+    },
+    "snoozed": {
+      "animation": "none",
+      "eyes": "open"
+    },
+    "focus": {
+      "animation": "none",
+      "eyes": "open"
+    },
+    "disconnected": {
+      "animation": "none",
+      "eyes": "open",
+      "filter": "desaturate"
+    }
+  }
+}

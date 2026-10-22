@@ -1,0 +1,73 @@
+{
+  "format": 1,
+  "id": "turtle",
+  "version": "1.0.0",
+  "name": "Walking turtle",
+  "default_name": "Shelly",
+  "art_status": "drawn",
+  "provenance": {
+    "origin": "Original artwork drawn for the HealthierYou clickable prototype (revision 3, approved on 21 Oct 2026), ported unchanged to the pack format in slice V1-1.",
+    "licence": "Original project artwork; no third-party or paid assets.",
+    "review": "Visual family approved with the prototype on 21 Oct 2026. The ten finished pets still go through the art review."
+  },
+  "default_tone": "gentle",
+  "palette": [
+    {
+      "name": "Leaf",
+      "a": "#5f9e6e",
+      "b": "#d9b36c"
+    },
+    {
+      "name": "Lagoon",
+      "a": "#4f8fa8",
+      "b": "#c9d6a3"
+    },
+    {
+      "name": "Dusk",
+      "a": "#8a7bb5",
+      "b": "#e2c38c"
+    }
+  ],
+  "hitbox": {
+    "x": 12,
+    "y": 48,
+    "width": 110,
+    "height": 76
+  },
+  "art": "art.svg",
+  "states": {
+    "idle": {
+      "animation": "bob",
+      "eyes": "open"
+    },
+    "cue": {
+      "animation": "wiggle",
+      "eyes": "open"
+    },
+    "exercise": {
+      "animation": "stretch",
+      "eyes": "open"
+    },
+    "waiting": {
+      "animation": "none",
+      "eyes": "open"
+    },
+    "celebration": {
+      "animation": "hop",
+      "eyes": "open"
+    },
+    "snoozed": {
+      "animation": "none",
+      "eyes": "closed"
+    },
+    "focus": {
+      "animation": "none",
+      "eyes": "closed"
+    },
+    "disconnected": {
+      "animation": "none",
+      "eyes": "open",
+      "filter": "desaturate"
+    }
+  }
+}

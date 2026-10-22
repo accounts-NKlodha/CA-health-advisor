@@ -1,0 +1,44 @@
+/* The keyboard pet panel (wireframe K1). It reuses the pet page's tokens and controls;
+   unlike the pet window it is an ordinary focusable window with an opaque surface. */
+
+html,
+body {
+  background: var(--surface);
+  color: var(--text);
+  user-select: auto;
+  -webkit-user-select: auto;
+}
+
+#panel {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  overflow: auto;
+}
+
+.panel-state {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#panel .menu .row {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+#panel .btn {
+  justify-content: flex-start;
+  padding: 8px 12px;
+}
+
+#panel :focus-visible {
+  outline-width: 3px;
+}
+
+@media (forced-colors: active) {
+  #panel {
+    border: 2px solid CanvasText;
+  }
+}

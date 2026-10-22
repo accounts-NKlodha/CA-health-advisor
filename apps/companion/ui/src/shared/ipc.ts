@@ -1,0 +1,56 @@
+// Typed wrappers over Tauri IPC. Each window may call only the commands its capability
+// file grants (apps/companion/src-tauri/capabilities). Argument names are camelCase, as
+// Tauri maps them to the Rust snake_case parameters.
+import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import type { PanelView, PetEdit, PetView, SettingsView } from './types';
+
+interface Commands {
+  pet_bootstrap: { args: undefined; result: PetView };
+  pet_ready: { args: undefined; result: void };
+  pet_click: { args: undefined; result: void };
+  bubble_measured: { args: { token: number; width: number; height: number }; result: void };
+  bubble_close: { args: undefined; result: void };
+  bubble_action: { args: { bubbleId: string; actionId: string }; result: void };
+  menu_action: { args: { actionId: string }; result: void };
+  drag_start: { args: undefined; result: void };
+  drag_move: { args: undefined; result: void };
+  drag_end: { args: { moved: boolean }; result: void };
+  pet_edit: { args: { edit: PetEdit }; result: SettingsView };
+  bring_pet: { args: undefined; result: void };
+  hide_pet: { args: undefined; result: void };
+  open_settings: { args: undefined; result: void };
+  panel_bootstrap: { args: undefined; result: PanelView };
+  panel_close: { args: { restore: boolean }; result: void };
+  settings_bootstrap: { args: undefined; result: SettingsView };
+  set_hotkey: { args: { hotkey: string | null }; result: SettingsView };
+}
+
+type Name = keyof Commands;
+
+/** Call a shell command. */
+export function call<N extends Name>(
+  name: N,
+  ...args: Commands[N]['args'] extends undefined ? [] : [Commands[N]['args']]
+): Promise<Commands[N]['result']> {
+  return invoke<Commands[N]['result']>(name, args[0] as Record<string, unknown> | undefined);
+}
+
+interface Events {
+  'pet://view': PetView;
+  'panel://view': PanelView;
+  'settings://changed': SettingsView;
+}
+
+/** Listen for a view the shell pushes to this window. */
+export function on<E extends keyof Events>(
+  event: E,
+  handler: (payload: Events[E]) => void,
+): Promise<UnlistenFn> {
+  return listen<Events[E]>(event, (e) => handler(e.payload));
+}
+
+/** Report an IPC failure without throwing into the page. */
+export function report(err: unknown): void {
+  console.error('HealthierYou:', err);
+}

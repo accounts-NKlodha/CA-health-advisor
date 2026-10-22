@@ -1,0 +1,24 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pet",
+  "description": "The always-present pet window: its own view, clicks, drag, bubble and menu actions.",
+  "windows": ["pet"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-pet-bootstrap",
+    "allow-pet-ready",
+    "allow-pet-click",
+    "allow-bubble-measured",
+    "allow-bubble-close",
+    "allow-bubble-action",
+    "allow-menu-action",
+    "allow-drag-start",
+    "allow-drag-move",
+    "allow-drag-end",
+    "allow-pet-edit",
+    "allow-bring-pet",
+    "allow-hide-pet",
+    "allow-open-settings"
+  ]
+}

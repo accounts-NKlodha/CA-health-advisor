@@ -1,0 +1,73 @@
+{
+  "format": 1,
+  "id": "drop",
+  "version": "1.0.0",
+  "name": "Water-drop buddy",
+  "default_name": "Drip",
+  "art_status": "drawn",
+  "provenance": {
+    "origin": "Original artwork drawn for the HealthierYou clickable prototype (revision 3, approved on 21 Oct 2026), ported unchanged to the pack format in slice V1-1.",
+    "licence": "Original project artwork; no third-party or paid assets.",
+    "review": "Visual family approved with the prototype on 21 Oct 2026. The ten finished pets still go through the art review."
+  },
+  "default_tone": "gentle",
+  "palette": [
+    {
+      "name": "Sky",
+      "a": "#58a6d6",
+      "b": "#dff1fb"
+    },
+    {
+      "name": "Mint",
+      "a": "#4bb3a7",
+      "b": "#ddf5f1"
+    },
+    {
+      "name": "Iris",
+      "a": "#7c95e0",
+      "b": "#e6ebfb"
+    }
+  ],
+  "hitbox": {
+    "x": 24,
+    "y": 8,
+    "width": 80,
+    "height": 116
+  },
+  "art": "art.svg",
+  "states": {
+    "idle": {
+      "animation": "bob",
+      "eyes": "open"
+    },
+    "cue": {
+      "animation": "wiggle",
+      "eyes": "open"
+    },
+    "exercise": {
+      "animation": "stretch",
+      "eyes": "open"
+    },
+    "waiting": {
+      "animation": "none",
+      "eyes": "open"
+    },
+    "celebration": {
+      "animation": "hop",
+      "eyes": "open"
+    },
+    "snoozed": {
+      "animation": "none",
+      "eyes": "closed"
+    },
+    "focus": {
+      "animation": "none",
+      "eyes": "closed"
+    },
+    "disconnected": {
+      "animation": "none",
+      "eyes": "open",
+      "filter": "desaturate"
+    }
+  }
+}

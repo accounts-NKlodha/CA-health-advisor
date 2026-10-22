@@ -1,0 +1,10 @@
+<svg viewBox="0 0 128 128" aria-hidden="true">
+  <ellipse cx="64" cy="118" rx="38" ry="5" fill="#0000002a"/>
+  <path class="hy-a" d="M64 10 C64 10 26 58 26 82 a38 38 0 0 0 76 0 C102 58 64 10 64 10Z"/>
+  <ellipse class="hy-b" cx="48" cy="64" rx="7" ry="13" opacity=".85" transform="rotate(20 48 64)"/>
+  <ellipse class="eye" cx="53" cy="82" rx="3.06" ry="3.6" fill="#1f2a30"/>
+  <ellipse class="eye" cx="75" cy="82" rx="3.06" ry="3.6" fill="#1f2a30"/>
+  <circle cx="45" cy="93" r="4" fill="#f4a3a3" opacity=".7"/>
+  <circle cx="83" cy="93" r="4" fill="#f4a3a3" opacity=".7"/>
+  <path d="M59 92 q5 4 10 0" stroke="#1f2a30" fill="none" stroke-width="2.2" stroke-linecap="round"/>
+</svg>
