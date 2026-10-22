@@ -1,0 +1,120 @@
+# HealthierYou CI (slice V1-0).
+# Linux: format, lint and unit tests for the shared core, server and simulator, plus the
+# companion UI type check and build. The companion is a Windows product (Tauri 2 +
+# WebView2), so it is linted, tested and built on the Windows job, modelled on the
+# batch 1 feasibility workflow (spike/batch1). Installers and the bundled fixed WebView2
+# runtime are slice V1-6, so the Windows job builds the binary without bundling.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  # Keep in step with rust-toolchain.toml.
+  RUST_TOOLCHAIN: 1.97.0
+
+jobs:
+  rust-linux:
+    name: Rust (Linux) - fmt, clippy, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy (warnings denied)
+        run: cargo clippy --workspace --exclude hy-companion --all-targets --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --exclude hy-companion --locked
+
+  ui:
+    name: Companion UI - type check and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/companion/ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/companion/ui/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run build
+
+  windows:
+    name: Windows - clippy, tests, companion build
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/companion/ui/package-lock.json
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --component rustfmt,clippy
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the companion UI (the Tauri build embeds it)
+        working-directory: apps/companion/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Clippy, whole workspace (warnings denied)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Tests, whole workspace
+        run: cargo test --workspace --locked
+
+      - name: Build the companion with the Tauri CLI (no installer until V1-6)
+        working-directory: apps/companion
+        run: |
+          node ui/node_modules/@tauri-apps/cli/tauri.js build --no-bundle
+          $exe = Get-Item ../../target/release/hy-companion.exe
+          "hy-companion.exe size_mb=$([math]::Round($exe.Length / 1MB, 1)) sha256=$((Get-FileHash $exe.FullName -Algorithm SHA256).Hash)"
+
+      - name: Run the server and simulator skeletons
+        run: |
+          cargo run --locked -q -p hy-server
+          cargo run --locked -q -p hy-sim

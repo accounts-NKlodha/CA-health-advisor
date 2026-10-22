@@ -1,0 +1,49 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/hy-core",
+    "crates/hy-server",
+    "crates/hy-sim",
+    "apps/companion/src-tauri",
+]
+# The companion is a Windows product (Tauri 2 + WebView2). It is built and
+# tested by the Windows CI job; the Linux job excludes it (see .github/workflows/ci.yml).
+default-members = ["crates/hy-core", "crates/hy-server", "crates/hy-sim"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "UNLICENSED"
+publish = false
+repository = "https://github.com/accounts-NKlodha/CA-health-advisor"
+
+[workspace.dependencies]
+hy-core = { path = "crates/hy-core" }
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock", "serde"] }
+chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
+getrandom = "0.4.3"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+uuid = { version = "1.28.0", features = ["serde", "v7"] }
+proptest = "1.12.0"
+tempfile = "3.27.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

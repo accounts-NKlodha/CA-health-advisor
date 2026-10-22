@@ -1,0 +1,16 @@
+[package]
+name = "hy-sim"
+description = "HealthierYou load simulator (skeleton; implemented in V1-5)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+hy-core.workspace = true
+chrono.workspace = true
+
+[lints]
+workspace = true

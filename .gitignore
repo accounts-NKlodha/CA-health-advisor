@@ -1,0 +1,8 @@
+/target/
+**/node_modules/
+apps/companion/ui/dist/
+apps/companion/src-tauri/gen/
+apps/companion/src-tauri/webview2-fixed/
+*.db
+*.db-wal
+*.db-shm

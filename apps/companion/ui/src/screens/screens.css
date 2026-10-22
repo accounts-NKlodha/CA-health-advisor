@@ -1,0 +1,24 @@
+:root {
+  --bg: #ffffff;
+  --fg: #1f2328;
+  color-scheme: light dark;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1f2328;
+    --fg: #f0f3f6;
+  }
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+main {
+  padding: 16px;
+  max-width: 40rem;
+}
+h1 {
+  font-size: 1.25rem;
+}

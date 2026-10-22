@@ -1,6 +1,6 @@
 # HealthierYou — planning workspace
 
-Status: **Discovery & PRD draft; no product implementation authorised.** Updated 18 October 2026.
+Status: **V1-0 build slice in progress** (21 October 2026). The owner approved the prototype and the reviewer closed the prototype gate on 21 October 2026, authorising the agreed V1/V2 build in reviewed slices. The architecture (`docs/Architecture_V1_V2.md`, PR #3) and PRD 0.3 govern the build.
 
 User target: V1, V2 and V3 by 5 November 2026. Codex plans/reviews; Claude develops; user approves PRD, prototype and go-live.
 
@@ -19,3 +19,24 @@ Documents are draft proposals where labelled. Neither a prototype nor a specific
 Shared repository supplied by the user: [accounts-NKlodha/CA-health-advisor](https://github.com/accounts-NKlodha/CA-health-advisor). Repository visibility is public. This initial publication contains planning documents only; private conversation exports and operational credentials are not published.
 
 Source conversation export is retained as background. `sources/` and `AGENTS.md` are synced project references and must not be modified. Historical suggestions do not override the PRD or current user decisions.
+
+## Code layout (slice V1-0)
+
+| Path | What it is |
+| --- | --- |
+| `crates/hy-core` | Shared Rust core: schema, local SQLite store, migrations, clock and time zone |
+| `crates/hy-server` | Office LAN server (skeleton; built in V1-5 after the pairing security gate) |
+| `crates/hy-sim` | Load simulator (skeleton; built in V1-5) |
+| `apps/companion/src-tauri` | Windows desktop companion, Tauri 2 (skeleton; pet and screens from V1-1) |
+| `apps/companion/ui` | Companion pages: pet (plain TypeScript) and screens (Preact), built with Vite |
+
+Local checks (Rust toolchain pinned in `rust-toolchain.toml`, Node 22):
+
+```
+cargo fmt --all --check
+cargo clippy --workspace --exclude hy-companion --all-targets --locked -- -D warnings
+cargo test --workspace --exclude hy-companion --locked
+(cd apps/companion/ui && npm ci && npm run build)
+```
+
+The companion builds and is tested on the Windows CI job (`.github/workflows/ci.yml`).
