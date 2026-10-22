@@ -334,6 +334,47 @@ fn pomodoro_survives_a_restart_paused() {
     assert_eq!(c.view().bubble, Some(Bubble::PomodoroPausedByLock));
 }
 
+#[test]
+fn a_card_opened_during_a_meeting_does_not_survive_a_restart() {
+    let env = Env::new(ist(20, 10, 0));
+    let mut c = env.open();
+    c.handle(Input::StartPomodoro {
+        preset: PomodoroPreset::Custom {
+            work_min: 10,
+            break_min: 2,
+        },
+        replace_focus: false,
+        resume_coaching: false,
+    })
+    .unwrap();
+    c.handle(Input::SetMeeting(true)).unwrap();
+    work(&env, &mut c, mins(10));
+    assert_eq!(c.view().bubble, None);
+    c.handle(Input::OpenPending).unwrap();
+    assert!(matches!(
+        c.view().bubble,
+        Some(Bubble::PomodoroBreak { .. })
+    ));
+    c.close().unwrap();
+    env.clock.advance(chrono::Duration::minutes(1));
+    // The time closed counts as a sleep: a new hold that withdraws the card. The meeting
+    // is still on, so it does not come back by itself.
+    let mut c = env.open();
+    assert!(c.view().meeting);
+    assert_eq!(c.view().bubble, None);
+    assert_eq!(
+        c.view().pomodoro.unwrap().phase,
+        PomodoroPhase::BreakOffered
+    );
+    work(&env, &mut c, mins(3));
+    assert_eq!(c.view().bubble, None);
+    c.handle(Input::OpenPending).unwrap();
+    assert!(matches!(
+        c.view().bubble,
+        Some(Bubble::PomodoroBreak { .. })
+    ));
+}
+
 // ------------------------------------------------------- durable ordering, stale
 
 #[test]

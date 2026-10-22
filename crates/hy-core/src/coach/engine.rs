@@ -195,6 +195,41 @@ struct Away {
     confirmed: bool,
 }
 
+/// The holds above the Pomodoro in force at one moment, one bit for each source (pause,
+/// lock, sleep, off-hours, focus, presentation, meeting). A Pomodoro card the user opens
+/// under a hold remembers this set; the card is withdrawn as soon as the set gains any
+/// source it did not have, so the exception covers only the holds the user saw when they
+/// asked for the card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+struct HoldSet(u8);
+
+impl HoldSet {
+    const EMPTY: Self = Self(0);
+    const PAUSE: u8 = 1;
+    const LOCK: u8 = 1 << 1;
+    const SLEEP: u8 = 1 << 2;
+    /// Away but neither locked nor asleep (only between a wake and its away ending).
+    const AWAY: u8 = 1 << 3;
+    const OFF_HOURS: u8 = 1 << 4;
+    const FOCUS: u8 = 1 << 5;
+    const PRESENTING: u8 = 1 << 6;
+    const MEETING: u8 = 1 << 7;
+
+    const fn with(self, bit: u8, on: bool) -> Self {
+        if on { Self(self.0 | bit) } else { self }
+    }
+
+    const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Every source in `self` is also in `other`.
+    const fn within(self, other: Self) -> bool {
+        self.0 & !other.0 == 0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Pomodoro {
@@ -205,11 +240,13 @@ struct Pomodoro {
     left_ms: u64,
     paused: Option<PomodoroPause>,
     card_open: bool,
-    /// The user opened the open card while a hold above the Pomodoro was already in
-    /// force (from the pet menu or the panel). Such a card stays until the user closes it
-    /// or that stretch of holds ends; any other card is withdrawn when a hold starts.
+    /// The holds above the Pomodoro in force when the user opened the open card (from the
+    /// pet menu or the panel); empty for a card that opened on its own or with no hold.
+    /// Such a card stays while the holds in force are among these; it is withdrawn when a
+    /// hold starts that was not among them (a new lock, sleep or pause, a stronger hold,
+    /// or one that ended and began again). Any other card is withdrawn when a hold starts.
     #[serde(default)]
-    card_opened_under_hold: bool,
+    card_opened_under: HoldSet,
 }
 
 /// The engine's complete saved state. Opaque; serialised by the driver into the store.
@@ -407,6 +444,9 @@ impl Engine {
             confirmed: was_away.is_some_and(|a| a.confirmed),
         });
         self.pause_pomodoro_for_lock();
+        // The time closed counts as a sleep, a new hold: it withdraws a card the user
+        // opened under other holds before the app stopped.
+        self.withdraw_held_pomodoro_card(ctx, &mut out);
         self.advance(ctx, &mut out, self.s.idle_ms);
         self.s.away = self.s.away.map(|a| Away { asleep: false, ..a });
         self.end_away(ctx, &mut out);
@@ -492,10 +532,26 @@ impl Engine {
 
     /// A hold above the Pomodoro (pause, lock, sleep, off-hours, focus, presentation or
     /// meeting) is in force. Under it no Pomodoro card opens on its own and an open card
-    /// is withdrawn, unless the user opened it during this same stretch of holds. The
-    /// Pomodoro's phase is kept, so the panel and the pet menu still offer it.
+    /// is withdrawn, unless the user opened it while every hold now in force already was
+    /// (see [`HoldSet`]). The Pomodoro's phase is kept, so the panel and the pet menu
+    /// still offer it.
     fn pomodoro_card_held(&self, ctx: &Context) -> bool {
-        self.level1(ctx) || self.level2(ctx)
+        !self.holds_above_pomodoro(ctx).is_empty()
+    }
+
+    /// Each source of a hold above the Pomodoro now in force (non-empty exactly when
+    /// level 1 or level 2 holds).
+    fn holds_above_pomodoro(&self, ctx: &Context) -> HoldSet {
+        let away = self.s.away;
+        HoldSet::EMPTY
+            .with(HoldSet::PAUSE, self.s.pause.is_some())
+            .with(HoldSet::LOCK, away.is_some_and(|a| a.locked))
+            .with(HoldSet::SLEEP, away.is_some_and(|a| a.asleep))
+            .with(HoldSet::AWAY, away.is_some_and(|a| !a.locked && !a.asleep))
+            .with(HoldSet::OFF_HOURS, self.off_hours(ctx))
+            .with(HoldSet::FOCUS, self.s.focus_until.is_some())
+            .with(HoldSet::PRESENTING, self.presenting_effective(ctx))
+            .with(HoldSet::MEETING, self.meeting_on(ctx))
     }
 
     /// The highest precedence level holding reminders back.
@@ -785,7 +841,7 @@ impl Engine {
             PomodoroPhase::Work => {
                 p.phase = PomodoroPhase::BreakOffered;
                 p.card_open = visible;
-                p.card_opened_under_hold = false;
+                p.card_opened_under = HoldSet::EMPTY;
                 out.notices.push(Notice::PomodoroRoundCounted);
                 let d = ctx.zone.local_date(ctx.wall);
                 self.s.days.entry(d).or_default().tally.pomodoro_rounds += 1;
@@ -800,7 +856,7 @@ impl Engine {
                 } else {
                     p.phase = PomodoroPhase::RoundDone;
                     p.card_open = visible;
-                    p.card_opened_under_hold = false;
+                    p.card_opened_under = HoldSet::EMPTY;
                 }
             }
             PomodoroPhase::BreakOffered | PomodoroPhase::RoundDone => {}
@@ -850,7 +906,7 @@ impl Engine {
             && p.paused == Some(PomodoroPause::LockOrSleep)
         {
             p.card_open = show;
-            p.card_opened_under_hold = false;
+            p.card_opened_under = HoldSet::EMPTY;
         }
     }
 
@@ -1215,7 +1271,7 @@ impl Engine {
                 if !self.visible(ctx) {
                     return Ignored("the pet is hidden");
                 }
-                let held = self.pomodoro_card_held(ctx);
+                let holds = self.holds_above_pomodoro(ctx);
                 if let Some(o) = self.s.offer.as_mut()
                     && o.phase == OfferPhase::Waiting
                 {
@@ -1230,7 +1286,7 @@ impl Engine {
                     ) || p.paused == Some(PomodoroPause::LockOrSleep))
                 {
                     p.card_open = true;
-                    p.card_opened_under_hold = held;
+                    p.card_opened_under = holds;
                     Applied
                 } else {
                     Ignored("nothing waiting")
@@ -1365,7 +1421,7 @@ impl Engine {
                     left_ms: ms(work),
                     paused: None,
                     card_open: false,
-                    card_opened_under_hold: false,
+                    card_opened_under: HoldSet::EMPTY,
                 });
                 Applied
             }
@@ -1416,7 +1472,7 @@ impl Engine {
             }
             Input::SkipPomodoroBreak => {
                 let auto = ctx.config.pomodoro_auto_start;
-                let held = self.pomodoro_card_held(ctx);
+                let holds = self.holds_above_pomodoro(ctx);
                 let visible = self.visible(ctx);
                 let Some(p) = self.s.pomodoro.as_mut() else {
                     return Ignored("no Pomodoro");
@@ -1434,7 +1490,7 @@ impl Engine {
                     // only where they can see it (not while the pet is hidden).
                     p.phase = PomodoroPhase::RoundDone;
                     p.card_open = visible;
-                    p.card_opened_under_hold = held;
+                    p.card_opened_under = holds;
                 }
                 Applied
             }
@@ -1480,6 +1536,31 @@ impl Engine {
 
     // ------------------------------------------------------------------- settle
 
+    /// A hold above the Pomodoro withdraws its card (break, round done, or paused while
+    /// away) unless the user opened it under holds that include every hold now in force:
+    /// any other hold (a new lock, sleep or pause, a stronger hold, or one that ended and
+    /// began again) withdraws it too. The phase stays; the card is not reopened when the
+    /// hold ends.
+    fn withdraw_held_pomodoro_card(&mut self, ctx: &Context, out: &mut Out) {
+        let holds = self.holds_above_pomodoro(ctx);
+        if let Some(p) = self.s.pomodoro.as_mut() {
+            let keep = if !p.card_open {
+                HoldSet::EMPTY
+            } else if holds.within(p.card_opened_under) {
+                // A hold that has ended no longer covers the card if it begins again.
+                holds
+            } else {
+                p.card_open = false;
+                out.significant = true;
+                HoldSet::EMPTY
+            };
+            if p.card_opened_under != keep {
+                p.card_opened_under = keep;
+                out.significant = true;
+            }
+        }
+    }
+
     /// Apply holds, then offer at most one thing.
     fn settle(&mut self, ctx: &Context, out: &mut Out) {
         let hold = self.hold(ctx);
@@ -1494,20 +1575,7 @@ impl Engine {
             self.s.prompt = None;
             out.significant = true;
         }
-        // A hold above the Pomodoro withdraws its card (break, round done, or paused while
-        // away) unless the user opened it during this stretch of holds. The phase stays;
-        // the card is not reopened when the hold ends.
-        let held = self.pomodoro_card_held(ctx);
-        if let Some(p) = self.s.pomodoro.as_mut()
-            && p.card_open
-        {
-            if held && !p.card_opened_under_hold {
-                p.card_open = false;
-                out.significant = true;
-            } else if !held {
-                p.card_opened_under_hold = false;
-            }
-        }
+        self.withdraw_held_pomodoro_card(ctx, out);
         // End of a quiet period: nothing is replayed.
         let quiet = self.quiet_hold(ctx);
         if let Some(ended) = self.s.quiet_hold
@@ -1755,11 +1823,11 @@ impl Engine {
                 Prompt::Lighter => Bubble::LighterSchedule,
             });
         }
-        let held = self.pomodoro_card_held(ctx);
+        let holds = self.holds_above_pomodoro(ctx);
         let p = self
             .s
             .pomodoro
-            .filter(|p| p.card_open && (!held || p.card_opened_under_hold))?;
+            .filter(|p| p.card_open && holds.within(p.card_opened_under))?;
         if p.paused == Some(PomodoroPause::LockOrSleep) {
             return Some(Bubble::PomodoroPausedByLock);
         }
