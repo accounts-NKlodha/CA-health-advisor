@@ -1,0 +1,138 @@
+//! IPC commands. Each window may call only the commands its capability file grants
+//! (`capabilities/*.json`). The commands are synchronous, so Tauri runs them on the main
+//! thread, which the shell requires.
+
+use std::sync::Arc;
+
+use hy_pet::profile::PetEdit;
+use tauri::State;
+
+use crate::shell::Shell;
+use crate::view::{PanelView, PetView, SettingsView};
+
+type ShellState<'a> = State<'a, Arc<Shell>>;
+
+// ------------------------------------------------------------------ pet window
+
+/// The pet page's first view.
+#[tauri::command]
+pub fn pet_bootstrap(shell: ShellState<'_>) -> PetView {
+    shell.current_pet_view()
+}
+
+/// The pet page drew its first view.
+#[tauri::command]
+pub fn pet_ready(shell: ShellState<'_>) {
+    shell.mark_page_ready();
+}
+
+/// A click on the pet (pointer down and up without moving).
+#[tauri::command]
+pub fn pet_click(shell: ShellState<'_>) {
+    shell.pet_click();
+}
+
+/// The open bubble's measured size in CSS pixels, for the open item `token`.
+#[tauri::command]
+pub fn bubble_measured(shell: ShellState<'_>, token: u64, width: f64, height: f64) {
+    shell.bubble_measured(token, width, height);
+}
+
+/// The bubble's close button.
+#[tauri::command]
+pub fn bubble_close(shell: ShellState<'_>) {
+    shell.bubble_close();
+}
+
+/// An action in the engine's bubble.
+#[tauri::command]
+pub fn bubble_action(shell: ShellState<'_>, bubble_id: String, action_id: String) {
+    shell.bubble_action(&bubble_id, &action_id);
+}
+
+/// An engine action in the pet menu or panel.
+#[tauri::command]
+pub fn menu_action(shell: ShellState<'_>, action_id: String) {
+    shell.menu_action(&action_id);
+}
+
+/// Pointer down on the pet.
+#[tauri::command]
+pub fn drag_start(shell: ShellState<'_>) {
+    shell.drag_start();
+}
+
+/// Pointer moved while down.
+#[tauri::command]
+pub fn drag_move(shell: ShellState<'_>) {
+    shell.drag_move();
+}
+
+/// Pointer up. Without movement it is a click.
+#[tauri::command]
+pub fn drag_end(shell: ShellState<'_>, moved: bool) {
+    if !shell.drag_end(moved) {
+        shell.pet_click();
+    }
+}
+
+// ------------------------------------------------------------ shared actions
+
+/// A pet edit (Settings, pet menu or panel).
+///
+/// # Errors
+/// The refusal, worded for the user.
+#[tauri::command]
+pub fn pet_edit(shell: ShellState<'_>, edit: PetEdit) -> Result<SettingsView, String> {
+    shell.edit(&edit)
+}
+
+/// "Bring pet above clock".
+#[tauri::command]
+pub fn bring_pet(shell: ShellState<'_>) {
+    shell.bring_above_clock();
+}
+
+/// "Hide pet" (shown again from the tray).
+#[tauri::command]
+pub fn hide_pet(shell: ShellState<'_>) {
+    shell.hide_pet();
+}
+
+/// Open the settings window.
+#[tauri::command]
+pub fn open_settings(shell: ShellState<'_>) {
+    shell.open_settings();
+}
+
+// ----------------------------------------------------------------------- panel
+
+/// The panel page's first view.
+#[tauri::command]
+pub fn panel_bootstrap(shell: ShellState<'_>) -> PanelView {
+    shell.panel_view()
+}
+
+/// Escape or an action that finishes with the panel: close it and give focus back to
+/// the window that had it (`restore`), or leave focus where the action put it.
+#[tauri::command]
+pub fn panel_close(shell: ShellState<'_>, restore: bool) {
+    shell.close_panel(restore);
+}
+
+// -------------------------------------------------------------------- settings
+
+/// The Settings page's view.
+#[tauri::command]
+pub fn settings_bootstrap(shell: ShellState<'_>) -> SettingsView {
+    shell.settings_view()
+}
+
+/// Change the panel hotkey (`null` turns it off).
+///
+/// # Errors
+/// The refusal, worded for the user.
+#[tauri::command]
+pub fn set_hotkey(shell: ShellState<'_>, hotkey: Option<String>) -> Result<SettingsView, String> {
+    shell.set_hotkey(hotkey.as_deref())
+}

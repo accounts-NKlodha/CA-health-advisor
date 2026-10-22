@@ -1,9 +1,13 @@
-# HealthierYou CI (slice V1-0).
-# Linux: format, lint and unit tests for the shared core, server and simulator, plus the
-# companion UI type check and build. The companion is a Windows product (Tauri 2 +
+# HealthierYou CI (slices V1-0 and V1-1).
+# Linux: format, lint and unit tests for the shared core, the pet shell logic (hy-pet:
+# placement and clamping, pet packs, edits), server and simulator, plus the companion UI
+# type check and build. The companion is a Windows product (Tauri 2 +
 # WebView2), so it is linted, tested and built on the Windows job, modelled on the
 # batch 1 feasibility workflow (spike/batch1). Installers and the bundled fixed WebView2
 # runtime are slice V1-6, so the Windows job builds the binary without bundling.
+# The Windows job then runs the built companion's scripted self-test (HY_SELFTEST) on the
+# runner's desktop: real pet window styles, placement at every size, Bring pet above
+# clock, tray hide and show, presentation hiding, bubble layout and the panel hotkey.
 name: ci
 
 on:
@@ -113,6 +117,48 @@ jobs:
           node ui/node_modules/@tauri-apps/cli/tauri.js build --no-bundle
           $exe = Get-Item ../../target/release/hy-companion.exe
           "hy-companion.exe size_mb=$([math]::Round($exe.Length / 1MB, 1)) sha256=$((Get-FileHash $exe.FullName -Algorithm SHA256).Hash)"
+
+      - name: Pet shell self-test on the runner's desktop (idle memory sampled, informational)
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'hy-selftest.json'
+          $env:HY_SELFTEST = $report
+          $env:HY_SELFTEST_IDLE_S = '20'
+          $p = Start-Process -FilePath target/release/hy-companion.exe -PassThru
+          $null = $p.Handle  # keep the handle so the exit code is readable
+          function Get-Tree([int]$root) {
+            $all = Get-CimInstance Win32_Process
+            $ids = @($root); $added = $true
+            while ($added) {
+              $added = $false
+              foreach ($proc in $all) {
+                if ($ids -contains $proc.ParentProcessId -and -not ($ids -contains $proc.ProcessId)) {
+                  $ids += $proc.ProcessId; $added = $true
+                }
+              }
+            }
+            $all | Where-Object { $ids -contains $_.ProcessId }
+          }
+          $deadline = (Get-Date).AddMinutes(5)
+          $samples = @()
+          while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 2
+            $tree = @(Get-Tree $p.Id)
+            if ($tree.Count -gt 0) {
+              $ws = [math]::Round((($tree | Measure-Object WorkingSetSize -Sum).Sum) / 1MB, 1)
+              $priv = [math]::Round((($tree | Measure-Object PrivatePageCount -Sum).Sum) / 1MB, 1)
+              $samples += [pscustomobject]@{ t = (Get-Date).ToString('HH:mm:ss'); processes = $tree.Count; working_set_mb = $ws; private_mb = $priv }
+            }
+          }
+          if (-not $p.HasExited) {
+            Stop-Process -Id $p.Id -Force
+            throw 'The self-test did not finish within 5 minutes'
+          }
+          $p.WaitForExit()
+          "Process tree memory (A7 target: idle at most 150 MB; informational on a CI runner):"
+          $samples | Format-Table -AutoSize | Out-String -Width 200
+          if (Test-Path $report) { Get-Content $report } else { 'No self-test report was written' }
+          "self-test exit code: $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { throw "Pet shell self-test failed (exit code $($p.ExitCode))" }
 
       - name: Run the server and simulator skeletons
         run: |

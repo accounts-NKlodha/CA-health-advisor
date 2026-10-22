@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "panel",
+  "description": "The keyboard pet panel (Ctrl+Alt+H): the pet menu's actions, Escape hands focus back.",
+  "windows": ["panel"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-panel-bootstrap",
+    "allow-panel-close",
+    "allow-menu-action",
+    "allow-pet-edit",
+    "allow-bring-pet",
+    "allow-hide-pet",
+    "allow-open-settings"
+  ]
+}

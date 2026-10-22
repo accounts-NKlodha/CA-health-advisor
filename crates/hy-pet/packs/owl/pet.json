@@ -1,0 +1,73 @@
+{
+  "format": 1,
+  "id": "owl",
+  "version": "1.0.0",
+  "name": "Helpful owl",
+  "default_name": "Hoot",
+  "art_status": "drawn",
+  "provenance": {
+    "origin": "Original artwork drawn for the HealthierYou clickable prototype (revision 3, approved on 21 Oct 2026), ported unchanged to the pack format in slice V1-1.",
+    "licence": "Original project artwork; no third-party or paid assets.",
+    "review": "Visual family approved with the prototype on 21 Oct 2026. The ten finished pets still go through the art review."
+  },
+  "default_tone": "gentle",
+  "palette": [
+    {
+      "name": "Bark",
+      "a": "#9a7653",
+      "b": "#f3e3c8"
+    },
+    {
+      "name": "Slate",
+      "a": "#6d7f99",
+      "b": "#e7edf5"
+    },
+    {
+      "name": "Clay",
+      "a": "#a0685f",
+      "b": "#f6dfd8"
+    }
+  ],
+  "hitbox": {
+    "x": 20,
+    "y": 14,
+    "width": 88,
+    "height": 108
+  },
+  "art": "art.svg",
+  "states": {
+    "idle": {
+      "animation": "bob",
+      "eyes": "open"
+    },
+    "cue": {
+      "animation": "wiggle",
+      "eyes": "open"
+    },
+    "exercise": {
+      "animation": "stretch",
+      "eyes": "open"
+    },
+    "waiting": {
+      "animation": "none",
+      "eyes": "open"
+    },
+    "celebration": {
+      "animation": "hop",
+      "eyes": "open"
+    },
+    "snoozed": {
+      "animation": "none",
+      "eyes": "closed"
+    },
+    "focus": {
+      "animation": "none",
+      "eyes": "closed"
+    },
+    "disconnected": {
+      "animation": "none",
+      "eyes": "open",
+      "filter": "desaturate"
+    }
+  }
+}

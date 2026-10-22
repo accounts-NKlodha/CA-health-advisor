@@ -1,0 +1,13 @@
+<svg viewBox="0 0 128 128" aria-hidden="true">
+  <ellipse cx="64" cy="118" rx="38" ry="5" fill="#0000002a"/>
+  <path class="hy-sa" d="M96 100 q22 -6 14 -30" stroke-width="8" fill="none" stroke-linecap="round"/>
+  <ellipse class="hy-a" cx="62" cy="96" rx="34" ry="21"/>
+  <ellipse class="hy-b" cx="62" cy="102" rx="20" ry="12"/>
+  <path class="hy-a" d="M40 46 l4 -24 l16 14z M84 46 l-4 -24 l-16 14z"/>
+  <circle class="hy-a" cx="62" cy="58" r="25"/>
+  <ellipse class="hy-b" cx="62" cy="66" rx="13" ry="9"/>
+  <ellipse class="eye" cx="52" cy="55" rx="2.72" ry="3.2" fill="#1f2a30"/>
+  <ellipse class="eye" cx="72" cy="55" rx="2.72" ry="3.2" fill="#1f2a30"/>
+  <path d="M59 63 h6 l-3 3z" fill="#c0605a"/>
+  <path d="M57 68 q5 4 10 0" stroke="#1f2a30" fill="none" stroke-width="2.2" stroke-linecap="round"/>
+</svg>

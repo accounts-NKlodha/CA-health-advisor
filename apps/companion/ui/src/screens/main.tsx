@@ -1,18 +1,18 @@
-// The screens page uses Preact (architecture 7). It exists only while a screen is open.
-// V1-0 skeleton: setup, settings, sharing and reviews are slices V1-1 to V1-4.
+// The screens page uses Preact (architecture 7). It exists only while a screen is open:
+// the window is created on demand and destroyed on close (A7).
+// Slice V1-1 provides Settings > Pet (wireframe W3). Other settings arrive with their
+// slices.
 import { render } from 'preact';
-import { SLICE, scaffoldNotice } from '../shared/build';
+import { PetSettings } from './PetSettings';
 
 function App() {
   return (
-    <main>
-      <h1>HealthierYou</h1>
-      <p>{scaffoldNotice('Screens')}</p>
-      <p>
-        Slice {SLICE} provides the workspace, the shared core schema, the local store and its
-        migrations, and the clock and time-zone rules. Nothing is shared and no server is used.
-      </p>
-    </main>
+    <div class="shell">
+      <header class="top">
+        <h1>Settings</h1>
+      </header>
+      <PetSettings />
+    </div>
   );
 }
 

@@ -1,13 +1,460 @@
+/* The pet page. The window is transparent; only the pet (85% opacity, owner decision)
+   and fully opaque bubbles, badges and controls are drawn. In high contrast everything
+   is solid and uses system colours. Animations run at 12 frames a second (steps). */
+
 :root {
+  --surface: #ffffff;
+  --text: #1d2730;
+  --muted: #55626d;
+  --line: #c9d2d9;
+  --accent: #1f6f8b;
+  --accent-text: #ffffff;
+  --chip: #eef3f6;
+  --chip-on: #dff1f6;
+  --badge: #b5442c;
+  --badge-text: #ffffff;
+  --tag: #1d2730;
+  --tag-text: #ffffff;
+  --pal-a: #6aa86a;
+  --pal-b: #3f7b4f;
+  --art-opacity: 0.85;
   color-scheme: light dark;
   font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
 }
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #1f262c;
+    --text: #eef2f5;
+    --muted: #b5c0c8;
+    --line: #3d4a54;
+    --accent: #7cc4dc;
+    --accent-text: #0d1a20;
+    --chip: #2a333a;
+    --chip-on: #1f3b45;
+    --tag: #eef2f5;
+    --tag-text: #1d2730;
+  }
+}
+
 html,
 body {
   margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
   background: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
 }
+
 #pet {
-  padding: 8px;
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------- the pet */
+
+.pet {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  width: 128px;
+  height: 128px;
+}
+
+.art,
+.art svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.art {
+  opacity: var(--art-opacity);
+  transform-origin: 50% 100%;
+}
+
+.art .hy-a {
+  fill: var(--pal-a);
+}
+.art .hy-b {
+  fill: var(--pal-b);
+}
+.art .hy-sa {
+  stroke: var(--pal-a);
+}
+.art .hy-sb {
+  stroke: var(--pal-b);
+}
+.art .eye {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.eyes-closed .art .eye {
+  transform: scaleY(0.15);
+}
+
+.desaturate .art {
+  filter: grayscale(0.85);
+}
+
+.dim .art {
+  opacity: 0.45;
+}
+
+.hit {
+  position: absolute;
+  cursor: grab;
+  touch-action: none;
+}
+
+.dragging .hit {
+  cursor: grabbing;
+}
+
+.badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  box-sizing: border-box;
+  border-radius: 11px;
+  background: var(--badge);
+  color: var(--badge-text);
+  font-weight: 700;
+  font-size: 13px;
+  line-height: 22px;
+  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--surface);
+  pointer-events: none;
+}
+
+.badge[hidden],
+.tag[hidden] {
+  display: none;
+}
+
+.tag {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 7px;
+  border-radius: 9px;
+  background: var(--tag);
+  color: var(--tag-text);
   font-size: 12px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+/* 12 frames a second: steps() makes the motion deliberate and cheap to draw. */
+.anim-bob .art {
+  animation: hy-bob 2s steps(24) infinite;
+}
+.anim-wiggle .art {
+  animation: hy-wiggle 1.5s steps(18) infinite;
+}
+.anim-hop .art {
+  animation: hy-hop 1s steps(12) infinite;
+}
+.anim-stretch .art {
+  animation: hy-stretch 3s steps(36) infinite;
+}
+.dragging .art {
+  animation: none;
+}
+
+@keyframes hy-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3%);
+  }
+}
+@keyframes hy-wiggle {
+  0%,
+  100% {
+    transform: rotate(0);
+  }
+  25% {
+    transform: rotate(-4deg);
+  }
+  75% {
+    transform: rotate(4deg);
+  }
+}
+@keyframes hy-hop {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+  }
+  30% {
+    transform: translateY(-9%);
+  }
+}
+@keyframes hy-stretch {
+  0%,
+  100% {
+    transform: scale(1, 1);
+  }
+  50% {
+    transform: scale(0.94, 1.08);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .art {
+    animation: none !important;
+  }
+}
+
+/* ------------------------------------------------------- the bubble and menu */
+
+.bubble {
+  position: absolute;
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 200px;
+  overflow: auto;
+  padding: 12px 34px 12px 14px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 2px 8px #0000002e;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.bubble.measuring {
+  visibility: hidden;
+}
+
+.bubble h2 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.bubble p {
+  margin: 0 0 6px;
+  line-height: 1.4;
+}
+
+.chips {
+  list-style: none;
+  margin: 6px 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.chip {
+  background: var(--chip);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.chip.on {
+  background: var(--chip-on);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.chip-status::before {
+  content: ' \00b7 ';
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.btn,
+.seg-btn,
+.close,
+.link {
+  font: inherit;
+  cursor: pointer;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.btn:hover {
+  border-color: var(--accent);
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.link {
+  border: 0;
+  background: none;
+  color: var(--accent);
+  text-decoration: underline;
+  padding: 5px 4px;
+}
+
+.close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.close:hover {
+  background: var(--chip);
+  color: var(--text);
+}
+
+.menu h2 {
+  margin: 0 0 4px;
+}
+
+.size-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.seg-btn {
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  padding: 4px 10px;
+}
+
+.seg-btn:last-child {
+  border-right: 0;
+}
+
+.seg-btn[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.muted,
+.hint {
+  color: var(--muted);
+}
+
+.hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* --------------------------------------------------- high contrast: all solid */
+
+@media (forced-colors: active) {
+  :root {
+    --art-opacity: 1;
+  }
+  .dim .art {
+    opacity: 1;
+  }
+  .bubble,
+  .badge,
+  .tag,
+  .btn,
+  .seg,
+  .chip {
+    forced-color-adjust: none;
+    background: Canvas;
+    color: CanvasText;
+    border: 2px solid CanvasText;
+    box-shadow: none;
+  }
+  .btn.primary,
+  .seg-btn[aria-pressed='true'] {
+    background: Highlight;
+    color: HighlightText;
+  }
+  .seg-btn {
+    forced-color-adjust: none;
+    background: Canvas;
+    color: CanvasText;
+  }
+  .link,
+  .close {
+    color: LinkText;
+  }
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --art-opacity: 1;
+    --line: currentColor;
+  }
+  .bubble {
+    border-width: 2px;
+    box-shadow: none;
+  }
 }

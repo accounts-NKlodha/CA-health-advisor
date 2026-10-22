@@ -2,13 +2,14 @@
 resolver = "3"
 members = [
     "crates/hy-core",
+    "crates/hy-pet",
     "crates/hy-server",
     "crates/hy-sim",
     "apps/companion/src-tauri",
 ]
 # The companion is a Windows product (Tauri 2 + WebView2). It is built and
 # tested by the Windows CI job; the Linux job excludes it (see .github/workflows/ci.yml).
-default-members = ["crates/hy-core", "crates/hy-server", "crates/hy-sim"]
+default-members = ["crates/hy-core", "crates/hy-pet", "crates/hy-server", "crates/hy-sim"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,6 +21,7 @@ repository = "https://github.com/accounts-NKlodha/CA-health-advisor"
 
 [workspace.dependencies]
 hy-core = { path = "crates/hy-core" }
+hy-pet = { path = "crates/hy-pet" }
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock", "serde"] }
 chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
 getrandom = "0.4.3"

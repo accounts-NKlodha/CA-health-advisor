@@ -25,10 +25,11 @@ Source conversation export is retained as background. `sources/` and `AGENTS.md`
 | Path | What it is |
 | --- | --- |
 | `crates/hy-core` | Shared Rust core: schema, local SQLite store, migrations, clock and time zone |
+| `crates/hy-pet` | Pet shell logic (V1-1): placement and clamping in the work area, pet packs (`crates/hy-pet/packs`), pet edits, the `PetShell` interface for the coaching engine |
 | `crates/hy-server` | Office LAN server (skeleton; built in V1-5 after the pairing security gate) |
 | `crates/hy-sim` | Load simulator (skeleton; built in V1-5) |
-| `apps/companion/src-tauri` | Windows desktop companion, Tauri 2 (skeleton; pet and screens from V1-1) |
-| `apps/companion/ui` | Companion pages: pet (plain TypeScript) and screens (Preact), built with Vite |
+| `apps/companion/src-tauri` | Windows desktop companion, Tauri 2: pet window, tray, keyboard pet panel, settings window |
+| `apps/companion/ui` | Companion pages: pet and keyboard panel (plain TypeScript), screens (Preact), built with Vite |
 
 Local checks (Rust toolchain pinned in `rust-toolchain.toml`, Node 22):
 

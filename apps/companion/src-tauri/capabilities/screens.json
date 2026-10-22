@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "screens",
+  "description": "The settings window (created on open, destroyed on close): pet library and edits, hotkey, bring pet above clock.",
+  "windows": ["screens"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-settings-bootstrap",
+    "allow-pet-edit",
+    "allow-set-hotkey",
+    "allow-bring-pet"
+  ]
+}

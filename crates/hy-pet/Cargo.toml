@@ -1,0 +1,22 @@
+[package]
+name = "hy-pet"
+description = "HealthierYou pet shell logic: work-area placement and DPI, pet packs, pet edits, shell model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+hy-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
