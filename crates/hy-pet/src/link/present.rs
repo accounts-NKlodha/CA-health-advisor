@@ -112,6 +112,12 @@ pub mod action {
     pub const WATER: &str = "water_250";
     /// "Today's movement".
     pub const MOVEMENT_START: &str = "movement_start";
+    /// "Movement done".
+    pub const MOVEMENT_DONE: &str = "movement_done";
+    /// "Did part of it".
+    pub const MOVEMENT_PARTIAL: &str = "movement_partial";
+    /// "Stopped, none done".
+    pub const MOVEMENT_STOP: &str = "movement_stop";
     /// "Deadline day" or "Plan a recovery day".
     pub const DEADLINE_DAY: &str = "deadline_day";
     /// "Recovery day: Thu 22 Oct".
@@ -899,6 +905,10 @@ fn menu(id: &str, label: &str, in_tray: bool) -> MenuAction {
 /// The engine's entries in the pet menu and keyboard panel (and the pause entries in the
 /// tray) for a view (wireframe B1, B5, B6 and T1).
 ///
+/// While a movement routine runs ([`CoachView::active_routine`]), its three result
+/// entries replace "Today's movement" in the menu, the panel and the tray, whatever hold
+/// the pet is showing.
+///
 /// The engine asks for a confirmation before replacing focus or a Pomodoro, or before a
 /// Pomodoro resumes paused coaching. The menu never skips that silently: an entry that
 /// would do one of these says so in its label, and only such an entry carries the
@@ -923,11 +933,19 @@ pub fn menu_actions(view: &CoachView) -> Vec<MenuAction> {
         false,
     ));
 
-    // The guide answers a running routine itself (its card, or the entry above while it
-    // waits behind the pet), so the menu only starts one.
-    let exercising =
-        view.guide.is_some() || view.chip(Activity::Movement).status == ChipStatus::InProgress;
-    if !exercising {
+    // The engine's routine state, not the pet's look: a pause, off-hours, focus, meeting
+    // or presentation shows its own state over a running routine, and the user must
+    // still be able to finish or stop it without lifting the hold. The tray carries
+    // these too, for when the pet is hidden. A guided routine counts as running too: these
+    // entries answer it in one go, beside its own card or "Show movement guide" above.
+    let movement_running = view
+        .active_routine
+        .is_some_and(|r| r.activity == Activity::Movement);
+    if movement_running {
+        m.push(menu(a::MOVEMENT_DONE, "Movement done", true));
+        m.push(menu(a::MOVEMENT_PARTIAL, "Did part of it", true));
+        m.push(menu(a::MOVEMENT_STOP, "Stopped, none done", true));
+    } else {
         m.push(menu(a::MOVEMENT_START, "Today's movement", false));
     }
     m.push(menu(a::BREAK, "Mark a break", false));

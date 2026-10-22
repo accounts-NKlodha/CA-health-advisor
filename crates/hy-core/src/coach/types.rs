@@ -565,10 +565,27 @@ pub struct CoachView {
     pub focus_left: Option<Duration>,
     /// The manual meeting toggle.
     pub meeting: bool,
-    /// The movement guide, open or waiting behind the pet.
+    /// The movement routine or eye rest in progress, if any. It is kept under every hold
+    /// (pause, off-hours, focus, meeting, presentation, lock), so it may be running while
+    /// [`Self::pet`] shows the hold rather than [`PetMode::Exercise`]; its result controls
+    /// must follow this field, not the pet. A movement routine runs in the movement guide
+    /// ([`Self::guide`]) and can also be answered with [`Input::RoutineFinished`].
+    #[serde(default)]
+    pub active_routine: Option<ActiveRoutine>,
+    /// The movement guide, open or waiting behind the pet. It exists exactly while a
+    /// movement routine is active, and briefly after it to show the result.
     pub guide: Option<GuideView>,
     /// The deadline day and the recovery-day plan.
     pub recovery: RecoveryView,
+}
+
+/// A movement routine or eye rest in progress (precedence level 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveRoutine {
+    /// Movement or eye rest.
+    pub activity: Activity,
+    /// The reminder it was started from; `None` when started from the pet menu.
+    pub offer: Option<Uuid>,
 }
 
 impl CoachView {

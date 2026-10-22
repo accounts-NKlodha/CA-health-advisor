@@ -12,8 +12,8 @@ use chrono::{NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
 use hy_core::clock::ManualClock;
 use hy_core::coach::movement::PROVISIONAL_NOTICE;
 use hy_core::coach::{
-    Bubble as CoachBubble, CheckInAnswer, Chip, ChipStatus, CoachView, GuideAction, GuideStage,
-    GuideView, HiddenReason, Input, PauseLength, PetMode, PomodoroPause, PomodoroPhase,
+    ActiveRoutine, Bubble as CoachBubble, CheckInAnswer, Chip, ChipStatus, CoachView, GuideAction,
+    GuideStage, GuideView, HiddenReason, Input, PauseLength, PetMode, PomodoroPause, PomodoroPhase,
     PomodoroPreset, PomodoroView, RecoveryAction, RecoveryPlan, RecoveryView, Reflection,
     ReminderReason, Response,
 };
@@ -60,6 +60,7 @@ fn view(pet: PetMode) -> CoachView {
         pomodoro: None,
         focus_left: None,
         meeting: false,
+        active_routine: None,
         guide: None,
         recovery: RecoveryView {
             today: oct(20),
@@ -454,7 +455,8 @@ fn menu_follows_the_engine_state_and_every_entry_routes() {
             "pause_on",
         ]
     );
-    // Only the pause entries go to the tray (wireframe T1: "Pause...").
+    // With nothing running, only the pause entries go to the tray (wireframe T1:
+    // "Pause..."); a running movement routine adds its results (below).
     let tray: Vec<&str> = m
         .iter()
         .filter(|a| a.in_tray)
@@ -525,31 +527,116 @@ fn menu_follows_the_engine_state_and_every_entry_routes() {
     assert!(present::click_reopens(&waiting));
     views.push(waiting);
 
-    // Movement started from a reminder: the guide answers it, so "Today's movement" is
-    // not offered; while the guide waits behind the pet, the menu brings it back.
+    // Movement started from a reminder: the result entries replace "Today's movement",
+    // in the menu and the tray.
+    let results = ["movement_done", "movement_partial", "movement_stop"];
+    let in_tray = |m: &[MenuAction]| -> Vec<String> {
+        m.iter()
+            .filter(|a| a.in_tray)
+            .map(|a| a.id.clone())
+            .collect()
+    };
     let mut moving = view(PetMode::Exercise);
     moving.chips[0] = chip(Activity::Movement, ChipStatus::InProgress);
-    moving.guide = Some(GuideView {
+    moving.active_routine = Some(ActiveRoutine {
+        activity: Activity::Movement,
+        offer: Some(Uuid::from_u128(7)),
+    });
+    let m = menu_actions(&moving);
+    for r in results {
+        assert!(ids(&m).contains(&r), "{r}");
+        assert!(in_tray(&m).contains(&r.to_owned()), "{r}");
+    }
+    assert!(!ids(&m).contains(&"movement_start"));
+    views.push(moving);
+    // A routine from the pet menu under any hold: the pet shows the hold, and the result
+    // entries follow the engine's routine state, not the pet.
+    let manual = Some(ActiveRoutine {
+        activity: Activity::Movement,
+        offer: None,
+    });
+    let mut held = Vec::new();
+    let mut paused_moving = view(PetMode::Paused {
+        left: None,
+        rest_of_today: false,
+    });
+    paused_moving.session = SessionState::Paused;
+    held.push(paused_moving);
+    held.push(view(PetMode::OffHours));
+    held.push(view(PetMode::Focus { left: mins(30) }));
+    let mut meeting_moving = view(PetMode::Meeting);
+    meeting_moving.meeting = true;
+    held.push(meeting_moving);
+    held.push(view(PetMode::Hidden(HiddenReason::Presentation)));
+    held.push(view(PetMode::Away));
+    for mut v in held {
+        v.active_routine = manual;
+        let m = menu_actions(&v);
+        for r in results {
+            assert!(ids(&m).contains(&r), "{r} under {:?}", v.pet);
+            assert!(in_tray(&m).contains(&r.to_owned()), "{r} under {:?}", v.pet);
+        }
+        assert!(!ids(&m).contains(&"movement_start"), "{:?}", v.pet);
+        views.push(v);
+    }
+    // The pet alone does not make a routine: no routine state, no result entries.
+    let exercise_look = view(PetMode::Exercise);
+    assert!(ids(&menu_actions(&exercise_look)).contains(&"movement_start"));
+    // A guided routine waiting behind the pet: the menu brings its card back, and the
+    // result entries answer it in one go, as for any running routine.
+    let mut guided = view(PetMode::Exercise);
+    guided.chips[0] = chip(Activity::Movement, ChipStatus::InProgress);
+    guided.active_routine = Some(ActiveRoutine {
+        activity: Activity::Movement,
+        offer: Some(Uuid::from_u128(7)),
+    });
+    guided.guide = Some(GuideView {
         open: false,
         ..guide(
             GuideStage::Step { index: 1, total: 3 },
             Some(RoutineVariant::Seated),
         )
     });
-    let m = menu_actions(&moving);
+    let m = menu_actions(&guided);
     assert_eq!(m[0].label, "Show movement guide");
-    assert!(present::click_reopens(&moving));
+    assert!(present::click_reopens(&guided));
+    for r in results {
+        assert!(ids(&m).contains(&r), "{r}");
+    }
     assert!(!ids(&m).contains(&"movement_start"));
-    views.push(moving);
-    // The same during a meeting the routine was started in.
-    let mut held = view(PetMode::Meeting);
-    held.meeting = true;
-    held.guide = Some(GuideView {
+    views.push(guided);
+    // The same under a hold that came after it (a pause or a meeting): the pet shows the
+    // hold, the guide waits behind it.
+    let mut held_guides = vec![view(PetMode::Paused {
+        left: None,
+        rest_of_today: false,
+    })];
+    held_guides[0].session = SessionState::Paused;
+    let mut meeting_guide = view(PetMode::Meeting);
+    meeting_guide.meeting = true;
+    held_guides.push(meeting_guide);
+    for mut v in held_guides {
+        v.active_routine = manual;
+        v.guide = Some(GuideView {
+            open: false,
+            ..guide(GuideStage::Intro, None)
+        });
+        let m = menu_actions(&v);
+        assert_eq!(m[0].label, "Show movement guide", "{:?}", v.pet);
+        for r in results {
+            assert!(ids(&m).contains(&r), "{r} under {:?}", v.pet);
+        }
+        views.push(v);
+    }
+    // Hidden with the pet during a presentation: no card to bring back, the tray answers.
+    let mut presenting = view(PetMode::Hidden(HiddenReason::Presentation));
+    presenting.active_routine = manual;
+    presenting.guide = Some(GuideView {
         open: false,
         ..guide(GuideStage::Intro, None)
     });
-    assert_eq!(menu_actions(&held)[0].label, "Show movement guide");
-    views.push(held);
+    assert!(!present::click_reopens(&presenting));
+    views.push(presenting);
 
     // Deadline day and the recovery plan.
     let fresh = view(PetMode::Idle);
@@ -578,7 +665,13 @@ fn menu_follows_the_engine_state_and_every_entry_routes() {
     // Eye rest running is not a movement routine.
     let mut eyes = view(PetMode::Exercise);
     eyes.chips[1] = chip(Activity::EyeRest, ChipStatus::InProgress);
-    assert!(ids(&menu_actions(&eyes)).contains(&"movement_start"));
+    eyes.active_routine = Some(ActiveRoutine {
+        activity: Activity::EyeRest,
+        offer: Some(Uuid::from_u128(8)),
+    });
+    let m = menu_actions(&eyes);
+    assert!(ids(&m).contains(&"movement_start"));
+    assert!(!ids(&m).contains(&"movement_done"));
 
     let mut meeting = view(PetMode::Meeting);
     meeting.meeting = true;
@@ -828,6 +921,15 @@ impl FakeShell {
             .collect()
     }
 
+    fn tray_ids(&self) -> Vec<String> {
+        lock(&self.model)
+            .tray()
+            .actions
+            .into_iter()
+            .map(|a| a.id)
+            .collect()
+    }
+
     // What the user does.
     fn press(&self, action_id: &str) {
         let b = self.open_bubble().expect("a bubble is open");
@@ -919,7 +1021,16 @@ impl H {
     }
 
     fn with_store(prepare: impl FnOnce(&Store)) -> Self {
-        let clock = Arc::new(ManualClock::new(monday_ten()));
+        Self::starting(monday_ten(), prepare)
+    }
+
+    /// Start at `wall` (UTC).
+    fn at(wall: chrono::DateTime<Utc>) -> Self {
+        Self::starting(wall, |_| {})
+    }
+
+    fn starting(wall: chrono::DateTime<Utc>, prepare: impl FnOnce(&Store)) -> Self {
+        let clock = Arc::new(ManualClock::new(wall));
         let store = Store::open_in_memory(clock.clone()).unwrap();
         prepare(&store);
         let shell = Arc::new(FakeShell::default());
@@ -984,6 +1095,52 @@ impl H {
             }
         }
         panic!("no reminder within {limit_min} min");
+    }
+
+    /// Work time counted toward the movement reminder.
+    fn movement_accum(&self) -> u64 {
+        self.link
+            .coach()
+            .engine()
+            .activity(Activity::Movement)
+            .accum_ms
+    }
+
+    /// A movement routine runs: its three result entries, and not "Today's movement",
+    /// are in the pet menu and keyboard panel (one list) and in the tray.
+    fn assert_movement_results_reachable(&self) {
+        assert!(
+            self.link
+                .view()
+                .active_routine
+                .is_some_and(|r| r.activity == Activity::Movement)
+        );
+        let menu = self.shell.menu_ids();
+        let tray = self.shell.tray_ids();
+        for r in [
+            action::MOVEMENT_DONE,
+            action::MOVEMENT_PARTIAL,
+            action::MOVEMENT_STOP,
+        ] {
+            assert!(menu.iter().any(|m| m == r), "{r} not in the menu: {menu:?}");
+            assert!(tray.iter().any(|m| m == r), "{r} not in the tray: {tray:?}");
+        }
+        assert!(!menu.iter().any(|m| m == action::MOVEMENT_START));
+    }
+
+    /// No routine runs: "Today's movement" is back and the results are gone.
+    fn assert_no_movement_running(&self) {
+        assert_eq!(self.link.view().active_routine, None);
+        let menu = self.shell.menu_ids();
+        assert!(menu.iter().any(|m| m == action::MOVEMENT_START));
+        assert!(!menu.iter().any(|m| m == action::MOVEMENT_STOP));
+        assert!(
+            !self
+                .shell
+                .tray_ids()
+                .iter()
+                .any(|m| m == action::MOVEMENT_STOP)
+        );
     }
 
     fn events(&self) -> Vec<EventPayload> {
@@ -1589,6 +1746,182 @@ fn guide_and_recovery_actions_route_only_from_their_own_cards() {
         bubble_command(BubbleKind::DeadlineDay, "yes"),
         coach(Input::CheckIn(CheckInAnswer::Yes))
     );
+}
+
+// ------------------------------------------- movement results under holds
+
+/// Monday 26 Oct 2026, 18:10 in Kolkata (work hours end at 18:30).
+fn monday_evening() -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 10, 26, 12, 40, 0).unwrap()
+}
+
+#[test]
+fn movement_started_under_a_pause_or_meeting_keeps_its_results_reachable() {
+    for (hold, end, look) in [
+        ("pause_on", "resume", PetState::Paused),
+        ("meeting_on", "meeting_off", PetState::Meeting),
+    ] {
+        let mut h = H::new();
+        h.work(10 * 60);
+        h.menu(hold);
+        let held = h.shell.state();
+        assert_eq!(held.0, look);
+        // Today's movement under the hold: the pet keeps showing the hold, and the
+        // results replace "Today's movement" in the menu, panel and tray.
+        h.menu(action::MOVEMENT_START);
+        assert_eq!(h.shell.state(), held, "{hold}");
+        h.assert_movement_results_reachable();
+        // Reopening the pet menu (the review's repro) still offers them.
+        h.click_pet();
+        assert_eq!(h.shell.open(), Open::Menu);
+        h.work(60);
+        h.assert_movement_results_reachable();
+        // Stopped, none done: the routine ends, the movement timer is not restarted,
+        // nothing is marked done, and the hold stays.
+        let before = h.movement_accum();
+        assert!(before > 0);
+        h.menu(action::MOVEMENT_STOP);
+        h.assert_no_movement_running();
+        assert_eq!(h.movement_accum(), before, "{hold}");
+        assert_eq!(
+            h.link.view().chip(Activity::Movement).status,
+            ChipStatus::NotDue
+        );
+        assert_eq!(h.shell.state(), held);
+        // It can be started again under the same hold; done restarts the timer.
+        h.menu(action::MOVEMENT_START);
+        h.assert_movement_results_reachable();
+        h.menu(action::MOVEMENT_DONE);
+        h.assert_no_movement_running();
+        assert_eq!(h.movement_accum(), 0);
+        assert_eq!(
+            h.link.view().chip(Activity::Movement).status,
+            ChipStatus::Done
+        );
+        assert_eq!(h.shell.state(), held);
+        // The hold was never lifted to get there.
+        assert!(h.shell.menu_ids().iter().any(|m| m == end), "{hold}");
+    }
+}
+
+#[test]
+fn a_pause_meeting_or_focus_over_a_running_movement_keeps_its_results_reachable() {
+    for (hold, look, answer) in [
+        ("pause_30", PetState::Paused, action::MOVEMENT_PARTIAL),
+        ("pause_on", PetState::Paused, action::MOVEMENT_STOP),
+        ("meeting_on", PetState::Meeting, action::MOVEMENT_DONE),
+        ("focus_30", PetState::Focus, action::MOVEMENT_STOP),
+    ] {
+        let mut h = H::new();
+        h.work(10 * 60);
+        h.menu(action::MOVEMENT_START);
+        assert_eq!(h.shell.state().0, PetState::Exercise);
+        h.assert_movement_results_reachable();
+        h.menu(hold);
+        let held = h.shell.state();
+        assert_eq!(held.0, look, "{hold}");
+        h.work(60);
+        h.assert_movement_results_reachable();
+        let before = h.movement_accum();
+        assert!(before > 0);
+        h.menu(answer);
+        h.assert_no_movement_running();
+        let chip = h.link.view().chip(Activity::Movement).status;
+        match answer {
+            action::MOVEMENT_DONE => {
+                assert_eq!(h.movement_accum(), 0);
+                assert_eq!(chip, ChipStatus::Done);
+            }
+            action::MOVEMENT_PARTIAL => {
+                assert_eq!(h.movement_accum(), 0);
+                assert_eq!(chip, ChipStatus::Partial);
+            }
+            _ => {
+                // None does not reset the movement timer.
+                assert_eq!(h.movement_accum(), before, "{hold}");
+                assert_eq!(chip, ChipStatus::NotDue);
+            }
+        }
+        // Still held: the answer did not lift the hold.
+        assert_eq!(h.shell.state().0, look, "{hold}");
+    }
+}
+
+#[test]
+fn off_hours_keep_movement_results_reachable() {
+    let mut h = H::at(monday_evening());
+    h.work(10 * 60); // 18:20
+    h.menu(action::MOVEMENT_START);
+    assert_eq!(h.shell.state().0, PetState::Exercise);
+    // Work hours end while it runs: the pet goes quiet, the results stay.
+    h.work(12 * 60); // 18:32
+    assert_eq!(h.link.view().pet, PetMode::OffHours);
+    assert_eq!(h.shell.state(), (PetState::Quiet, None));
+    h.assert_movement_results_reachable();
+    let before = h.movement_accum();
+    assert!(before > 0);
+    h.menu(action::MOVEMENT_STOP);
+    h.assert_no_movement_running();
+    assert_eq!(h.movement_accum(), before);
+    assert_eq!(h.link.view().pet, PetMode::OffHours);
+    // Started during off-hours: reachable too, and partial restarts the timer.
+    h.menu(action::MOVEMENT_START);
+    assert_eq!(h.shell.state(), (PetState::Quiet, None));
+    h.assert_movement_results_reachable();
+    h.menu(action::MOVEMENT_PARTIAL);
+    h.assert_no_movement_running();
+    assert_eq!(h.movement_accum(), 0);
+    assert_eq!(
+        h.link.view().chip(Activity::Movement).status,
+        ChipStatus::Partial
+    );
+    assert_eq!(h.link.view().pet, PetMode::OffHours);
+}
+
+#[test]
+fn a_presentation_keeps_movement_results_in_the_tray() {
+    let mut h = H::new();
+    h.work(10 * 60);
+    h.menu(action::MOVEMENT_START);
+    h.input(Input::PresentationChanged(true));
+    // The pet is hidden; the tray still offers the results.
+    assert!(!h.shell.visible());
+    h.assert_movement_results_reachable();
+    h.menu(action::MOVEMENT_DONE);
+    h.assert_no_movement_running();
+    assert_eq!(h.movement_accum(), 0);
+    assert!(!h.shell.visible());
+}
+
+#[test]
+fn a_reminder_routine_under_a_later_hold_keeps_its_results_reachable() {
+    let mut h = H::new();
+    // Answer eye rest until movement is offered, then start it from the card.
+    let offer = loop {
+        let (offer, activity) = h.work_until_reminder(60);
+        if activity == Activity::Movement {
+            break offer;
+        }
+        h.press(action::DONE);
+    };
+    h.press(action::START);
+    assert_eq!(
+        h.link.view().active_routine.and_then(|r| r.offer),
+        Some(offer)
+    );
+    h.menu("pause_on");
+    assert_eq!(h.shell.state().0, PetState::Paused);
+    h.assert_movement_results_reachable();
+    let before = h.movement_accum();
+    h.menu(action::MOVEMENT_STOP);
+    h.assert_no_movement_running();
+    // None from a reminder: recorded as none, the timer is not restarted.
+    assert_eq!(h.movement_accum(), before);
+    assert_eq!(
+        h.link.view().chip(Activity::Movement).status,
+        ChipStatus::NoneRecorded
+    );
+    assert_eq!(h.shell.state().0, PetState::Paused);
 }
 
 #[derive(Debug, Clone)]

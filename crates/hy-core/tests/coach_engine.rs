@@ -1235,6 +1235,82 @@ fn guide_is_hidden_with_the_pet_during_a_presentation() {
 }
 
 #[test]
+fn the_view_reports_a_running_routine_under_any_hold() {
+    let manual = Some(ActiveRoutine {
+        activity: Activity::Movement,
+        offer: None,
+    });
+    let mut h = H::only(true, true, false);
+    h.wait(mins(15));
+    assert_eq!(h.view().active_routine, None);
+    // Started under a pause: the pet shows the pause, the view still has the routine.
+    h.input(Input::Pause(PauseLength::UntilResumed));
+    assert_eq!(
+        h.input(Input::RoutineStarted).outcome,
+        InputOutcome::Applied
+    );
+    assert!(matches!(h.view().pet, PetMode::Paused { .. }));
+    assert_eq!(h.view().active_routine, manual);
+    // A second start is refused while it runs; a meeting on top changes nothing.
+    assert!(matches!(
+        h.input(Input::RoutineStarted).outcome,
+        InputOutcome::Ignored(_)
+    ));
+    h.input(Input::SetMeeting(true));
+    h.wait(mins(2));
+    assert_eq!(h.view().active_routine, manual);
+    // Stopped, none done: the routine ends, the movement timer is not restarted, and
+    // the holds stay.
+    let before = h.accum(Activity::Movement);
+    assert!(before >= mins(15));
+    h.input(Input::RoutineFinished {
+        offer: None,
+        outcome: RoutineOutcome::None,
+    });
+    assert_eq!(h.view().active_routine, None);
+    assert_eq!(h.accum(Activity::Movement), before);
+    assert!(matches!(h.view().pet, PetMode::Paused { .. }));
+    assert!(h.view().meeting);
+
+    // Started normally, then a pause: still reported; done restarts the timer.
+    let mut h = H::only(true, true, false);
+    h.wait(mins(15));
+    h.input(Input::RoutineStarted);
+    h.input(Input::Pause(PauseLength::Minutes(30)));
+    assert_eq!(h.view().active_routine, manual);
+    h.input(Input::RoutineFinished {
+        offer: None,
+        outcome: RoutineOutcome::Done,
+    });
+    assert_eq!(h.view().active_routine, None);
+    assert_eq!(h.accum(Activity::Movement), Duration::ZERO);
+    assert_eq!(h.status(Activity::Movement), ChipStatus::Done);
+
+    // From a reminder: the routine carries its offer, also under focus.
+    let mut h = H::only(true, false, false);
+    h.wait_until(mins(50), |v| v.reminder().is_some());
+    let offer = h.offer();
+    h.respond(Response::Start);
+    let from_reminder = Some(ActiveRoutine {
+        activity: Activity::Movement,
+        offer: Some(offer),
+    });
+    assert_eq!(h.view().active_routine, from_reminder);
+    h.input(Input::StartFocus {
+        minutes: 30,
+        replace_pomodoro: false,
+    });
+    assert!(matches!(h.view().pet, PetMode::Focus { .. }));
+    assert_eq!(h.view().active_routine, from_reminder);
+    h.input(Input::RoutineFinished {
+        offer: None,
+        outcome: RoutineOutcome::Partial,
+    });
+    assert_eq!(h.view().active_routine, None);
+    assert_eq!(h.status(Activity::Movement), ChipStatus::Partial);
+}
+
+#[test]
 fn eye_rest_start_runs_twenty_seconds_then_counts_done() {
     let mut h = H::only(false, true, false);
     h.wait_until(mins(25), |v| v.reminder().is_some());

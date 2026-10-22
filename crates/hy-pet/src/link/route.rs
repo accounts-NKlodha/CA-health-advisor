@@ -12,7 +12,7 @@ use hy_core::coach::{
     CheckInAnswer, GuideAction, Input, PauseLength, PomodoroPreset, RecoveryAction, Reflection,
     Response,
 };
-use hy_core::schema::RoutineVariant;
+use hy_core::schema::{RoutineOutcome, RoutineVariant};
 
 use super::present::{BubbleKind, WATER_SERVING_ML, action, day_key};
 use crate::shell::{CloseCause, Handled, ShellEvent};
@@ -265,6 +265,16 @@ pub fn menu_command(id: &str) -> Option<Command> {
             ml: WATER_SERVING_ML,
         }),
         a::MOVEMENT_START => coach(Input::RoutineStarted),
+        a::MOVEMENT_DONE | a::MOVEMENT_PARTIAL | a::MOVEMENT_STOP => {
+            coach(Input::RoutineFinished {
+                offer: None,
+                outcome: match id {
+                    a::MOVEMENT_DONE => RoutineOutcome::Done,
+                    a::MOVEMENT_PARTIAL => RoutineOutcome::Partial,
+                    _ => RoutineOutcome::None,
+                },
+            })
+        }
         a::DEADLINE_DAY => coach(Input::DeadlineDay),
         a::RECOVERY_SHOW => coach(Input::Recovery(RecoveryAction::ShowPlan)),
         a::BREAK => coach(Input::MarkBreak),

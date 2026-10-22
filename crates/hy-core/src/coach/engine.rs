@@ -59,8 +59,8 @@ use super::config::{
 };
 use super::recovery::{CARD_CLOSES_AFTER, RecoveryPlan};
 use super::types::{
-    Bubble, Chip, ChipStatus, CoachView, Confirmation, FocusEnd, HiddenReason, Hold, Input,
-    InputOutcome, Notice, PauseLength, PetMode, PomodoroPause, PomodoroPhase, PomodoroView,
+    ActiveRoutine, Bubble, Chip, ChipStatus, CoachView, Confirmation, FocusEnd, HiddenReason, Hold,
+    Input, InputOutcome, Notice, PauseLength, PetMode, PomodoroPause, PomodoroPhase, PomodoroView,
     ReminderReason, Response,
 };
 use super::water::{WaterPace, WaterSnapshot, pace};
@@ -2000,9 +2000,28 @@ impl Engine {
                 .focus_until
                 .map(|t| dur(t.saturating_sub(self.s.now))),
             meeting: self.s.meeting.is_some(),
+            active_routine: self.active_routine(),
             guide: self.guide_view(ctx),
             recovery: self.recovery_view(ctx),
         }
+    }
+
+    /// The routine in progress, whatever the pet shows: one started from a reminder
+    /// first (it is the one [`Input::RoutineFinished`] answers), else one started from the
+    /// pet menu.
+    fn active_routine(&self) -> Option<ActiveRoutine> {
+        if let Some(o) = self.s.offer
+            && matches!(o.phase, OfferPhase::InProgress { .. })
+        {
+            return Some(ActiveRoutine {
+                activity: o.activity,
+                offer: Some(o.id),
+            });
+        }
+        self.s.exercise_since.map(|_| ActiveRoutine {
+            activity: Activity::Movement,
+            offer: None,
+        })
     }
 }
 
