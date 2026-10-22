@@ -743,7 +743,13 @@ fn menu_entries_route_to_engine_inputs() {
         menu_command("recovery_show"),
         coach(Input::Recovery(RecoveryAction::ShowPlan))
     );
-    assert_eq!(menu_command("movement_partial"), None);
+    assert_eq!(
+        menu_command("movement_partial"),
+        coach(Input::RoutineFinished {
+            offer: None,
+            outcome: RoutineOutcome::Partial
+        })
+    );
     assert_eq!(menu_command("meeting_on"), coach(Input::SetMeeting(true)));
     // Unknown, out-of-range or malformed entries route nowhere.
     for junk in [
@@ -1666,6 +1672,55 @@ fn a_guided_routine_runs_end_to_end_through_the_shell() {
 }
 
 #[test]
+fn a_guided_routine_under_a_new_hold_waits_behind_the_pet_and_is_answered_from_the_tray() {
+    let mut h = H::with_store(movement_only);
+    let (_, a) = h.work_until_reminder(50);
+    assert_eq!(a, Activity::Movement);
+    h.press(action::START);
+    h.press(action::STANDING);
+    h.press(action::STEP_DONE);
+    // A pause starts: the pet shows it, the guide goes behind the pet, nothing is lost.
+    h.menu("pause_on");
+    assert_eq!(h.shell.state().0, PetState::Paused);
+    assert!(h.shell.open_bubble().is_none());
+    h.assert_movement_results_reachable();
+    assert_eq!(
+        h.shell.menu_ids().first().map(String::as_str),
+        Some(action::OPEN_PENDING)
+    );
+    // A click brings it back at the same movement, still paused.
+    h.click_pet();
+    assert_eq!(
+        h.shell.open_bubble().unwrap().title,
+        "Movement 2 of 3: Shoulder rolls"
+    );
+    assert_eq!(h.shell.state().0, PetState::Paused);
+    // A presentation hides the pet; the tray answers the routine in one go.
+    h.input(Input::PresentationChanged(true));
+    assert!(!h.shell.visible());
+    assert!(
+        h.shell
+            .tray_ids()
+            .iter()
+            .any(|m| m == action::MOVEMENT_PARTIAL)
+    );
+    h.menu(action::MOVEMENT_PARTIAL);
+    h.assert_no_movement_running();
+    assert!(h.link.view().guide.is_none());
+    assert!(h.events().iter().any(|p| matches!(
+        p,
+        EventPayload::MovementSession {
+            outcome: RoutineOutcome::Partial,
+            variant: Some(RoutineVariant::Standing),
+            steps_done: 1,
+            steps_skipped: 0,
+            ..
+        }
+    )));
+    assert_eq!(h.movement_accum(), 0);
+}
+
+#[test]
 fn deadline_day_and_a_recovery_plan_run_through_the_shell() {
     let mut h = H::with_store(movement_only);
     h.menu("deadline_day");
@@ -1771,11 +1826,21 @@ fn movement_started_under_a_pause_or_meeting_keeps_its_results_reachable() {
         h.menu(action::MOVEMENT_START);
         assert_eq!(h.shell.state(), held, "{hold}");
         h.assert_movement_results_reachable();
-        // Reopening the pet menu (the review's repro) still offers them.
+        // The guide the user opened stays for this hold; a click on the pet puts it
+        // behind the pet, and the menu (the review's repro) still offers the results,
+        // with "Show movement guide" to bring it back.
+        assert_eq!(
+            h.shell.open_bubble().map(|b| b.title),
+            Some("Today's movement: Monday".to_owned())
+        );
         h.click_pet();
-        assert_eq!(h.shell.open(), Open::Menu);
+        assert_eq!(h.shell.open(), Open::None);
         h.work(60);
         h.assert_movement_results_reachable();
+        assert_eq!(
+            h.shell.menu_ids().first().map(String::as_str),
+            Some(action::OPEN_PENDING)
+        );
         // Stopped, none done: the routine ends, the movement timer is not restarted,
         // nothing is marked done, and the hold stays.
         let before = h.movement_accum();

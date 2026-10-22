@@ -18,10 +18,15 @@
 //! - Closing the card (its close button, a click on the pet, hiding the pet) only puts it
 //!   behind the pet; a click brings it back at the same movement.
 //! - A hold that was not in force when the guide opened (a lock, sleep, pause, focus,
-//!   presentation, meeting or the end of work hours), the app restarting, or 30 minutes
-//!   without a result ends the routine. Movements already answered are kept: the result
-//!   is recorded from them as a stop (D). With nothing answered, nothing is recorded and a
-//!   routine started from a reminder shows "none recorded", as before.
+//!   presentation, meeting or the end of work hours) only puts the card behind the pet,
+//!   like any routine under a hold ([`crate::coach::CoachView::active_routine`]): the pet
+//!   shows the hold, the routine keeps running, and a click on the pet (or "Show movement
+//!   guide") brings it back at the same movement without lifting the hold. The menu's
+//!   result entries answer it in one go too: the result is recorded from the user's report.
+//! - The app restarting, starting a Pomodoro, or 30 minutes without a result ends the
+//!   routine. Movements already answered are kept: the result is recorded from them as a
+//!   stop (D). With nothing answered, nothing is recorded and a routine started from a
+//!   reminder shows "none recorded", as before.
 
 use chrono::{Datelike, Weekday};
 use serde::{Deserialize, Serialize};
@@ -73,7 +78,8 @@ pub(super) struct Guide {
     since: u64,
     /// Engine time the result appeared.
     result_since: u64,
-    /// The holds in force when it opened; it ends when any other hold starts.
+    /// The holds in force when the card was opened; when any other hold starts, the card
+    /// goes behind the pet (the routine keeps running).
     opened_under: HoldSet,
 }
 
@@ -312,9 +318,9 @@ impl Engine {
         }
     }
 
-    /// End a running routine that the user did not finish (a new hold, a restart, the
-    /// 30-minute limit, a Pomodoro started). Answered movements are kept as a stop; with
-    /// none answered nothing is recorded. No result card is shown.
+    /// End a running routine that the user did not finish (a restart, the 30-minute limit,
+    /// a Pomodoro started). Answered movements are kept as a stop; with none answered
+    /// nothing is recorded. No result card is shown.
     pub(super) fn interrupt_guide(&mut self, ctx: &Context, out: &mut Out) {
         let Some(g) = self.s.guide else {
             return;
@@ -355,21 +361,85 @@ impl Engine {
         }
     }
 
-    /// A hold that was not in force when the guide opened ends it (or closes its result);
-    /// a hold that ended no longer covers it if it begins again.
+    /// A hold that was not in force when the card was opened puts a running guide behind
+    /// the pet (the routine keeps running, as any routine does under a hold) and closes a
+    /// result; a hold that ended no longer covers the card if it begins again.
     pub(super) fn settle_guide(&mut self, ctx: &Context, out: &mut Out) {
-        let Some(g) = self.s.guide else {
+        let holds = self.holds_above_pomodoro(ctx);
+        let Some(g) = self.s.guide.as_mut() else {
             return;
         };
-        let holds = self.holds_above_pomodoro(ctx);
-        if !holds.within(g.opened_under) {
-            self.interrupt_guide(ctx, out);
-        } else if g.opened_under != holds
-            && let Some(g) = self.s.guide.as_mut()
-        {
+        if holds.within(g.opened_under) {
+            if g.opened_under != holds {
+                g.opened_under = holds;
+                out.significant = true;
+            }
+        } else if g.running() {
+            g.open = false;
             g.opened_under = holds;
             out.significant = true;
+        } else {
+            self.s.guide = None;
+            out.significant = true;
         }
+    }
+
+    /// The user brings the guide back from behind the pet: it stays under the holds in
+    /// force now. Returns false if no guide waits.
+    pub(super) fn reopen_guide(&mut self, ctx: &Context) -> bool {
+        let holds = self.holds_above_pomodoro(ctx);
+        match self.s.guide.as_mut() {
+            Some(g) if !g.open => {
+                g.open = true;
+                g.opened_under = holds;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A result reported in one go from the menu or tray ([`crate::coach::Input::RoutineFinished`])
+    /// while the guide runs: the routine's result is recorded from the report, with the
+    /// movements already answered as far as the report allows, and the guide closes. A
+    /// routine whose variant was not chosen yet has no result record (as a routine started
+    /// without the guide).
+    pub(super) fn report_guide(&mut self, ctx: &Context, outcome: RoutineOutcome, out: &mut Out) {
+        let Some(g) = self.s.guide.take() else {
+            return;
+        };
+        out.significant = true;
+        if !g.running() {
+            return;
+        }
+        let Some(r) = routine_for(g.day) else {
+            return;
+        };
+        let total = MOVEMENTS_PER_ROUTINE;
+        let (done, skipped) = match outcome {
+            RoutineOutcome::Done => (total, 0),
+            RoutineOutcome::Partial => {
+                let done = g.done.clamp(1, total - 1);
+                (done, g.skipped.min(total - done))
+            }
+            RoutineOutcome::None => (0, g.skipped.min(total)),
+            RoutineOutcome::Skipped => (0, 0),
+        };
+        if g.variant.is_none() && outcome != RoutineOutcome::Skipped {
+            return;
+        }
+        out.events.push(
+            NewEvent::manual(EventPayload::MovementSession {
+                session_id: g.id,
+                routine_id: r.id.to_owned(),
+                routine_version: CONTENT_VERSION,
+                variant: g.variant,
+                outcome,
+                steps_done: done,
+                steps_skipped: skipped,
+                steps_total: total,
+            })
+            .at(ctx.wall),
+        );
     }
 
     /// The 30-minute limit and the result card's own time.

@@ -1349,10 +1349,7 @@ impl Engine {
                     return Ignored("the pet is hidden");
                 }
                 let holds = self.holds_above_pomodoro(ctx);
-                if let Some(g) = self.s.guide.as_mut()
-                    && !g.open
-                {
-                    g.open = true;
+                if self.reopen_guide(ctx) {
                     Applied
                 } else if let Some(o) = self.s.offer.as_mut()
                     && o.phase == OfferPhase::Waiting
@@ -1393,9 +1390,9 @@ impl Engine {
             Input::Guide(action) => self.guide_input(ctx, action, out),
             Input::RoutineFinished { offer, outcome } => {
                 let r = self.routine_finished(ctx, offer, outcome, out);
-                if r == Applied && self.s.guide.take().is_some() {
-                    // A quick report replaces the guide; no routine record is written.
-                    out.significant = true;
+                if r == Applied {
+                    // A report in one go answers the guide too.
+                    self.report_guide(ctx, outcome, out);
                 }
                 r
             }
@@ -1649,8 +1646,8 @@ impl Engine {
 
     /// Apply holds, then offer at most one thing.
     fn settle(&mut self, ctx: &Context, out: &mut Out) {
-        // A hold that was not in force when the guide opened ends the routine (the
-        // movements already answered are kept).
+        // A hold that was not in force when the guide's card opened puts it behind the pet;
+        // the routine keeps running.
         self.settle_guide(ctx, out);
         let hold = self.hold(ctx);
         // Anything holding reminders back withdraws a reminder that is showing or waiting.

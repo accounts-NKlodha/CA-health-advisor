@@ -1055,31 +1055,81 @@ fn guide_result_card_keeps_the_bubble_until_it_closes_then_the_calm_gap_follows(
     assert_eq!(h.view().guide, None);
 }
 
+/// The guide waits behind the pet at movement `index` of a routine that still runs.
+fn assert_behind_the_pet(h: &H, index: u32, why: &str) {
+    let g = h.guide();
+    assert!(!g.open, "{why}");
+    assert_eq!(g.stage, GuideStage::Step { index, total: 3 }, "{why}");
+    assert!(
+        !matches!(h.view().bubble, Some(Bubble::MovementGuide(_))),
+        "{why}"
+    );
+    assert!(
+        h.view()
+            .active_routine
+            .is_some_and(|r| r.activity == Activity::Movement),
+        "{why}"
+    );
+}
+
 #[test]
-fn guide_ended_by_a_new_hold_keeps_answered_movements_as_a_stop() {
+fn guide_under_a_new_hold_waits_behind_the_pet_and_the_routine_keeps_running() {
     for hold in [
         NewHold::Lock,
         NewHold::Suspend,
         NewHold::Pause,
         NewHold::OffHours,
     ] {
+        let why = format!("{hold:?}");
         let mut h = guided(RoutineVariant::Seated);
         h.g(GuideAction::Done);
         start_hold(&mut h, hold);
-        let s = h.sessions();
-        assert_eq!(s.len(), 1, "{hold:?}");
-        assert_eq!((s[0].3, s[0].4, s[0].5), (RoutineOutcome::Partial, 1, 0));
-        // No result card, and nothing comes back when the hold ends.
-        assert_eq!(h.view().guide, None, "{hold:?}");
-        assert_eq!(h.status(Activity::Movement), ChipStatus::Partial);
+        // Nothing is recorded yet; the card goes behind the pet.
+        assert!(h.sessions().is_empty(), "{why}");
+        assert_behind_the_pet(&h, 1, &why);
+        // It does not come back by itself when the hold ends, and nothing else appears.
         end_hold(&mut h, hold);
-        assert_eq!(h.view().guide, None);
-        assert!(h.view().reminder().is_none());
+        assert_behind_the_pet(&h, 1, &why);
+        assert!(h.view().reminder().is_none(), "{why}");
+        // A click brings it back at the same movement.
+        assert_eq!(h.input(Input::OpenPending).outcome, InputOutcome::Applied);
+        assert!(matches!(h.view().bubble, Some(Bubble::MovementGuide(_))));
+        h.g(GuideAction::Done);
+        h.g(GuideAction::Done);
+        let s = h.sessions();
+        assert_eq!(s.len(), 1, "{why}");
+        assert_eq!((s[0].3, s[0].4, s[0].5), (RoutineOutcome::Done, 3, 0));
+        assert_eq!(h.steps().len(), 3, "{why}");
+        assert_eq!(h.status(Activity::Movement), ChipStatus::Done);
     }
 }
 
 #[test]
-fn guide_ended_by_a_new_hold_before_any_answer_records_nothing() {
+fn guide_brought_back_under_a_pause_or_off_hours_is_answered_without_lifting_it() {
+    for hold in [NewHold::Pause, NewHold::OffHours] {
+        let why = format!("{hold:?}");
+        let mut h = guided(RoutineVariant::Standing);
+        h.g(GuideAction::Done);
+        start_hold(&mut h, hold);
+        let session = h.view().session;
+        assert_behind_the_pet(&h, 1, &why);
+        assert_eq!(h.input(Input::OpenPending).outcome, InputOutcome::Applied);
+        // Opened by the user under the hold: it stays for that hold.
+        h.wait(mins(1));
+        assert!(matches!(h.view().bubble, Some(Bubble::MovementGuide(_))));
+        h.g(GuideAction::Skip);
+        h.g(GuideAction::Stop);
+        let s = h.sessions();
+        assert_eq!((s[0].3, s[0].4, s[0].5), (RoutineOutcome::Partial, 1, 1));
+        assert_eq!(h.status(Activity::Movement), ChipStatus::Partial);
+        // The hold is still on.
+        assert_eq!(h.view().session, session, "{why}");
+        assert_ne!(session, SessionState::Active, "{why}");
+    }
+}
+
+#[test]
+fn guide_under_a_new_hold_before_any_answer_ends_only_by_its_time_limit() {
     let holds = [
         Input::Lock,
         Input::SetMeeting(true),
@@ -1091,31 +1141,40 @@ fn guide_ended_by_a_new_hold_before_any_answer_records_nothing() {
     for hold in holds {
         let mut h = guided(RoutineVariant::Seated);
         h.input(hold.clone());
+        assert_behind_the_pet(&h, 0, &format!("{hold:?}"));
+        assert!(h.sessions().is_empty(), "{hold:?}");
+        // Unanswered for 30 minutes: as before, a routine started from a reminder that
+        // ends unanswered is "none recorded", and nothing else is written.
+        h.wait(mins(30));
+        assert_eq!(h.view().guide, None, "{hold:?}");
         assert!(h.sessions().is_empty(), "{hold:?}");
         assert!(h.steps().is_empty());
-        assert_eq!(h.view().guide, None);
-        // As before: a routine started from a reminder that ends unanswered is "none
-        // recorded", with the timer kept.
         assert_eq!(h.status(Activity::Movement), ChipStatus::NoneRecorded);
-        assert!(h.accum(Activity::Movement) >= mins(45));
+        assert_eq!(h.view().active_routine, None);
     }
 }
 
 #[test]
-fn guide_opened_during_a_meeting_stays_for_that_meeting_only() {
+fn guide_opened_during_a_meeting_goes_behind_the_pet_when_a_new_meeting_starts() {
     let mut h = H::only(true, false, false);
     h.input(Input::SetMeeting(true));
     h.input(Input::RoutineStarted);
     h.g(GuideAction::Variant(RoutineVariant::Seated));
     h.wait(mins(1));
     assert_eq!(h.stage(), GuideStage::Step { index: 0, total: 3 });
+    assert!(h.guide().open);
     h.input(Input::SetMeeting(false));
     h.g(GuideAction::Done);
     assert_eq!(h.stage(), GuideStage::Step { index: 1, total: 3 });
     // The meeting ended; starting it again is a new hold.
     h.input(Input::SetMeeting(true));
-    assert_eq!(h.view().guide, None);
+    assert_behind_the_pet(&h, 1, "meeting");
+    assert!(h.sessions().is_empty());
+    h.input(Input::OpenPending);
+    h.g(GuideAction::Done);
+    h.g(GuideAction::Skip);
     assert_eq!(h.sessions()[0].3, RoutineOutcome::Partial);
+    assert!(h.view().meeting);
 }
 
 #[test]
@@ -1165,7 +1224,7 @@ fn guide_restart_mid_routine_keeps_answered_movements_and_a_fresh_one_restarts_c
 }
 
 #[test]
-fn guide_is_ended_by_starting_a_pomodoro_and_the_quick_report_replaces_it() {
+fn guide_is_ended_by_starting_a_pomodoro() {
     let mut h = guided(RoutineVariant::Seated);
     h.g(GuideAction::Done);
     h.input(Input::StartPomodoro {
@@ -1175,8 +1234,67 @@ fn guide_is_ended_by_starting_a_pomodoro_and_the_quick_report_replaces_it() {
     });
     assert_eq!(h.view().guide, None);
     assert_eq!(h.sessions()[0].3, RoutineOutcome::Partial);
+}
 
-    // The quick report (no steps) closes the guide without a routine record.
+#[test]
+fn guide_answered_in_one_go_from_the_menu_records_the_report() {
+    // (answers in the guide, report) -> (outcome, done, skipped) recorded.
+    let cases = [
+        (vec![], RoutineOutcome::Done, (3, 0)),
+        (vec![GuideAction::Skip], RoutineOutcome::Done, (3, 0)),
+        (vec![GuideAction::Done], RoutineOutcome::Partial, (1, 0)),
+        (vec![], RoutineOutcome::Partial, (1, 0)),
+        (
+            vec![GuideAction::Done, GuideAction::Skip],
+            RoutineOutcome::Partial,
+            (1, 1),
+        ),
+        (
+            vec![GuideAction::Done, GuideAction::Done],
+            RoutineOutcome::Partial,
+            (2, 0),
+        ),
+        (vec![GuideAction::Skip], RoutineOutcome::None, (0, 1)),
+        (vec![GuideAction::Done], RoutineOutcome::None, (0, 0)),
+    ];
+    for (answers, outcome, (done, skipped)) in cases {
+        let why = format!("{answers:?} then {outcome:?}");
+        let mut h = guided(RoutineVariant::Seated);
+        for a in &answers {
+            h.g(*a);
+        }
+        // Under a pause, as the menu and tray allow.
+        h.input(Input::Pause(PauseLength::UntilResumed));
+        assert_eq!(
+            h.input(Input::RoutineFinished {
+                offer: None,
+                outcome,
+            })
+            .outcome,
+            InputOutcome::Applied,
+            "{why}"
+        );
+        assert_eq!(h.view().guide, None, "{why}");
+        assert_eq!(h.view().active_routine, None, "{why}");
+        let s = h.sessions();
+        assert_eq!(s.len(), 1, "{why}");
+        assert_eq!(s[0].0, h.steps().first().map_or(s[0].0, |st| st.0), "{why}");
+        assert_eq!(
+            (s[0].2, s[0].3, s[0].4, s[0].5),
+            (Some(RoutineVariant::Seated), outcome, done, skipped),
+            "{why}"
+        );
+        assert_eq!(h.steps().len(), answers.len(), "{why}");
+        // Done and partial restart the movement timer; none keeps it.
+        assert_eq!(
+            h.accum(Activity::Movement) == Duration::ZERO,
+            outcome.resets_movement_timer(),
+            "{why}"
+        );
+    }
+
+    // Before a variant is chosen there is no routine to record: the report applies to
+    // the reminder alone, as for a routine started without the guide.
     let mut q = H::only(true, false, false);
     q.wait_until(mins(50), |v| v.reminder().is_some());
     let offer = q.offer();
@@ -1230,8 +1348,22 @@ fn guide_is_hidden_with_the_pet_during_a_presentation() {
     h.g(GuideAction::Done);
     h.input(Input::PresentationChanged(true));
     assert_eq!(h.view().bubble, None);
-    assert_eq!(h.view().guide, None);
-    assert_eq!(h.sessions()[0].3, RoutineOutcome::Partial);
+    assert!(!h.guide().open);
+    assert!(h.sessions().is_empty());
+    // The pet is hidden: nothing to click, the menu's report still works (tray).
+    assert!(matches!(
+        h.input(Input::OpenPending).outcome,
+        InputOutcome::Ignored(_)
+    ));
+    h.input(Input::PresentationChanged(false));
+    assert_behind_the_pet(&h, 1, "after the presentation");
+    h.input(Input::PresentationChanged(true));
+    h.input(Input::RoutineFinished {
+        offer: None,
+        outcome: RoutineOutcome::Done,
+    });
+    assert_eq!(h.sessions()[0].3, RoutineOutcome::Done);
+    assert_eq!(h.status(Activity::Movement), ChipStatus::Done);
 }
 
 #[test]
@@ -3272,6 +3404,7 @@ mod property {
             off_hours: bool,
             user_open: bool,
             new_lock: bool,
+            report: bool,
         ) -> Result<(), TestCaseError> {
             let v = &out.view;
             // A hold that starts withdraws every Pomodoro card, even one the user opened
@@ -3288,6 +3421,12 @@ mod property {
                     holds
                 );
                 self.user_card = None;
+                // The movement guide goes behind the pet the same way.
+                prop_assert!(
+                    !matches!(v.bubble, Some(Bubble::MovementGuide(_))),
+                    "guide card kept when a new hold started ({:?})",
+                    holds
+                );
             }
             // No Pomodoro card under a hold above the Pomodoro unless the user opened it
             // during this stretch of holds (entering a hold withdraws any open card).
@@ -3385,14 +3524,23 @@ mod property {
                     } => {
                         prop_assert!(self.sessions.insert(session_id), "two results");
                         let s = self.steps.get(&session_id).cloned().unwrap_or_default();
-                        let done = s.iter().filter(|o| **o == StepOutcome::Done).count() as u32;
-                        let skipped = s.len() as u32 - done;
-                        prop_assert_eq!((steps_done, steps_skipped), (done, skipped));
+                        let recorded = s.len() as u32;
+                        let (done, skipped) = if report {
+                            // Reported in one go from the menu: the counts follow the
+                            // report, never more movements than the routine has.
+                            prop_assert!(recorded <= steps_total);
+                            prop_assert!(steps_done + steps_skipped <= steps_total);
+                            (steps_done, steps_skipped)
+                        } else {
+                            let done = s.iter().filter(|o| **o == StepOutcome::Done).count() as u32;
+                            prop_assert_eq!((steps_done, steps_skipped), (done, recorded - done));
+                            (done, recorded - done)
+                        };
                         let ok = match outcome {
                             RoutineOutcome::Done => done == steps_total,
                             RoutineOutcome::Partial => done > 0 && done < steps_total,
                             RoutineOutcome::None => done == 0,
-                            RoutineOutcome::Skipped => s.is_empty(),
+                            RoutineOutcome::Skipped => s.is_empty() && done == 0 && skipped == 0,
                         };
                         prop_assert!(ok, "{:?} with {} done, {} skipped", outcome, done, skipped);
                     }
@@ -3616,7 +3764,8 @@ mod property {
                 for (now, out, off) in run(&mut h, a) {
                     let new_lock = matches!(a, Act::Lock | Act::Suspend)
                         && out.outcome == InputOutcome::Applied;
-                    c.check(now, &out, off, user_open, new_lock)?;
+                    let report = matches!(a, Act::Routine(_));
+                    c.check(now, &out, off, user_open, new_lock, report)?;
                 }
                 if let (Act::Respond(_), Some(s)) = (a, shown) {
                     for (i, x) in Activity::ALL.iter().enumerate() {
