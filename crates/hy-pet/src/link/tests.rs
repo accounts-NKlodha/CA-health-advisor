@@ -3075,13 +3075,13 @@ fn field_changes_from_two_windows_both_reach_the_engine() {
     h.link
         .change_settings(|s| {
             let today = s.today()?;
-            s.change_water(WaterChange::AddServing(750), today)
+            s.change_water(&WaterChange::AddServing(750), today)
         })
         .unwrap();
     h.link
         .change_settings(|s| {
             let today = s.today()?;
-            s.change_water(WaterChange::RemoveServing(150), today)
+            s.change_water(&WaterChange::RemoveServing(150), today)
         })
         .unwrap();
     assert_eq!(h.link.view().servings.ml(), &[250, 500, 750]);

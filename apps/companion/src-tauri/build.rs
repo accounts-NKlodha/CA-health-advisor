@@ -34,6 +34,13 @@ const COMMANDS: &[&str] = &[
     "plan_page",
     "plan_save",
     "plan_cancel",
+    "open_setup",
+    "setup_page",
+    "setup_sample",
+    "setup_finish",
+    "backup_export",
+    "backup_stage",
+    "backup_import",
 ];
 
 fn main() {

@@ -112,6 +112,11 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // A new store opens the setup wizard (W1). The self-test opens it itself.
+    if selftest.is_none() && shell.setup_needed() {
+        shell.open_setup();
+    }
+
     if let Some(report) = selftest {
         let idle = std::env::var("HY_SELFTEST_IDLE_S")
             .ok()
@@ -162,6 +167,13 @@ fn main() {
             commands::plan_page,
             commands::plan_save,
             commands::plan_cancel,
+            commands::open_setup,
+            commands::setup_page,
+            commands::setup_sample,
+            commands::setup_finish,
+            commands::backup_export,
+            commands::backup_stage,
+            commands::backup_import,
         ])
         .setup(setup)
         .build(tauri::generate_context!());
@@ -320,6 +332,7 @@ mod tests {
             serde_json::json!({ "goal": 2000 }),
             serde_json::json!({ "add_serving": 750 }),
             serde_json::json!({ "remove_serving": 150 }),
+            serde_json::json!({ "edit_servings": { "add": [200], "remove": [150] } }),
         ] {
             serde_json::from_value::<WaterChange>(sent).unwrap();
         }
@@ -390,6 +403,7 @@ mod tests {
             include_str!("../capabilities/panel.json"),
             include_str!("../capabilities/screens.json"),
             include_str!("../capabilities/review.json"),
+            include_str!("../capabilities/setup.json"),
             include_str!("../capabilities/plan.json"),
         ];
         let build_rs = include_str!("../build.rs");

@@ -344,6 +344,17 @@ impl CoachLink {
         Ok(out)
     }
 
+    /// Replace the store's data (a backup import) on the engine's connection, so nothing
+    /// the engine writes can land in between. The engine is not stepped: its saved state
+    /// is gone with the old data, its later saves are refused as stale, and the caller
+    /// must stop it and restart the app so it starts fresh from the new data.
+    ///
+    /// # Errors
+    /// What `f` returns.
+    pub fn replace_data<T>(&mut self, f: impl FnOnce(&mut Store) -> Result<T>) -> Result<T> {
+        f(self.coach.store_mut())
+    }
+
     /// Save anything not yet saved (on exit).
     ///
     /// # Errors

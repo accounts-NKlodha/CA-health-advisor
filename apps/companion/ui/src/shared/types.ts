@@ -390,7 +390,11 @@ export type CoachChange =
   | { review: { day: WeekdayName; at: string } };
 
 /** One Water tab change (hy_core::settings::WaterChange). */
-export type WaterChange = { goal: number } | { add_serving: number } | { remove_serving: number };
+export type WaterChange =
+  | { goal: number }
+  | { add_serving: number }
+  | { remove_serving: number }
+  | { edit_servings: { add: number[]; remove: number[] } };
 
 /** The workweek fields a save changed; the others keep what is saved now. */
 export interface WorkweekChange {
@@ -419,6 +423,35 @@ export interface SettingsPage {
   library: { name: string; place: string; dose: string; seated: string | null }[];
   provisional: string | null;
   hotkey: string | null;
+  /** Wireframe W8. */
+  sharing: { category: string; label: string; enabled: boolean }[];
+  /** Where exports are written (wireframe W9). */
+  backup_dir: string | null;
+}
+
+// The full personal backup (wireframe W9; hy_core::backup::Summary).
+
+export interface BackupSummary {
+  exported_at: string;
+  events: number;
+  days: number;
+  from: string | null;
+  to: string | null;
+}
+
+/** "Import": done (the app restarts), or still running after the wait. */
+export type ImportOutcome = { state: 'done'; summary: BackupSummary } | { state: 'pending' };
+
+/** An import's outcome, sent by the engine thread when it finishes ("hy://backup-import"). */
+export interface ImportFinished {
+  ok: boolean;
+  summary: BackupSummary | null;
+  error: string | null;
+}
+
+export interface BackupDone {
+  path: string;
+  summary: BackupSummary;
 }
 
 // The recovery-day plan window (wireframe W15; PlanPage in view.rs).

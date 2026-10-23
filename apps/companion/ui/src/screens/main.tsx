@@ -1,7 +1,8 @@
 // The screens page uses Preact (architecture 7). It exists only while a screen is open:
 // the window is created on demand and destroyed on close (A7).
-// Settings (wireframes W3 to W7 and W12): Pet (slice V1-1), then Reminders, Water and
-// workweek, Movement programme, Focus and Pomodoro, and Accessibility (slice V1-4). The
+// Settings (wireframes W3 to W9 and W12): Pet (slice V1-1), then Reminders, Water and
+// workweek, Movement programme, Focus and Pomodoro, Sharing and server, Backup, and
+// Accessibility (slice V1-4). The
 // navigation collapses to a row above the content below 760 px. Every change goes to the
 // shell, which validates it, saves it in the local store and answers with the new page;
 // the pet and the coaching follow at once.
@@ -13,10 +14,11 @@ import type { SettingsPage } from '../shared/types';
 import { AccessibilityTab } from './Accessibility';
 import { newer } from './changes';
 import { FocusTab, MovementTab, RemindersTab } from './Coaching';
+import { BackupTab, SharingTab } from './Data';
 import { PetSettings } from './PetSettings';
 import { WaterTab } from './Water';
 
-type Tab = 'pet' | 'reminders' | 'water' | 'movement' | 'focus' | 'a11y';
+type Tab = 'pet' | 'reminders' | 'water' | 'movement' | 'focus' | 'sharing' | 'backup' | 'a11y';
 
 const TABS: [Tab, string][] = [
   ['pet', 'Pet'],
@@ -24,6 +26,8 @@ const TABS: [Tab, string][] = [
   ['water', 'Water & workweek'],
   ['movement', 'Movement programme'],
   ['focus', 'Focus & Pomodoro'],
+  ['sharing', 'Sharing & server'],
+  ['backup', 'Backup'],
   ['a11y', 'Accessibility'],
 ];
 
@@ -91,6 +95,10 @@ function App() {
         return <MovementTab page={page} save={save} />;
       case 'focus':
         return <FocusTab page={page} save={save} />;
+      case 'sharing':
+        return <SharingTab page={page} />;
+      case 'backup':
+        return <BackupTab page={page} />;
       case 'a11y':
         return <AccessibilityTab page={page} save={save} />;
     }
@@ -127,10 +135,19 @@ function App() {
           >
             Weekly review and progress
           </button>
+          <button
+            type="button"
+            class="nav-btn"
+            onClick={() => {
+              call('open_setup').catch(report);
+            }}
+          >
+            Run setup again
+          </button>
         </nav>
         <div>
           {body()}
-          {tab === 'pet' ? null : (
+          {tab === 'pet' || tab === 'backup' ? null : (
             <p class="status" role="status">
               {status}
             </p>

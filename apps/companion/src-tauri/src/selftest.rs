@@ -26,6 +26,8 @@
 //! loads this week's review, monthly progress reads, and the window closes. Last, the
 //! settings window loads its V1-4 tabs, a larger text size is saved and reaches the pet's
 //! view, and the recovery-day plan window (W15) opens under its own capability and loads.
+//! The setup wizard (W1) opens and loads, shows its sample reminder beside the pet and
+//! finishes; and an encrypted backup (W9) is exported and opened again with its password.
 //!
 //! A CI runner is not an office PC: focus checks that depend on an interactive desktop
 //! are recorded as informational, and real Windows acceptance of focus and DPI remains a
@@ -628,6 +630,8 @@ fn coach_end_to_end(
     // 7. The settings tabs and the recovery-day plan window (slice V1-4).
     settings_window(r, shell);
     plan_window(r, shell);
+    setup_window(r, shell);
+    backup_export(r, shell);
 
     // 8. The engine's state is saved (as on exit).
     let saved = runner.call(|l| l.flush().is_ok()) == Some(true);
@@ -1153,4 +1157,63 @@ fn plan_window(r: &mut Report, shell: &Arc<Shell>) {
         opened && loaded && page_ok && closed,
         format!("opened {opened}; page loaded {loaded}; {detail}; closed {closed}"),
     );
+}
+
+/// Open the setup wizard, wait for its page to load, show the sample reminder beside
+/// the pet, then Finish (which records setup as done and closes the wizard).
+fn setup_window(r: &mut Report, shell: &Arc<Shell>) {
+    let _ = on_main(shell, |s| s.open_setup());
+    let opened = wait_until(Duration::from_secs(10), || {
+        window_open(shell, crate::shell::SETUP)
+    });
+    let loaded = wait_until(Duration::from_secs(30), || shell.setup_loaded());
+    let _ = on_main(shell, |s| s.setup_sample());
+    let sample = wait_until(Duration::from_secs(5), || {
+        shell.notice_id().as_deref() == Some("setup-sample")
+    });
+    let finished = on_main(shell, |s| s.setup_finish().is_ok()) == Some(true);
+    let closed = wait_until(Duration::from_secs(10), || {
+        !window_open(shell, crate::shell::SETUP)
+    });
+    let recorded = !shell.setup_needed();
+    r.check(
+        "setup_window",
+        opened && loaded && sample && finished && closed && recorded,
+        format!(
+            "opened {opened}; page loaded {loaded}; sample reminder shown {sample}; finished {finished}; closed {closed}; recorded {recorded}"
+        ),
+    );
+}
+
+/// Export an encrypted backup into the temp folder with the real key cost, open it again
+/// with its password, check a wrong password is refused, and remove the file.
+fn backup_export(r: &mut Report, shell: &Arc<Shell>) {
+    use hy_core::backup::Contents;
+    let dir = std::env::temp_dir().join(format!("hy-selftest-backup-{}", std::process::id()));
+    let started = std::time::Instant::now();
+    let done = shell.export_backup_to(&dir, "self-test password");
+    let took = started.elapsed();
+    let (ok, detail) = match &done {
+        Ok(d) => {
+            let bytes = std::fs::read(&d.path).unwrap_or_default();
+            let opened = Contents::open(&bytes, "self-test password");
+            let refused = Contents::open(&bytes, "not the password").is_err();
+            let events = opened.as_ref().map_or(0, |c| c.rows("events"));
+            let ok = opened.is_ok() && refused && events == d.summary.events && events > 0;
+            (
+                ok,
+                format!(
+                    "{} bytes, {} events, {} days; opened {}; wrong password refused {refused}; {} ms",
+                    bytes.len(),
+                    d.summary.events,
+                    d.summary.days,
+                    opened.is_ok(),
+                    took.as_millis()
+                ),
+            )
+        }
+        Err(e) => (false, e.clone()),
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    r.check("backup_export", ok, detail);
 }

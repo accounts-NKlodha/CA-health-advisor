@@ -2,7 +2,7 @@
 // and a page keeps the newest answer (Codex review of #13, stale full-config writes).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { newer, workweekChange } from '../src/screens/changes.ts';
+import { newer, reminderChanges, servingEdit, workweekChange } from '../src/screens/changes.ts';
 
 const saved = { workdays: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat'], start: '09:30', end: '18:30', zone: 'Asia/Kolkata' };
 
@@ -30,4 +30,18 @@ test('answers to rapid successive saves: the newest revision stays shown', () =>
   // An equal revision is a fresh read and wins; nothing shown yet takes any answer.
   assert.equal(newer(page(3, true), page(3, false)).coach.categories.eye_rest, false);
   assert.equal(newer(null, page(0, true)).revision, 0);
+});
+
+test('the setup wizard sends its serving list as an edit of what it showed', () => {
+  assert.equal(servingEdit([150, 250, 500], [150, 250, 500]), null);
+  assert.deepEqual(servingEdit([150, 250, 500], [200, 250, 500]), { edit_servings: { add: [200], remove: [150] } });
+});
+
+test('the setup wizard sends one change per reminder field it changed', () => {
+  const shown = { intensity: 'balanced', categories: { movement: true, eye_rest: true, water: true } };
+  assert.deepEqual(reminderChanges(shown, shown), []);
+  assert.deepEqual(
+    reminderChanges(shown, { intensity: 'light', categories: { movement: true, eye_rest: false, water: true } }),
+    [{ intensity: 'light' }, { eye_rest: false }],
+  );
 });

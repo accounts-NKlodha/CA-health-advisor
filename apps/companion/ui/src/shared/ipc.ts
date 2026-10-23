@@ -5,7 +5,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   Accessibility,
+  BackupDone,
   CoachChange,
+  ImportFinished,
+  ImportOutcome,
   MonthReview,
   PanelView,
   PetEdit,
@@ -62,6 +65,12 @@ interface Commands {
   plan_page: { args: undefined; result: PlanPage };
   plan_save: { args: { plan: RecoveryPlan }; result: PlanPage };
   plan_cancel: { args: undefined; result: PlanPage };
+  open_setup: { args: undefined; result: void };
+  setup_page: { args: undefined; result: SettingsPage };
+  setup_sample: { args: undefined; result: void };
+  setup_finish: { args: undefined; result: void };
+  backup_export: { args: { password: string }; result: BackupDone };
+  backup_import: { args: { password: string }; result: ImportOutcome };
 }
 
 type Name = keyof Commands;
@@ -74,6 +83,11 @@ export function call<N extends Name>(
   return invoke<Commands[N]['result']>(name, args[0] as Record<string, unknown> | undefined);
 }
 
+/** Hand the shell the bytes of a backup file the user chose (sent as the raw body). */
+export function stageBackup(bytes: Uint8Array): Promise<number> {
+  return invoke<number>('backup_stage', bytes);
+}
+
 interface Events {
   'pet://view': PetView;
   'panel://view': PanelView;
@@ -82,6 +96,8 @@ interface Events {
   'hy://settings': number;
   /** "Open" on the weekly review offer named a week; fetch it with review_target. */
   'hy://review-target': string;
+  /** An import finished (also one the page stopped waiting for). */
+  'hy://backup-import': ImportFinished;
 }
 
 /** Listen for a view the shell pushes to this window. */

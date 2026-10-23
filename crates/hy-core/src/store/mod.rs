@@ -32,6 +32,7 @@ use crate::schema::{
 };
 use crate::time::{UserZone, WorkSchedule};
 
+mod backup;
 mod coach;
 mod prefs;
 mod review;

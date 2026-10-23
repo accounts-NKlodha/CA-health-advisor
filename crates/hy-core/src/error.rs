@@ -70,6 +70,11 @@ pub enum Error {
         source: rusqlite::Error,
     },
 
+    /// A backup file could not be opened: a wrong password, a damaged or altered file, or
+    /// a file that is not a HealthierYou backup. Nothing was changed.
+    #[error("backup refused: {0}")]
+    Backup(String),
+
     /// The migration list itself is malformed (a build defect, caught by tests).
     #[error("bad migration list: {0}")]
     BadMigrationList(String),

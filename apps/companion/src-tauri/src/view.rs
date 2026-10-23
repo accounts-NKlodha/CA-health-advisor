@@ -88,6 +88,21 @@ pub struct SettingsPage {
     pub provisional: Option<&'static str>,
     /// The panel hotkey, for the keyboard table.
     pub hotkey: Option<String>,
+    /// The sharing categories and their state (wireframe W8).
+    pub sharing: Vec<SharingRow>,
+    /// Where exports are written (wireframe W9).
+    pub backup_dir: Option<String>,
+}
+
+/// One optional sharing category (wireframe W8).
+#[derive(Debug, Clone, Serialize)]
+pub struct SharingRow {
+    /// The stored name.
+    pub category: &'static str,
+    /// Its name in words.
+    pub label: &'static str,
+    /// On (only after the office server accepted it).
+    pub enabled: bool,
 }
 
 /// One date the recovery day can move to (wireframe W15).

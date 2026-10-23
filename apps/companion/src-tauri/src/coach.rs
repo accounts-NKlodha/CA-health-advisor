@@ -51,9 +51,31 @@ pub enum SystemSignal {
 /// How long exit waits for the final save.
 pub const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
 /// How long [`CoachRunner::call`] waits for the engine thread.
-const CALL_WAIT: Duration = Duration::from_secs(15);
+pub const CALL_WAIT: Duration = Duration::from_secs(15);
 
-type Job = Box<dyn FnOnce(&mut CoachLink) + Send>;
+/// Whether the engine thread goes on after a job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    Continue,
+    /// The job replaced the data: the engine stops at once, without stepping or saving
+    /// again (its state belongs to the data that was replaced).
+    Stop,
+}
+
+type Job = Box<dyn FnOnce(&mut CoachLink) -> Flow + Send>;
+
+/// Why a job on the engine thread gave no answer. Only [`CallError::NotRunning`] means
+/// the job certainly did not run; the others leave its outcome unknown to the caller, so
+/// a page must not be told "nothing was changed".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallError {
+    /// The engine is stopped (or never started): the job was not queued.
+    NotRunning,
+    /// No answer within the wait: the job is queued or running and may still finish.
+    Pending,
+    /// The engine thread ended before answering (it stopped after an import, or failed).
+    Lost,
+}
 
 enum Msg {
     Input(Input),
@@ -68,7 +90,9 @@ pub struct CoachRunner {
     tx: Sender<Msg>,
     locked: AtomicBool,
     asleep: AtomicBool,
-    stopped: AtomicBool,
+    /// Set by [`CoachRunner::shutdown`], or by the engine thread itself when a job
+    /// replaced the data ([`CoachRunner::replace_and_stop`]); nothing is queued after.
+    stopped: Arc<AtomicBool>,
 }
 
 fn report(what: &str, r: Result<impl Sized, Error>) {
@@ -82,7 +106,12 @@ fn run(mut link: CoachLink, rx: &Receiver<Msg>) {
         match msg {
             Msg::Input(i) => report("coaching step", link.input(i)),
             Msg::Command(c) => report("coaching command", link.command(c)),
-            Msg::Job(f) => f(&mut link),
+            Msg::Job(f) => {
+                if f(&mut link) == Flow::Stop {
+                    // No flush: the engine's state went with the replaced data.
+                    return;
+                }
+            }
             Msg::Shutdown(ack) => {
                 report("saving coaching state", link.flush());
                 let _ = ack.send(());
@@ -101,9 +130,20 @@ impl CoachRunner {
     /// # Errors
     /// The engine could not be opened (an unreadable store or invalid settings).
     pub fn start(shell: &Arc<Shell>, store: Store, pump: bool) -> Result<Arc<Self>, Error> {
+        let runner = Self::launch(store, Arc::new(shell.handle()))?;
+        if pump {
+            let weak = Arc::downgrade(&runner);
+            let _ = std::thread::Builder::new()
+                .name("hy-signals".into())
+                .spawn(move || pump_signals(&weak));
+        }
+        Ok(runner)
+    }
+
+    /// Open the engine over `store` on its own thread, connected to `pet`.
+    fn launch(store: Store, pet: Arc<dyn PetShell>) -> Result<Arc<Self>, Error> {
         let (tx, rx) = mpsc::channel::<Msg>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), Error>>();
-        let pet: Arc<dyn PetShell> = Arc::new(shell.handle());
         let to_engine = tx.clone();
         std::thread::Builder::new()
             .name("hy-coach".into())
@@ -124,30 +164,22 @@ impl CoachRunner {
         ready_rx
             .recv()
             .map_err(|_| Error::Invalid("the coaching thread stopped while opening".into()))??;
-        let runner = Arc::new(Self {
+        Ok(Arc::new(Self {
             tx,
             locked: AtomicBool::new(false),
             asleep: AtomicBool::new(false),
-            stopped: AtomicBool::new(false),
-        });
-        if pump {
-            let weak = Arc::downgrade(&runner);
-            let _ = std::thread::Builder::new()
-                .name("hy-signals".into())
-                .spawn(move || pump_signals(&weak));
-        }
-        Ok(runner)
+            stopped: Arc::new(AtomicBool::new(false)),
+        }))
     }
 
-    fn send(&self, msg: Msg) {
-        if !self.stopped.load(Ordering::SeqCst) {
-            let _ = self.tx.send(msg);
-        }
+    /// Queue `msg` unless the engine is stopped; whether it was queued.
+    fn send(&self, msg: Msg) -> bool {
+        !self.stopped.load(Ordering::SeqCst) && self.tx.send(msg).is_ok()
     }
 
     /// Apply an engine input on the engine thread.
     pub fn input(&self, input: Input) {
-        self.send(Msg::Input(input));
+        let _ = self.send(Msg::Input(input));
     }
 
     /// Whether the session is locked or the PC asleep.
@@ -182,16 +214,92 @@ impl CoachRunner {
         }
     }
 
-    /// Run `f` on the engine thread and wait for its result (the self-test).
+    /// Run `f` on the engine thread and wait for its result, for reads and the
+    /// self-test: `None` whatever the reason.
     pub fn call<T: Send + 'static>(
         &self,
         f: impl FnOnce(&mut CoachLink) -> T + Send + 'static,
     ) -> Option<T> {
+        self.try_call(f).ok()
+    }
+
+    /// Run `f` on the engine thread and wait up to [`CALL_WAIT`] for its result. A
+    /// timeout does not cancel `f`: it is [`CallError::Pending`], and a change `f` makes
+    /// may still be saved after the caller stopped waiting.
+    ///
+    /// # Errors
+    /// See [`CallError`].
+    pub fn try_call<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut CoachLink) -> T + Send + 'static,
+    ) -> Result<T, CallError> {
+        self.job(move |link| (f(link), Flow::Continue), CALL_WAIT)
+    }
+
+    /// Replace the store's data on the engine thread and complete the replacement
+    /// there, whether or not the caller is still waiting:
+    ///
+    /// - `f` runs on the engine's own connection;
+    /// - if it succeeds, the engine stops at once (no further step and no save: its
+    ///   state belongs to the replaced data; nothing more is queued), then `after` runs
+    ///   on the engine thread with the result (the shell restarts the app);
+    /// - if it fails, nothing was changed, the engine goes on, and `after` runs with the
+    ///   error.
+    ///
+    /// The caller waits at most `wait`. [`CallError::Pending`] then means the outcome is
+    /// not known yet: `after` still reports it, so a late success is never left without
+    /// the engine stop and restart, and never reported as "nothing was changed".
+    ///
+    /// # Errors
+    /// See [`CallError`]; `Ok` carries what `f` returned.
+    pub fn replace_and_stop<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut CoachLink) -> Result<T, Error> + Send + 'static,
+        after: impl FnOnce(&Result<T, Error>) + Send + 'static,
+        wait: Duration,
+    ) -> Result<Result<T, Error>, CallError> {
+        let stopped = Arc::clone(&self.stopped);
+        self.job(
+            move |link| {
+                let out = f(link);
+                let flow = if out.is_ok() {
+                    // Refuse anything queued from now on, before anyone hears of success.
+                    stopped.store(true, Ordering::SeqCst);
+                    Flow::Stop
+                } else {
+                    Flow::Continue
+                };
+                after(&out);
+                (out, flow)
+            },
+            wait,
+        )
+    }
+
+    fn job<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut CoachLink) -> (T, Flow) + Send + 'static,
+        wait: Duration,
+    ) -> Result<T, CallError> {
         let (tx, rx) = mpsc::channel();
-        self.send(Msg::Job(Box::new(move |link| {
-            let _ = tx.send(f(link));
+        let queued = self.send(Msg::Job(Box::new(move |link| {
+            let (out, flow) = f(link);
+            let _ = tx.send(out);
+            flow
         })));
-        rx.recv_timeout(CALL_WAIT).ok()
+        if !queued {
+            return Err(CallError::NotRunning);
+        }
+        rx.recv_timeout(wait).map_err(|e| match e {
+            mpsc::RecvTimeoutError::Timeout => CallError::Pending,
+            mpsc::RecvTimeoutError::Disconnected => CallError::Lost,
+        })
+    }
+
+    /// Whether the engine is stopped (shut down, or stopped by an import).
+    #[cfg(test)]
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
     }
 
     /// Save, stop the engine thread and the pump. Waits at most `wait` for the save.
@@ -256,5 +364,201 @@ fn pump_signals(runner: &Weak<CoachRunner>) {
         }
         drop(r);
         std::thread::sleep(PRESENCE_EVERY);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The import's completion on the engine thread: a worker held past the caller's
+    //! wait (Codex review of #14). Deterministic: the job waits on a gate the test opens
+    //! only after the caller has given up.
+
+    use std::sync::Mutex;
+
+    use hy_core::backup::KdfParams;
+    use hy_core::clock::SystemClock;
+    use hy_core::coach::Servings;
+    use hy_pet::shell::{Bubble, BubbleOutcome, HideReason, MenuAction, ShellEventSink};
+    use hy_pet::state::PetState;
+
+    use super::*;
+
+    const FAST: KdfParams = KdfParams {
+        memory_kib: 64,
+        passes: 1,
+        lanes: 1,
+    };
+    const SHORT: Duration = Duration::from_millis(50);
+    const LONG: Duration = Duration::from_secs(30);
+
+    struct NoPet;
+
+    impl PetShell for NoPet {
+        fn set_state(&self, _: PetState, _: Option<String>) {}
+        fn show_bubble(&self, _: Bubble) -> BubbleOutcome {
+            BubbleOutcome::Shown
+        }
+        fn close_bubble(&self, _: &str) {}
+        fn hide(&self, _: HideReason) {}
+        fn unhide(&self, _: HideReason) {}
+        fn is_visible(&self) -> bool {
+            true
+        }
+        fn set_menu_actions(&self, _: Vec<MenuAction>) {}
+        fn set_event_sink(&self, _: Arc<dyn ShellEventSink>) {}
+    }
+
+    struct Env {
+        dir: std::path::PathBuf,
+        path: std::path::PathBuf,
+        runner: Arc<CoachRunner>,
+    }
+
+    impl Drop for Env {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// An engine over a store on disk (as in the app), and a backup whose only change
+    /// from a new store is its serving buttons, 200 and 750 ml.
+    fn env(name: &str) -> (Env, Vec<u8>) {
+        let dir = std::env::temp_dir().join(format!("hy-import-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.sqlite3");
+        let clock = Arc::new(SystemClock::new());
+        let store = Store::open(&path, clock.clone()).unwrap();
+        let runner = CoachRunner::launch(store, Arc::new(NoPet)).unwrap();
+        // The engine has saved its state once.
+        assert!(runner.try_call(|l| l.flush().is_ok()).unwrap());
+        let source = Store::open_in_memory(clock).unwrap();
+        source
+            .set_water_servings(&Servings::new(vec![200, 750]).unwrap())
+            .unwrap();
+        let (file, _) = source.export_backup_with("long enough", FAST).unwrap();
+        (Env { dir, path, runner }, file)
+    }
+
+    fn on_disk(path: &std::path::Path) -> Store {
+        Store::open(path, Arc::new(SystemClock::new())).unwrap()
+    }
+
+    type Seen = Arc<Mutex<Vec<Result<usize, String>>>>;
+
+    struct Held {
+        answer: Result<Result<usize, Error>, CallError>,
+        /// Lets the held job go on.
+        open: Sender<()>,
+        /// Signalled when the engine thread reported the outcome.
+        done: Receiver<()>,
+        seen: Seen,
+    }
+
+    /// Start an import whose job waits for the gate before replacing the data (already
+    /// open with `opened`); `after` records what the engine thread reports.
+    fn held_import(
+        e: &Env,
+        file: Vec<u8>,
+        password: &'static str,
+        wait: Duration,
+        opened: bool,
+    ) -> Held {
+        let (open, gate) = mpsc::channel::<()>();
+        if opened {
+            open.send(()).unwrap();
+        }
+        let (done_tx, done) = mpsc::channel::<()>();
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        let answer = e.runner.replace_and_stop(
+            move |link| {
+                let _ = gate.recv_timeout(LONG);
+                link.replace_data(|s| s.import_backup(&file, password).map(|x| x.events))
+            },
+            move |out| {
+                record
+                    .lock()
+                    .unwrap()
+                    .push(out.as_ref().map(|n| *n).map_err(ToString::to_string));
+                let _ = done_tx.send(());
+            },
+            wait,
+        );
+        Held {
+            answer,
+            open,
+            done,
+            seen,
+        }
+    }
+
+    #[test]
+    fn a_late_import_is_pending_then_completed_by_the_engine_thread() {
+        let (e, file) = env("late-ok");
+        let Held {
+            answer,
+            open,
+            done,
+            seen,
+        } = held_import(&e, file, "long enough", SHORT, false);
+        // The caller gave up: the outcome is not known, nothing is claimed.
+        assert!(matches!(answer, Err(CallError::Pending)), "{answer:?}");
+        assert!(!e.runner.is_stopped());
+        assert_eq!(
+            on_disk(&e.path).water_servings().unwrap(),
+            Servings::default()
+        );
+        // The worker goes on and commits the replacement after the caller stopped waiting.
+        open.send(()).unwrap();
+        done.recv_timeout(LONG).unwrap();
+        // The commit was reported, and the engine was stopped by the engine thread.
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert!(seen.lock().unwrap()[0].is_ok());
+        assert!(e.runner.is_stopped());
+        assert_eq!(
+            e.runner.try_call(|l| l.flush().is_ok()),
+            Err(CallError::NotRunning)
+        );
+        e.runner.input(Input::Refresh); // refused quietly
+        let after = on_disk(&e.path);
+        assert_eq!(after.water_servings().unwrap().ml(), &[200, 750]);
+        // The old engine never saved its state over the imported data.
+        assert!(after.coach_state().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_late_refused_import_reports_it_and_the_engine_goes_on() {
+        let (e, file) = env("late-refused");
+        let Held {
+            answer,
+            open,
+            done,
+            seen,
+        } = held_import(&e, file, "the wrong one", SHORT, false);
+        assert!(matches!(answer, Err(CallError::Pending)), "{answer:?}");
+        open.send(()).unwrap();
+        done.recv_timeout(LONG).unwrap();
+        assert!(seen.lock().unwrap()[0].is_err());
+        assert!(!e.runner.is_stopped());
+        assert_eq!(e.runner.try_call(|l| l.flush().is_ok()), Ok(true));
+        let after = on_disk(&e.path);
+        assert_eq!(after.water_servings().unwrap(), Servings::default());
+        assert!(after.coach_state().unwrap().is_some());
+    }
+
+    #[test]
+    fn an_import_within_the_wait_answers_and_stops_the_engine() {
+        let (e, file) = env("in-time");
+        let Held {
+            answer, done, seen, ..
+        } = held_import(&e, file, "long enough", LONG, true);
+        assert!(matches!(answer, Ok(Ok(_))), "{answer:?}");
+        done.recv_timeout(LONG).unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert!(e.runner.is_stopped());
+        // A job queued behind is refused, never run on the replaced data.
+        assert_eq!(e.runner.try_call(|_| ()), Err(CallError::NotRunning));
+        assert_eq!(on_disk(&e.path).water_servings().unwrap().ml(), &[200, 750]);
     }
 }

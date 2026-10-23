@@ -27,7 +27,7 @@ use serde::Deserialize;
 use tauri::{Emitter, Manager};
 
 use super::{PLAN, Shell, lock};
-use crate::coach::CoachRunner;
+use crate::coach::{CallError, CoachRunner};
 use crate::view::{LibraryMovement, PlanDate, PlanPage, ProgrammeDay, ReviewPage, SettingsPage};
 use crate::windows;
 
@@ -43,6 +43,36 @@ pub enum SuggestionAnswer {
     Hide,
 }
 
+/// A settings change was saved: count it and tell every open page (they reload and
+/// keep the newest revision).
+fn settings_changed(app: &tauri::AppHandle) {
+    if let Some(shell) = app.try_state::<Arc<Shell>>() {
+        let revision = {
+            let mut i = lock(&shell.inner);
+            i.settings_revision += 1;
+            i.settings_revision
+        };
+        let _ = app.emit("hy://settings", revision);
+    }
+}
+
+/// The page's words when a change sent to the engine thread got no answer. Only a
+/// change that was never queued is "nothing was changed"; after a timeout it may still
+/// be saved, so the page must not say otherwise.
+fn pending_words(e: CallError, what: &str) -> String {
+    match e {
+        CallError::NotRunning => {
+            "Nothing was changed: the coaching engine is not running.".to_owned()
+        }
+        CallError::Pending => format!(
+            "{what} is still waiting: the app is busy. It may still be saved; open pages show it when it is."
+        ),
+        CallError::Lost => format!(
+            "{what} may not have been saved: the coaching engine stopped. Restart HealthierYou to check."
+        ),
+    }
+}
+
 const fn day_short(d: Weekday) -> &'static str {
     match d {
         Weekday::Mon => "Mon",
@@ -56,7 +86,7 @@ const fn day_short(d: Weekday) -> &'static str {
 }
 
 impl Shell {
-    fn runner(&self) -> Option<Arc<CoachRunner>> {
+    pub(super) fn runner(&self) -> Option<Arc<CoachRunner>> {
         self.app
             .try_state::<Arc<CoachRunner>>()
             .map(|r| Arc::clone(r.inner()))
@@ -69,20 +99,29 @@ impl Shell {
         f: impl FnOnce(&mut Store) -> hy_core::Result<T> + Send + 'static,
     ) -> Result<T, String> {
         let result = match self.runner() {
-            Some(runner) => runner
-                .call(move |link: &mut CoachLink| link.change_settings(f))
-                .ok_or_else(|| "The app did not answer in time. Try again.".to_owned())?,
-            None => f(&mut lock(&self.store)),
+            Some(runner) => {
+                let app = self.app.clone();
+                // The engine thread announces the change itself, so a change that lands
+                // after the page stopped waiting still reaches every open page.
+                runner
+                    .try_call(move |link: &mut CoachLink| {
+                        let out = link.change_settings(f);
+                        if out.is_ok() {
+                            settings_changed(&app);
+                        }
+                        out
+                    })
+                    .map_err(|e| pending_words(e, "This change"))?
+            }
+            None => {
+                let out = f(&mut lock(&self.store));
+                if out.is_ok() {
+                    settings_changed(&self.app);
+                }
+                out
+            }
         };
-        let out = result.map_err(|e| format!("Nothing was changed: {e}"))?;
-        // Every open settings page reloads; a page keeps the newest revision it has seen.
-        let revision = {
-            let mut i = lock(&self.inner);
-            i.settings_revision += 1;
-            i.settings_revision
-        };
-        let _ = self.app.emit("hy://settings", revision);
-        Ok(out)
+        result.map_err(|e| format!("Nothing was changed: {e}"))
     }
 
     // ---------------------------------------------------------------- settings
@@ -135,6 +174,8 @@ impl Shell {
                 .collect(),
             provisional: PROVISIONAL.then_some(PROVISIONAL_NOTICE),
             hotkey,
+            sharing: Self::sharing_rows(&store).map_err(read)?,
+            backup_dir: self.backup_dir().map(|d| d.display().to_string()),
         })
     }
 
@@ -157,7 +198,7 @@ impl Shell {
     pub fn save_water_settings(&self, change: WaterChange) -> Result<SettingsPage, String> {
         self.change_settings(move |s| {
             let today = s.today()?;
-            s.change_water(change, today)
+            s.change_water(&change, today)
         })?;
         self.settings_page()
     }
@@ -193,6 +234,15 @@ impl Shell {
     /// The display preferences every page follows.
     pub fn display_prefs(&self) -> Accessibility {
         lock(&self.inner).a11y
+    }
+
+    /// The setup wizard's data (the same as the settings tabs').
+    ///
+    /// # Errors
+    /// See [`Shell::settings_page`].
+    pub fn setup_page(&self) -> Result<SettingsPage, String> {
+        self.setup_opened();
+        self.settings_page()
     }
 
     /// Whether a settings page loaded its tabs (for the self-test).
@@ -246,8 +296,8 @@ impl Shell {
             "Recovery days need the coaching engine, which is not running.".to_owned()
         })?;
         let plan = runner
-            .call(|link: &mut CoachLink| link.view().recovery.plan)
-            .ok_or_else(|| "The app did not answer in time. Try again.".to_owned())?;
+            .try_call(|link: &mut CoachLink| link.view().recovery.plan)
+            .map_err(|_| "The app did not answer in time. Try again.".to_owned())?;
         let store = lock(&self.store);
         let read = |e: hy_core::Error| format!("The plan could not be read: {e}");
         let today = store.today().map_err(read)?;
@@ -279,10 +329,10 @@ impl Shell {
             "Recovery days need the coaching engine, which is not running.".to_owned()
         })?;
         let outcome = runner
-            .call(move |link: &mut CoachLink| {
+            .try_call(move |link: &mut CoachLink| {
                 link.input(Input::Recovery(action)).map(|o| o.outcome)
             })
-            .ok_or_else(|| "The app did not answer in time. Try again.".to_owned())?
+            .map_err(|e| pending_words(e, "The plan change"))?
             .map_err(|e| format!("Nothing was changed: {e}"))?;
         match outcome {
             InputOutcome::Applied => self.plan_page(),

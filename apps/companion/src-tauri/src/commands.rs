@@ -16,7 +16,7 @@ use hy_pet::profile::PetEdit;
 use tauri::State;
 use uuid::Uuid;
 
-use crate::shell::{Shell, SuggestionAnswer};
+use crate::shell::{BackupDone, ImportOutcome, Shell, SuggestionAnswer};
 use crate::view::{PanelView, PetView, PlanPage, ReviewPage, SettingsPage, SettingsView};
 
 type ShellState<'a> = State<'a, Arc<Shell>>;
@@ -301,4 +301,72 @@ pub fn plan_save(shell: ShellState<'_>, plan: RecoveryPlan) -> Result<PlanPage, 
 #[tauri::command]
 pub fn plan_cancel(shell: ShellState<'_>) -> Result<PlanPage, String> {
     shell.cancel_plan()
+}
+
+// ------------------------------------------------------------------- setup
+
+/// Open the setup wizard (Settings, "Run setup again").
+#[tauri::command]
+pub fn open_setup(shell: ShellState<'_>) {
+    shell.open_setup();
+}
+
+/// The setup wizard's data.
+///
+/// # Errors
+/// A read failure, worded for the user.
+#[tauri::command]
+pub fn setup_page(shell: ShellState<'_>) -> Result<SettingsPage, String> {
+    shell.setup_page()
+}
+
+/// Show the wizard's sample reminder beside the pet.
+#[tauri::command]
+pub fn setup_sample(shell: ShellState<'_>) {
+    shell.setup_sample();
+}
+
+/// "Finish": setup is done; the wizard closes.
+///
+/// # Errors
+/// A write failure, worded for the user.
+#[tauri::command]
+pub fn setup_finish(shell: ShellState<'_>) -> Result<(), String> {
+    shell.setup_finish()
+}
+
+// ------------------------------------------------------------------ backup
+
+/// "Export my data": an encrypted backup in the Documents folder.
+///
+/// # Errors
+/// The refusal, worded for the user; nothing was written.
+#[tauri::command]
+pub fn backup_export(shell: ShellState<'_>, password: String) -> Result<BackupDone, String> {
+    shell.export_backup(&password)
+}
+
+/// The bytes of a backup file the page read (sent as the raw request body).
+///
+/// # Errors
+/// Not a raw body, or a file too large to be a backup.
+#[tauri::command]
+pub fn backup_stage(
+    shell: ShellState<'_>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<usize, String> {
+    match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => shell.stage_backup(bytes.clone()),
+        tauri::ipc::InvokeBody::Json(_) => Err("The file could not be read.".to_owned()),
+    }
+}
+
+/// "Import": replace this PC's data with the staged backup's, then restart; or, after the
+/// wait, "still running" (the outcome follows as `hy://backup-import`).
+///
+/// # Errors
+/// The refusal, worded for the user.
+#[tauri::command]
+pub fn backup_import(shell: ShellState<'_>, password: String) -> Result<ImportOutcome, String> {
+    shell.import_backup(password)
 }

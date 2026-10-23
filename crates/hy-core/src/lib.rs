@@ -16,11 +16,12 @@
 //!
 //! Slice V1-4 adds [`review`]: the weekly and monthly reviews, built from per-day tallies
 //! and the current view of the event log, with "Try next week" suggestions; and
-//! [`prefs`]: the display preferences (text size, reduced motion, contrast). Sync is a
-//! later slice.
+//! [`prefs`]: the display preferences (text size, reduced motion, contrast); and
+//! [`backup`]: the encrypted full personal backup file. Sync is a later slice.
 //! Pairing, the server link (certificate pin and token) and the signed receipt are not
 //! part of V1-0: they wait for the pairing security gate before V1-5.
 
+pub mod backup;
 pub mod clock;
 pub mod coach;
 pub mod error;
