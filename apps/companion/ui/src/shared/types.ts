@@ -296,6 +296,9 @@ export interface WeekReview {
   next_week: string | null;
 }
 
+/** How a monthly bar is drawn: decided by the engine from the metric's own count. */
+export type BarKind = 'no_data' | 'nothing_to_count' | 'zero' | 'measured';
+
 export interface MonthBar {
   month: string;
   in_progress: boolean;
@@ -303,6 +306,7 @@ export interface MonthBar {
   movement: Ratio;
   breaks: Ratio;
   water: Ratio;
+  kind: Record<Metric, BarKind>;
 }
 
 export interface MonthDay {
