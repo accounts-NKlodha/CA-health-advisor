@@ -266,7 +266,7 @@ pub fn year_of(now: chrono::DateTime<chrono::Utc>) -> i32 {
     now.year()
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]

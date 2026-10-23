@@ -63,6 +63,7 @@ pub const SETUP: &str = "setup";
 
 mod data;
 mod screens;
+pub(crate) use data::category_label;
 pub use data::{BackupDone, ImportOutcome};
 pub use screens::SuggestionAnswer;
 

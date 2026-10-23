@@ -209,8 +209,11 @@ fn t_s4_only_the_confirm_action_can_make_a_device_active() {
         );
         assert!(!text.contains("skip_confirm"), "{name}");
     }
-    assert_eq!(setters.len(), 1, "exactly one statement sets 'active'");
-    let (file, at, flat) = &setters[0];
+    // Two statements: the admin's confirmation, and its replay from the authenticated
+    // mirror after a restore (contract 7.3, "Authentication after a restore"), which
+    // re-applies a `device_confirmed` entry that only `confirm_device` can have written.
+    assert_eq!(setters.len(), 2, "exactly two statements set 'active'");
+    let (file, at, flat) = setters.iter().find(|s| s.0 == "server.rs").unwrap();
     assert_eq!(file, "server.rs");
     let owner = flat[..*at].rsplit("pub fn ").next().unwrap();
     assert!(
@@ -218,6 +221,33 @@ fn t_s4_only_the_confirm_action_can_make_a_device_active() {
         "set inside {}",
         &owner[..40.min(owner.len())]
     );
+    let (_, at, flat) = setters
+        .iter()
+        .find(|s| s.0 == "recovery.rs")
+        .expect("the only other setter is the mirror replay");
+    let owner = flat[..*at].rsplit(" fn ").next().unwrap();
+    assert!(
+        owner.starts_with("replay_effect("),
+        "replayed inside {}",
+        &owner[..40.min(owner.len())]
+    );
+    let arm = flat[..*at].rsplit("=>").nth(1).unwrap_or_default();
+    assert!(
+        arm.trim_end()
+            .ends_with("EntryBody::DeviceConfirmed { device_ref }"),
+        "only a replayed device_confirmed entry activates: {arm}"
+    );
+    // The replay runs only inside the startup comparison, before the API opens.
+    let recovery = std::fs::read_to_string(src.join("recovery.rs")).unwrap();
+    for (name, text) in [
+        ("server.rs", "replay_effect("),
+        ("api.rs", "replay_effect("),
+        ("admin.rs", "replay_effect("),
+    ] {
+        let t = std::fs::read_to_string(src.join(name)).unwrap();
+        assert!(!t.contains(text), "{name} must not replay");
+    }
+    assert!(recovery.contains("fn enter_hold_all"));
     assert_eq!(
         callers.iter().filter(|f| *f == "admin.rs").count(),
         1,

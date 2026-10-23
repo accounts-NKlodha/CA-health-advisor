@@ -6,9 +6,12 @@
 //! other authenticated endpoint refuses it with `device_unconfirmed` **before** any other
 //! processing (contract 4.5).
 //!
-//! V1-5a serves pairing, state and unpair. History, control, upload, receipt and the
-//! update manifest are V1-5b (and V1-6): here they authenticate, apply the pending-device
-//! gate, and otherwise answer `protocol_unsupported`.
+//! Every request from a confirmed device may carry its stored receipt in `HY-Receipt`
+//! ([`Server::check_echo`]): an older receipt than before answers `device_regressed`.
+//! `POST /v1/receipt` counts as evidence only for the device whose token presents it; a
+//! receipt sent without a usable token is refused, and is only checked for a history
+//! beyond the server's (contract 9). The update manifest is V1-6 and answers
+//! `protocol_unsupported` after the gate.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -21,7 +24,10 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use hy_core::protocol::unb64_exact;
-use hy_core::protocol::wire::{ErrorBody, PairRequest, WireError};
+use hy_core::protocol::wire::{
+    ControlRequest, ErrorBody, PairRequest, RECEIPT_HEADER, ReceiptRequest, UploadRequest,
+    WireError,
+};
 
 use crate::logging::{self, V};
 use crate::server::{AuthedDevice, DeviceState, Refusal, Server};
@@ -133,11 +139,11 @@ pub fn router(server: Arc<Server>) -> Router {
         .route("/v1/pair", post(pair))
         .route("/v1/state", get(state))
         .route("/v1/unpair", post(unpair))
-        .route("/v1/history", get(confirmed_only_history))
-        .route("/v1/control", post(confirmed_only_control))
-        .route("/v1/upload", post(confirmed_only_upload))
-        .route("/v1/receipt", post(confirmed_only_receipt))
-        .route("/v1/update/manifest", get(confirmed_only_manifest))
+        .route("/v1/history", get(history))
+        .route("/v1/control", post(control))
+        .route("/v1/upload", post(upload))
+        .route("/v1/receipt", post(receipt))
+        .route("/v1/update/manifest", get(manifest))
         .fallback(not_found)
         .with_state(server)
 }
@@ -219,10 +225,14 @@ async fn state(State(server): State<Arc<Server>>, headers: HeaderMap, uri: Uri) 
         }
     };
     let after = after_seq(&uri);
+    let echo = echo_of(&headers);
     let s = server.clone();
-    match blocking(move || s.state_for(&dev, after))
-        .await
-        .and_then(|r| r)
+    match blocking(move || {
+        s.check_echo(&dev, echo.as_deref())?;
+        s.state_for(&dev, after)
+    })
+    .await
+    .and_then(|r| r)
     {
         Ok(state) => {
             log_request("state", start, StatusCode::OK, None, Some(&dev));
@@ -257,19 +267,36 @@ async fn unpair(State(server): State<Arc<Server>>, headers: HeaderMap) -> Respon
     }
 }
 
-/// The pending-device gate shared by every confirmed-only endpoint. The body is never
-/// read before it passes.
+/// The receipt a device echoes in `HY-Receipt`, if any (one header only).
+fn echo_of(headers: &HeaderMap) -> Option<String> {
+    let mut values = headers.get_all(RECEIPT_HEADER).iter();
+    let first = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    first.to_str().ok().map(str::to_owned)
+}
+
+fn query_param<'a>(uri: &'a Uri, name: &str) -> Option<&'a str> {
+    uri.query()?
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .find_map(|(k, v)| (k == name).then_some(v))
+}
+
+/// The pending-device gate shared by every confirmed-only endpoint: authenticate and
+/// refuse a pending device with `device_unconfirmed` before the body is read.
 async fn confirmed_only(
     endpoint: &'static str,
     server: &Arc<Server>,
     headers: &HeaderMap,
-) -> Response {
-    let start = Instant::now();
+    start: Instant,
+) -> Result<AuthedDevice, Response> {
     let dev = match auth(server, headers).await {
         Ok(d) => d,
         Err(e) => {
             log_request(endpoint, start, status_of(e), Some(e), None);
-            return error_response(e);
+            return Err(error_response(e));
         }
     };
     if dev.state != DeviceState::Active {
@@ -280,37 +307,172 @@ async fn confirmed_only(
             Some(WireError::DeviceUnconfirmed),
             Some(&dev),
         );
-        return error_response(WireError::DeviceUnconfirmed);
+        return Err(error_response(WireError::DeviceUnconfirmed));
     }
-    // Sync, history, receipts and the manifest arrive in V1-5b and V1-6.
+    Ok(dev)
+}
+
+async fn read_json<T: serde::de::DeserializeOwned>(
+    headers: &HeaderMap,
+    body: Body,
+    limit: usize,
+) -> Result<T, WireError> {
+    if declared_too_large(headers, limit) {
+        return Err(WireError::PayloadTooLarge);
+    }
+    let bytes = to_bytes(body, limit)
+        .await
+        .map_err(|_| WireError::PayloadTooLarge)?;
+    serde_json::from_slice(&bytes).map_err(|_| WireError::SchemaInvalid)
+}
+
+fn finish<T: serde::Serialize>(
+    endpoint: &'static str,
+    start: Instant,
+    dev: &AuthedDevice,
+    result: Result<T, WireError>,
+) -> Response {
+    match result {
+        Ok(v) => {
+            log_request(endpoint, start, StatusCode::OK, None, Some(dev));
+            json_response(&v)
+        }
+        Err(e) => {
+            log_request(endpoint, start, status_of(e), Some(e), Some(dev));
+            error_response(e)
+        }
+    }
+}
+
+async fn history(State(server): State<Arc<Server>>, headers: HeaderMap, uri: Uri) -> Response {
+    let start = Instant::now();
+    let dev = match confirmed_only("history", &server, &headers, start).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let echo = echo_of(&headers);
+    let from = query_param(&uri, "from").unwrap_or_default().to_owned();
+    let to = query_param(&uri, "to").unwrap_or_default().to_owned();
+    let s = server.clone();
+    let result = blocking(move || {
+        s.check_echo(&dev, echo.as_deref())?;
+        s.history(&dev, &from, &to)
+    })
+    .await
+    .and_then(|r| r);
+    finish("history", start, &dev, result)
+}
+
+async fn control(State(server): State<Arc<Server>>, headers: HeaderMap, body: Body) -> Response {
+    let start = Instant::now();
+    let dev = match confirmed_only("control", &server, &headers, start).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let echo = echo_of(&headers);
+    let result = match read_json::<ControlRequest>(&headers, body, BODY_LIMIT).await {
+        Ok(req) => {
+            let s = server.clone();
+            blocking(move || {
+                s.check_echo(&dev, echo.as_deref())?;
+                s.control(&dev, &req)
+            })
+            .await
+            .and_then(|r| r)
+        }
+        Err(e) => Err(e),
+    };
+    finish("control", start, &dev, result)
+}
+
+async fn upload(State(server): State<Arc<Server>>, headers: HeaderMap, body: Body) -> Response {
+    let start = Instant::now();
+    let dev = match confirmed_only("upload", &server, &headers, start).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let echo = echo_of(&headers);
+    let result = match read_json::<UploadRequest>(&headers, body, BODY_LIMIT).await {
+        Ok(req) => {
+            let s = server.clone();
+            blocking(move || {
+                s.check_echo(&dev, echo.as_deref())?;
+                s.upload(&dev, &req)
+            })
+            .await
+            .and_then(|r| r)
+        }
+        Err(e) => Err(e),
+    };
+    finish("upload", start, &dev, result)
+}
+
+/// Body limit for `/v1/receipt` (one head).
+pub const RECEIPT_BODY_LIMIT: usize = 4 * 1024;
+
+/// A receipt sent without a usable token: refused, and only checked for a history
+/// beyond the server's (never evidence).
+async fn refuse_receipt(
+    server: Arc<Server>,
+    headers: &HeaderMap,
+    body: Body,
+    e: WireError,
+    dev: Option<AuthedDevice>,
+    start: Instant,
+) -> Response {
+    if !declared_too_large(headers, RECEIPT_BODY_LIMIT)
+        && let Ok(bytes) = to_bytes(body, RECEIPT_BODY_LIMIT).await
+    {
+        let _ = blocking(move || server.receipt_without_device(&bytes)).await;
+    }
+    log_request("receipt", start, status_of(e), Some(e), dev.as_ref());
+    error_response(e)
+}
+
+async fn receipt(State(server): State<Arc<Server>>, headers: HeaderMap, body: Body) -> Response {
+    let start = Instant::now();
+    let dev = match auth(&server, &headers).await {
+        Ok(d) => d,
+        Err(e) => return refuse_receipt(server, &headers, body, e, None, start).await,
+    };
+    if dev.state != DeviceState::Active {
+        return refuse_receipt(
+            server,
+            &headers,
+            body,
+            WireError::DeviceUnconfirmed,
+            Some(dev),
+            start,
+        )
+        .await;
+    }
+    let result = match read_json::<ReceiptRequest>(&headers, body, RECEIPT_BODY_LIMIT).await {
+        Ok(req) => {
+            let s = server.clone();
+            blocking(move || s.present_receipt(&dev, &req.head))
+                .await
+                .and_then(|r| r)
+        }
+        Err(e) => Err(e),
+    };
+    finish("receipt", start, &dev, result)
+}
+
+async fn manifest(State(server): State<Arc<Server>>, headers: HeaderMap) -> Response {
+    let start = Instant::now();
+    let dev = match confirmed_only("manifest", &server, &headers, start).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    // The update manifest arrives in V1-6.
     log_request(
-        endpoint,
+        "manifest",
         start,
         StatusCode::NOT_FOUND,
         Some(WireError::ProtocolUnsupported),
         Some(&dev),
     );
     error_response(WireError::ProtocolUnsupported)
-}
-
-async fn confirmed_only_history(State(s): State<Arc<Server>>, h: HeaderMap) -> Response {
-    confirmed_only("history", &s, &h).await
-}
-
-async fn confirmed_only_control(State(s): State<Arc<Server>>, h: HeaderMap) -> Response {
-    confirmed_only("control", &s, &h).await
-}
-
-async fn confirmed_only_upload(State(s): State<Arc<Server>>, h: HeaderMap) -> Response {
-    confirmed_only("upload", &s, &h).await
-}
-
-async fn confirmed_only_receipt(State(s): State<Arc<Server>>, h: HeaderMap) -> Response {
-    confirmed_only("receipt", &s, &h).await
-}
-
-async fn confirmed_only_manifest(State(s): State<Arc<Server>>, h: HeaderMap) -> Response {
-    confirmed_only("manifest", &s, &h).await
 }
 
 #[cfg(test)]

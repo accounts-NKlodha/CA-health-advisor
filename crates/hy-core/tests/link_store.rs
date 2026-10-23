@@ -103,6 +103,7 @@ impl FakeServer {
             entries: Self::wire(&self.entries[usize::try_from(after).unwrap()..]),
             more: false,
             head: Some(self.head()),
+            hold: false,
         }
     }
 }
@@ -462,4 +463,65 @@ fn importing_a_backup_onto_a_confirmed_pc_unpairs_it_in_the_same_transaction() {
         s.store.consent_log().unwrap().last().unwrap().kind,
         ConsentKind::Unpaired
     );
+}
+
+#[test]
+fn t_s17_a_forged_policy_entry_starts_nothing_and_stops_uploads() {
+    use hy_core::protocol::chain::day_number;
+    let mut s = setup();
+    s.server.push(EntryBody::DeviceConfirmed {
+        device_ref: *s.me.as_bytes(),
+    });
+    let state = s.server.state(0, vec![device(s.me, "PC-1")]);
+    assert!(matches!(
+        s.store.apply_confirmed_state(&state).unwrap(),
+        Some(StateOutcome::Applied { .. })
+    ));
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 23).unwrap();
+    // The genuine entry enables hydration from today; the copy delivered to this PC is
+    // altered to start 30 days earlier, under the genuine head.
+    let genuine = EntryBody::Policy {
+        category: Category::Hydration,
+        enabled: true,
+        share_from: day_number(today),
+        op_id: [5; 16],
+        device_ref: [11; 16],
+    };
+    s.server.push(genuine);
+    let mut state = s.server.state(2, vec![device(s.me, "PC-1")]);
+    let StateResponse::Confirmed { entries, .. } = &mut state else {
+        panic!()
+    };
+    let forged = EntryBody::Policy {
+        category: Category::Hydration,
+        enabled: true,
+        share_from: day_number(today) - 30,
+        op_id: [5; 16],
+        device_ref: [11; 16],
+    };
+    entries[0].body = b64(&forged.encode());
+    s.store
+        .append_event(
+            hy_core::schema::NewEvent::manual(hy_core::schema::EventPayload::WaterLogged {
+                amount_ml: 250,
+            })
+            .at(Utc.with_ymd_and_hms(2026, 10, 23, 5, 0, 0).unwrap()),
+        )
+        .unwrap();
+    assert_mismatch_changes_nothing(&mut s, &state);
+    assert!(!s.store.sharing_policy(Category::Hydration).unwrap().enabled);
+    assert!(
+        s.store.server_status().unwrap().mismatch,
+        "persisted for the UI"
+    );
+    assert_eq!(s.store.queue_share_records(today).unwrap(), 0);
+    assert!(s.store.outbox().unwrap().is_empty());
+    // The genuine extension then verifies and clears the mismatch.
+    let state = s.server.state(2, vec![device(s.me, "PC-1")]);
+    assert!(matches!(
+        s.store.apply_confirmed_state(&state).unwrap(),
+        Some(StateOutcome::Applied { .. })
+    ));
+    assert!(s.store.sharing_policy(Category::Hydration).unwrap().enabled);
+    assert!(!s.store.server_status().unwrap().mismatch);
 }

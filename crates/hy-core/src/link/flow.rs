@@ -10,18 +10,30 @@
 //! let state = fetch_state(&store_link, ...).await; // step 10, every sync
 //! store.apply_confirmed_state(&state)?;           // verified chain extension, receipt
 //! ```
+//!
+//! [`sync_once`] runs one whole sync (V1-5b, contract 7.4 and 8): pull and verify, send
+//! pending control operations, pull again if any was accepted, queue this PC's records
+//! and upload them. During a recovery hold it presents the stored receipt as evidence
+//! and sends control operations (disables and deletions are taken, enables wait), but
+//! uploads nothing. On `device_regressed` it runs [`Store::regression_reset`] and pulls
+//! again; on `device_revoked` it unpairs locally.
 
 use std::net::SocketAddr;
+use std::sync::{Mutex, PoisonError};
 
+use chrono::NaiveDate;
 use uuid::Uuid;
 
 use super::{LinkClient, LinkError, LinkOptions, resolve};
 use crate::protocol::slip::{Slip, SlipError, encode_secret};
-use crate::protocol::wire::{PairRequest, StateResponse, WireEntry, WireError};
+use crate::protocol::wire::{
+    ControlOutcome, ControlRequest, MAX_UPLOAD_ROWS, PairRequest, RowOutcome, StateResponse,
+    UploadRequest, UploadRow, WireEntry, WireError,
+};
 use crate::protocol::words::{device_check_code, fingerprint_words};
 use crate::protocol::{PROTOCOL, ct_eq32, unb64_exact};
 use crate::secret::{Secret, TokenVault};
-use crate::store::{NewLink, ServerLink};
+use crate::store::{NewLink, ServerLink, StateOutcome, Store};
 
 /// Why pairing or a status check failed, in the terms the companion shows (contract 12).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,6 +312,7 @@ async fn fetch_pages(
                 entries,
                 more,
                 head,
+                hold,
             } => {
                 let next = entries.last().map(|e| e.seq);
                 joined.extend(entries);
@@ -317,6 +330,7 @@ async fn fetch_pages(
                     entries: joined,
                     more: false,
                     head,
+                    hold,
                 });
             }
         }
@@ -345,6 +359,282 @@ pub async fn unpair_remote(
     })
     .await?;
     Ok(())
+}
+
+/// Short synchronous access to the store, never held across a network wait.
+pub trait StoreAccess {
+    /// Run `f` with the store.
+    fn with<R>(&self, f: impl FnOnce(&mut Store) -> R) -> R;
+}
+
+impl StoreAccess for Mutex<Store> {
+    fn with<R>(&self, f: impl FnOnce(&mut Store) -> R) -> R {
+        f(&mut self.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+}
+
+/// What one [`sync_once`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncOutcome {
+    /// This PC is not paired.
+    NotPaired,
+    /// Waiting for the administrator's confirmation.
+    Pending,
+    /// The server's history did not verify: nothing was applied or sent.
+    HistoryMismatch,
+    /// The server holds this user in recovery: sharing paused.
+    Hold {
+        /// The stored receipt was counted as evidence.
+        evidence: bool,
+        /// Control operations sent.
+        control_sent: usize,
+    },
+    /// A normal sync.
+    Synced {
+        /// The receipt's seq afterwards.
+        seq: u64,
+        /// Control operations sent.
+        control_sent: usize,
+        /// Rows the server stored.
+        uploaded: usize,
+        /// Rows the server refused (discarded, never re-stamped).
+        rejected: usize,
+        /// The server answered `device_regressed` and this PC was reset first.
+        regressed: bool,
+    },
+}
+
+fn store_err(_: crate::error::Error) -> FlowError {
+    FlowError::Protocol
+}
+
+/// The link, the stored receipt (wire form) and its seq.
+fn link_and_receipt(
+    store: &impl StoreAccess,
+) -> Result<Option<(ServerLink, Option<String>, u64)>, FlowError> {
+    store
+        .with(|s| -> crate::error::Result<_> {
+            let Some(link) = s.server_link()? else {
+                return Ok(None);
+            };
+            let receipt = s.head_receipt()?;
+            let seq = receipt.as_ref().map_or(0, |r| r.head.seq);
+            Ok(Some((link, receipt.map(|r| r.to_wire()), seq)))
+        })
+        .map_err(store_err)
+}
+
+/// Pull the state from the first candidate address that answers.
+async fn pull(
+    link: &ServerLink,
+    receipt: Option<String>,
+    after: u64,
+    token: &Secret<[u8; 32]>,
+    opts: LinkOptions,
+) -> Result<(LinkClient, StateResponse, SocketAddr), FlowError> {
+    let ((client, state), addr) = try_addresses(link, opts, |addr| {
+        let receipt = receipt.clone();
+        async move {
+            let client = LinkClient::new(link.pin, addr, opts)?.with_receipt(receipt);
+            let state = fetch_pages(&client, token, after).await?;
+            Ok((client, state))
+        }
+    })
+    .await?;
+    Ok((client, state, addr))
+}
+
+/// Send one batch of pending control operations; returns (sent, any accepted).
+async fn send_control(
+    store: &impl StoreAccess,
+    client: &LinkClient,
+    token: &Secret<[u8; 32]>,
+) -> Result<(usize, bool), FlowError> {
+    let ops = store.with(|s| s.pending_control_ops()).map_err(store_err)?;
+    if ops.is_empty() {
+        return Ok((0, false));
+    }
+    let resp = client
+        .control(token, &ControlRequest { ops: ops.clone() })
+        .await?;
+    if resp.results.len() != ops.len() {
+        return Err(FlowError::Protocol);
+    }
+    store
+        .with(|s| s.apply_control_results(&resp.results))
+        .map_err(store_err)?;
+    let accepted = resp
+        .results
+        .iter()
+        .any(|r| matches!(r.outcome, ControlOutcome::Accepted { .. }));
+    Ok((ops.len(), accepted))
+}
+
+/// One whole sync (see the module documentation). `today` is the user's local date.
+///
+/// # Errors
+/// [`FlowError::Revoked`] after the local unpair; [`FlowError::RepairNeeded`] if the
+/// token cannot be opened; network and server errors otherwise. Whatever was applied
+/// before an error stays applied (each store step is its own transaction).
+pub async fn sync_once(
+    store: &impl StoreAccess,
+    vault: &dyn TokenVault,
+    opts: LinkOptions,
+    today: NaiveDate,
+) -> Result<SyncOutcome, FlowError> {
+    let Some((link, receipt, after)) = link_and_receipt(store)? else {
+        return Ok(SyncOutcome::NotPaired);
+    };
+    let token = vault
+        .open(&link.token_blob)
+        .map_err(|_| FlowError::RepairNeeded)?;
+    let mut regressed = false;
+    let pulled = match pull(&link, receipt.clone(), after, &token, opts).await {
+        Err(FlowError::Server(WireError::DeviceRegressed)) => {
+            // The server reset this device's baseline; this PC resets its sharing.
+            store.with(Store::regression_reset).map_err(store_err)?;
+            regressed = true;
+            pull(&link, receipt.clone(), after, &token, opts).await
+        }
+        other => other,
+    };
+    let (client, state, addr) = match pulled {
+        Err(FlowError::Revoked) => {
+            store.with(Store::unpair_locally).map_err(store_err)?;
+            return Err(FlowError::Revoked);
+        }
+        other => other?,
+    };
+    let applied = store
+        .with(|s| -> crate::error::Result<_> {
+            s.set_link_last_ip(&addr.to_string())?;
+            s.apply_confirmed_state(&state)
+        })
+        .map_err(store_err)?;
+    let seq = match applied {
+        None => return Ok(SyncOutcome::Pending),
+        Some(StateOutcome::HistoryMismatch) => {
+            // Report the stored receipt (contract 7.4): a server that rolled back or
+            // forked learns of it. Nothing else is sent while the mismatch lasts.
+            if let Some(r) = &receipt {
+                let _ = client.receipt(&token, r).await;
+            }
+            return Ok(SyncOutcome::HistoryMismatch);
+        }
+        Some(StateOutcome::Hold) => {
+            let evidence = match &receipt {
+                Some(r) => client.receipt(&token, r).await?.recorded,
+                None => false,
+            };
+            let (control_sent, _) = send_control(store, &client, &token).await?;
+            return Ok(SyncOutcome::Hold {
+                evidence,
+                control_sent,
+            });
+        }
+        Some(StateOutcome::Applied { seq, .. }) => seq,
+    };
+    // From here every request echoes the new receipt.
+    let (_, receipt, _) = link_and_receipt(store)?.ok_or(FlowError::Protocol)?;
+    let client = client.with_receipt(receipt.clone());
+    let (control_sent, accepted) = send_control(store, &client, &token).await?;
+    let mut seq = seq;
+    if accepted {
+        // Accepted operations settle (and take effect) only through the verified chain.
+        let state = fetch_pages(&client, &token, seq).await?;
+        if let Some(StateOutcome::Applied { seq: s, .. }) = store
+            .with(|s| s.apply_confirmed_state(&state))
+            .map_err(store_err)?
+        {
+            seq = s;
+        }
+    }
+    let (_, receipt, _) = link_and_receipt(store)?.ok_or(FlowError::Protocol)?;
+    let client = client.with_receipt(receipt);
+    store
+        .with(|s| s.queue_share_records(today))
+        .map_err(store_err)?;
+    let (mut uploaded, mut rejected) = (0, 0);
+    loop {
+        let batch: Vec<_> = store
+            .with(|s| s.outbox())
+            .map_err(store_err)?
+            .into_iter()
+            .take(MAX_UPLOAD_ROWS)
+            .collect();
+        if batch.is_empty() {
+            break;
+        }
+        let ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
+        let rows = batch
+            .into_iter()
+            .map(|r| UploadRow {
+                category: r.category,
+                origin_device: r.origin_device,
+                local_date: r.local_date.format("%Y-%m-%d").to_string(),
+                revision: r.revision,
+                payload: r.payload,
+            })
+            .collect();
+        let resp = client.upload(&token, &UploadRequest { rows }).await?;
+        if resp.results.len() != ids.len() {
+            return Err(FlowError::Protocol);
+        }
+        for r in &resp.results {
+            match r {
+                RowOutcome::Accepted => uploaded += 1,
+                RowOutcome::Rejected { .. } => rejected += 1,
+            }
+        }
+        store
+            .with(|s| s.apply_upload_results(&ids, &resp.results))
+            .map_err(store_err)?;
+    }
+    store.with(|s| s.note_sync()).map_err(store_err)?;
+    Ok(SyncOutcome::Synced {
+        seq,
+        control_sent,
+        uploaded,
+        rejected,
+        regressed,
+    })
+}
+
+/// "Restore from server" (architecture 5.4): read the user's shared history for
+/// `from..=to` (at most 90 days) and store it as read-only imported summaries. Returns
+/// the rows stored.
+///
+/// # Errors
+/// [`FlowError::Server`] with `recovery_hold` during a hold; others as for a sync.
+pub async fn restore_from_server(
+    store: &impl StoreAccess,
+    vault: &dyn TokenVault,
+    opts: LinkOptions,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<usize, FlowError> {
+    let Some((link, receipt, _)) = link_and_receipt(store)? else {
+        return Err(FlowError::Protocol);
+    };
+    let token = vault
+        .open(&link.token_blob)
+        .map_err(|_| FlowError::RepairNeeded)?;
+    let (f, t) = (
+        from.format("%Y-%m-%d").to_string(),
+        to.format("%Y-%m-%d").to_string(),
+    );
+    let (resp, _) = try_addresses(&link, opts, |addr| {
+        let (receipt, token, f, t) = (receipt.clone(), &token, &f, &t);
+        let pin = link.pin;
+        async move {
+            let client = LinkClient::new(pin, addr, opts)?.with_receipt(receipt);
+            client.history(token, f, t).await.map_err(FlowError::from)
+        }
+    })
+    .await?;
+    store
+        .with(|s| s.import_server_history(&resp.rows))
+        .map_err(store_err)
 }
 
 #[cfg(test)]

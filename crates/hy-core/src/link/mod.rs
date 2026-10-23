@@ -30,7 +30,11 @@ use rustls::{CertificateError, ClientConfig, DigitallySignedStruct, SignatureSch
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::protocol::wire::{ErrorBody, PairRequest, PairResponse, StateResponse, WireError};
+use crate::protocol::wire::{
+    ControlRequest, ControlResponse, ErrorBody, HistoryResponse, PairRequest, PairResponse,
+    RECEIPT_HEADER, ReceiptRequest, ReceiptResponse, StateResponse, UploadRequest, UploadResponse,
+    WireError,
+};
 use crate::protocol::{ALPN, SNI, TOKEN_LEN, b64, ct_eq32, fingerprint, prefix8};
 use crate::secret::Secret;
 
@@ -231,6 +235,7 @@ pub struct LinkClient {
     http: reqwest::Client,
     verifier: Arc<PinnedVerifier>,
     pin: [u8; 32],
+    receipt: Option<String>,
 }
 
 /// Resolve a slip's host with the OS resolver (DNS, LLMNR or `.local`, as Windows does).
@@ -266,7 +271,16 @@ impl LinkClient {
             http,
             verifier,
             pin,
+            receipt: None,
         })
+    }
+
+    /// Echo this stored receipt (wire form) in `HY-Receipt` on every request (contract
+    /// 7.4); `None` sends none (a PC that has no receipt yet).
+    #[must_use]
+    pub fn with_receipt(mut self, receipt: Option<String>) -> Self {
+        self.receipt = receipt;
+        self
     }
 
     /// The verifier, for checks that every connection was pinned.
@@ -327,6 +341,9 @@ impl LinkClient {
                 reqwest::header::AUTHORIZATION,
                 format!("Bearer {}", b64(t.expose())),
             );
+        }
+        if let Some(r) = &self.receipt {
+            req = req.header(RECEIPT_HEADER, r);
         }
         if let Some(b) = body {
             req = req
@@ -392,6 +409,74 @@ impl LinkClient {
             &format!("/v1/state?after_seq={after_seq}"),
             Some(token),
             None,
+        )
+        .await
+    }
+
+    /// `POST /v1/control` (contract 8.3 to 8.5).
+    ///
+    /// # Errors
+    /// [`LinkError`]; `device_regressed`, `cannot_record` and `device_unconfirmed` as
+    /// `Server` errors.
+    pub async fn control(
+        &self,
+        token: &Secret<[u8; TOKEN_LEN]>,
+        req: &ControlRequest,
+    ) -> Result<ControlResponse, LinkError> {
+        self.call(reqwest::Method::POST, "/v1/control", Some(token), Some(req))
+            .await
+    }
+
+    /// `POST /v1/upload` (contract 8.6).
+    ///
+    /// # Errors
+    /// [`LinkError`].
+    pub async fn upload(
+        &self,
+        token: &Secret<[u8; TOKEN_LEN]>,
+        req: &UploadRequest,
+    ) -> Result<UploadResponse, LinkError> {
+        self.call(reqwest::Method::POST, "/v1/upload", Some(token), Some(req))
+            .await
+    }
+
+    /// `GET /v1/history?from=&to=` ("Restore from server", at most 90 days).
+    ///
+    /// # Errors
+    /// [`LinkError`]; `recovery_hold` while the server holds the user.
+    pub async fn history(
+        &self,
+        token: &Secret<[u8; TOKEN_LEN]>,
+        from: &str,
+        to: &str,
+    ) -> Result<HistoryResponse, LinkError> {
+        self.call::<(), _>(
+            reqwest::Method::GET,
+            &format!("/v1/history?from={from}&to={to}"),
+            Some(token),
+            None,
+        )
+        .await
+    }
+
+    /// `POST /v1/receipt`: present this PC's stored receipt as recovery evidence
+    /// (contract 9).
+    ///
+    /// # Errors
+    /// [`LinkError`].
+    pub async fn receipt(
+        &self,
+        token: &Secret<[u8; TOKEN_LEN]>,
+        head: &str,
+    ) -> Result<ReceiptResponse, LinkError> {
+        let req = ReceiptRequest {
+            head: head.to_owned(),
+        };
+        self.call(
+            reqwest::Method::POST,
+            "/v1/receipt",
+            Some(token),
+            Some(&req),
         )
         .await
     }

@@ -94,7 +94,7 @@ async fn self_unpair_revokes_the_token_at_once_and_is_recorded() {
     let mut store = d.store(h.clock.clone());
     d.sync(&mut store).await.unwrap();
     let link = store.server_link().unwrap().unwrap();
-    unpair_remote(&link, &d.vault, opts()).await.unwrap();
+    unpair_remote(&link, &*d.vault, opts()).await.unwrap();
     assert!(store.unpair_locally().unwrap());
     let row = h.server.devices().unwrap().into_iter().next().unwrap();
     assert_eq!(row.state, DeviceState::Revoked);

@@ -1,7 +1,7 @@
 //! HealthierYou office LAN server (architecture 5; V1-5 contract
 //! `docs/V1-5_Pairing_Security.md`).
 //!
-//! Slice V1-5a provides the service core:
+//! Slice V1-5a provides the service core, and V1-5b sync and recovery:
 //!
 //! - [`keys`]: the TLS key and certificate (the pin) and the separate Ed25519
 //!   head-signing key, protected with machine-scope DPAPI on Windows;
@@ -15,22 +15,28 @@
 //! - [`api`]: `/v1/pair`, `/v1/state`, `/v1/unpair`, and the pending-device gate on every
 //!   other endpoint;
 //! - [`admin`]: the hardened admin page;
-//! - [`logging`] and [`audit`]: allowlisted logs and the audit log.
-//!
-//! Sync (history, control, upload, receipts), the off-volume mirror, recovery hold and
-//! server backup are V1-5b.
+//! - [`logging`] and [`audit`]: allowlisted logs and the audit log;
+//! - [`mirror`]: the off-volume, hash-chained mirror of every user's control log;
+//! - [`sync`]: control operations, uploads with strict per-category schemas, history,
+//!   receipt echoes and regression, receipts as recovery evidence;
+//! - [`recovery`]: the startup comparison, recovery hold, release and discard;
+//! - [`backup`]: encrypted daily backups and restore.
 
 pub mod admin;
 pub mod api;
 pub mod audit;
+pub mod backup;
 pub mod chain;
 pub mod db;
 #[cfg(windows)]
 pub mod dpapi;
 pub mod keys;
 pub mod logging;
+pub mod mirror;
+pub mod recovery;
 pub mod serve;
 pub mod server;
+pub mod sync;
 pub mod tls;
 
 pub use server::{Config, Server};

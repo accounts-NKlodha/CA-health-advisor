@@ -440,6 +440,17 @@ export interface PairedPc {
   new: boolean;
 }
 
+/** One optional category once this PC is confirmed (ShareState in server_link.rs). */
+export interface ShareState {
+  category: string;
+  label: string;
+  enabled: boolean;
+  /** Shared from this date while on. */
+  share_from: string | null;
+  /** Switched on here, waiting for the office server. */
+  waiting: boolean;
+}
+
 export interface LinkView {
   state: 'none' | 'pending' | 'confirmed';
   alias: string | null;
@@ -452,6 +463,14 @@ export interface LinkView {
   /** The address the user entered for when the server's IP changed. */
   manual_address: string | null;
   devices: PairedPc[];
+  sharing: ShareState[];
+  /** Non-blocking sharing notices (another PC switched a category on, and so on). */
+  notices: { id: number; text: string }[];
+  /** The server is recovering: sharing paused. */
+  hold: boolean;
+  /** The server's history did not verify: uploads paused. */
+  mismatch: boolean;
+  last_sync: string | null;
   /** About the last action (offline, revoked, history mismatch...). */
   message: string | null;
 }

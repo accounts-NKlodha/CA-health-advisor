@@ -11,12 +11,20 @@ use hy_core::migrations::{Compat, MigrateOptions, Migration, migrate_with};
 use rusqlite::Connection;
 
 /// The server's migrations, in order.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "server",
-    sql: include_str!("../migrations/0001_server.sql"),
-    compat: Compat::Contract,
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "server",
+        sql: include_str!("../migrations/0001_server.sql"),
+        compat: Compat::Contract,
+    },
+    Migration {
+        version: 2,
+        name: "sync",
+        sql: include_str!("../migrations/0002_sync.sql"),
+        compat: Compat::Contract,
+    },
+];
 
 fn init(mut conn: Connection) -> hy_core::Result<Connection> {
     conn.busy_timeout(Duration::from_secs(5))?;

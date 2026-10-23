@@ -320,7 +320,10 @@ async fn t_p6_a_revoked_token_gets_401_and_the_pc_offers_to_re_pair() {
     assert_eq!(raw.status, 401);
     assert_eq!(common::error_of(&raw), "device_revoked");
     let link = store.server_link().unwrap().unwrap();
-    let err = fetch_state(&link, 0, &d.vault, opts()).await.err().unwrap();
+    let err = fetch_state(&link, 0, &*d.vault, opts())
+        .await
+        .err()
+        .unwrap();
     assert_eq!(err, FlowError::Revoked);
     assert!(store.unpair_locally().unwrap());
     assert!(store.server_link().unwrap().is_none());

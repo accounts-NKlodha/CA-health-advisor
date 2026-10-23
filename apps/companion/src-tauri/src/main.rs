@@ -115,6 +115,11 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // The office-server sync runs on its own while the app runs (not in the self-test).
+    if selftest.is_none() {
+        server_link::start_periodic_sync(&shell);
+    }
+
     // A new store opens the setup wizard (W1). The self-test opens it itself.
     if selftest.is_none() && shell.setup_needed() {
         shell.open_setup();
@@ -183,6 +188,10 @@ fn main() {
             commands::server_unpair,
             commands::server_notice_seen,
             commands::server_set_address,
+            commands::server_share_set,
+            commands::server_notice_dismiss,
+            commands::server_share_preview,
+            commands::server_restore,
         ])
         .setup(setup)
         .build(tauri::generate_context!());

@@ -370,3 +370,112 @@ async fn the_page_issues_a_slip_once_and_confirms_only_with_the_words_and_code()
     assert_eq!(s3, 303);
     assert_eq!(state(&h), DeviceState::Active);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_page_shows_the_hold_and_takes_the_witness_only_with_csrf() {
+    let h = harness().await;
+    let u = h.user("u1");
+    let a = h.pc(&u, "PC-A").await;
+    a.synced().await;
+    let file = h.backup();
+    let h = h.restore(&file).await;
+    let cookie = admin_login(&h, PASS).await;
+    let get = |h: &Harness| admin_request("GET", "/", &host(h), None, Some(&cookie), None);
+    let (_, _, page) = http(h.admin, &get(&h)).await;
+    assert!(page.contains("Recovery hold"));
+    assert!(page.contains("Control-log mirror: open"));
+    // The restored database predates its own backup record.
+    assert!(page.contains("Last backup: none yet"));
+    assert!(page.contains("PC-A") && page.contains("<strong>missing</strong>"));
+    let csrf = csrf_in(&page);
+    let post = |path: &str, body: &str| {
+        admin_request(
+            "POST",
+            path,
+            &host(&h),
+            Some(&origin(&h)),
+            Some(&cookie),
+            Some(body),
+        )
+    };
+    // Without the form token: refused, nothing recorded.
+    let (s, _, _) = http(h.admin, &post("/recovery/users", "csrf=x&right=yes")).await;
+    assert_eq!(s, 403);
+    assert!(!h.server.users_witnessed());
+    // A "not right" answer without the confirmation box changes nothing.
+    let (s, _, _) = http(
+        h.admin,
+        &post("/recovery/users", &format!("csrf={csrf}&right=no")),
+    )
+    .await;
+    assert_eq!(s, 400);
+    assert_eq!(h.audits("global_discard"), 0);
+    let (s, _, _) = http(
+        h.admin,
+        &post("/recovery/users", &format!("csrf={csrf}&right=yes")),
+    )
+    .await;
+    assert_eq!(s, 303);
+    assert!(h.server.users_witnessed());
+    let (s, _, _) = http(
+        h.admin,
+        &post(
+            "/recovery/user",
+            &format!("csrf={csrf}&right=yes&user={}", hex(&u)),
+        ),
+    )
+    .await;
+    assert_eq!(s, 303);
+    // Still held: A has not checked in; then A checks in and the user is released.
+    let (_, _, page) = http(h.admin, &get(&h)).await;
+    assert!(page.contains("Recovery hold"));
+    a.synced().await;
+    let (_, _, page) = http(h.admin, &get(&h)).await;
+    assert!(!page.contains("Recovery hold"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_regressed_pc_is_flagged_on_the_page() {
+    let h = harness().await;
+    let u = h.user("u1");
+    let a = h.pc(&u, "PC-A").await;
+    a.synced().await;
+    let old = a.with(|s| s.head_receipt().unwrap().unwrap().to_wire());
+    a.with(|s| {
+        s.request_enable(hy_core::schema::Category::Hydration, "v1-5-sharing-1")
+            .unwrap()
+    });
+    a.synced().await;
+    a.synced().await;
+    // An older receipt arrives for A (a restored copy of its database).
+    let r = h
+        .client(1)
+        .with_receipt(Some(old))
+        .raw(
+            reqwest::Method::GET,
+            "/v1/state?after_seq=0",
+            Some(&a.dev.token),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&r.body).contains("device_regressed"));
+    let cookie = admin_login(&h, PASS).await;
+    let (_, _, page) = http(
+        h.admin,
+        &admin_request("GET", "/", &host(&h), None, Some(&cookie), None),
+    )
+    .await;
+    assert!(page.contains("presented an older receipt"));
+    assert!(page.contains("Last backup: none yet"));
+    h.backup();
+    let (_, _, page) = http(
+        h.admin,
+        &admin_request("GET", "/", &host(&h), None, Some(&cookie), None),
+    )
+    .await;
+    assert!(
+        page.contains("Last backup: 2026-10-23 "),
+        "the backup time is shown"
+    );
+}

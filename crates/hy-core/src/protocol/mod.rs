@@ -10,6 +10,7 @@
 //! - [`chain`]: the fixed binary encoding of control-log entries and the per-user hash
 //!   chain (7.1);
 //! - [`head`]: the Ed25519-signed head that devices keep as their receipt (7.2);
+//! - [`share`]: the per-category payload schemas (8.2);
 //! - [`wire`]: the JSON bodies of `/v1` and the error enum (appendix A).
 //!
 //! Every hash or signature input starts with a versioned domain-separation string
@@ -18,6 +19,7 @@
 
 pub mod chain;
 pub mod head;
+pub mod share;
 pub mod slip;
 pub mod wire;
 pub mod words;

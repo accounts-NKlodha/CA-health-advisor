@@ -41,6 +41,28 @@ pub enum AuditEvent {
     AdminLogout,
     /// Every pending device of a user was rejected.
     PendingRejectedForUser,
+    /// A device echoed an older receipt than before (restored or cloned PC).
+    DeviceRegressed,
+    /// A device read the user's history.
+    HistoryRead,
+    /// A receipt counted as a device's recovery evidence.
+    ReceiptRecorded,
+    /// A receipt was refused (bad signature, other key or user, no usable token).
+    ReceiptRefused,
+    /// A user entered recovery hold.
+    RecoveryHold,
+    /// A user was released from hold.
+    UserReleased,
+    /// A user's restored history was discarded.
+    UserDiscarded,
+    /// The global discard path ran.
+    GlobalDiscard,
+    /// The administrator confirmed the list of users during a hold.
+    UsersWitnessed,
+    /// An encrypted backup was written.
+    BackupWritten,
+    /// The database was restored from a backup or a rollback was detected.
+    Restored,
 }
 
 impl AuditEvent {
@@ -63,6 +85,17 @@ impl AuditEvent {
             Self::AdminLoginFailed => "admin_login_failed",
             Self::AdminLogout => "admin_logout",
             Self::PendingRejectedForUser => "pending_rejected_for_user",
+            Self::DeviceRegressed => "device_regressed",
+            Self::HistoryRead => "history_read",
+            Self::ReceiptRecorded => "receipt_recorded",
+            Self::ReceiptRefused => "receipt_refused",
+            Self::RecoveryHold => "recovery_hold",
+            Self::UserReleased => "user_released",
+            Self::UserDiscarded => "user_discarded",
+            Self::GlobalDiscard => "global_discard",
+            Self::UsersWitnessed => "users_witnessed",
+            Self::BackupWritten => "backup_written",
+            Self::Restored => "restored",
         }
     }
 }
@@ -150,6 +183,17 @@ mod tests {
             AuditEvent::AdminLoginFailed,
             AuditEvent::AdminLogout,
             AuditEvent::PendingRejectedForUser,
+            AuditEvent::DeviceRegressed,
+            AuditEvent::HistoryRead,
+            AuditEvent::ReceiptRecorded,
+            AuditEvent::ReceiptRefused,
+            AuditEvent::RecoveryHold,
+            AuditEvent::UserReleased,
+            AuditEvent::UserDiscarded,
+            AuditEvent::GlobalDiscard,
+            AuditEvent::UsersWitnessed,
+            AuditEvent::BackupWritten,
+            AuditEvent::Restored,
         ];
         for e in all {
             record(&conn, 1, e, None, None, Some("10.1.2.3".parse().unwrap())).unwrap();

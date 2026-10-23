@@ -1,6 +1,6 @@
 [package]
 name = "hy-sim"
-description = "HealthierYou load simulator (skeleton; implemented in V1-5)"
+description = "HealthierYou load simulator: the real server in process and 10 simulated companions"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,8 +9,15 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
-hy-core.workspace = true
 chrono.workspace = true
+hy-core = { workspace = true, features = ["link"] }
+hy-server = { path = "../hy-server" }
+rusqlite.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
