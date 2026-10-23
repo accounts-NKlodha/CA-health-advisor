@@ -103,10 +103,18 @@ pub async fn serve_api(
     let acceptor = TlsAcceptor::from(crate::tls::server_config(&server.keys)?);
     let router = api::router(server.clone());
     let counts = Arc::new(Mutex::new(Counts::default()));
+    // Every open connection holds the server; on shutdown they are stopped and awaited,
+    // so the caller holds the last reference once this returns (the database can then
+    // be closed, e.g. before a restore replaces it).
+    let mut connections = tokio::task::JoinSet::new();
     loop {
+        while connections.try_join_next().is_some() {}
         let accepted = tokio::select! {
             a = listener.accept() => a,
-            _ = shutdown.changed() => return Ok(()),
+            _ = shutdown.changed() => {
+                connections.shutdown().await;
+                return Ok(());
+            }
         };
         let Ok((tcp, peer)) = accepted else {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -123,7 +131,7 @@ pub async fn serve_api(
         let _ = tcp.set_nodelay(true);
         let acceptor = acceptor.clone();
         let router = router.clone();
-        tokio::spawn(async move {
+        connections.spawn(async move {
             let _slot = slot;
             let Ok(Ok(tls)) =
                 tokio::time::timeout(limits.handshake_timeout, acceptor.accept(tcp)).await

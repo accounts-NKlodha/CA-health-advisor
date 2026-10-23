@@ -12,7 +12,9 @@
 //! `--mirror` is the append-only copy of the control log (contract 7.3). It must be on
 //! another volume than the data folder (a second disk or a share), so that restoring an
 //! old database is detected at the next start. Server backups go to `--backups`
-//! (default `<data-dir>\backups`; copy them off the PC too).
+//! (default `<data-dir>\backups`; copy them off the PC too). Backups open only with this
+//! server's `backup.key` (keys folder): keep a protected copy of the keys folder, because
+//! if that key is lost every existing backup is permanently unrecoverable.
 //!
 //! The data directory defaults to `%ProgramData%\HealthierYou\Server` on Windows and must
 //! be given elsewhere. Running as a Windows service under a virtual account, the folder
@@ -47,7 +49,10 @@ struct Args {
 }
 
 fn usage() -> String {
-    "usage: hy-server <init|set-passphrase|fingerprint|serve|restore> [--data-dir DIR] [--mirror FILE] [--backups DIR] [--backup FILE] [--host NAME] [--api ADDR] [--admin ADDR]".into()
+    "usage: hy-server <init|set-passphrase|fingerprint|serve|restore> [--data-dir DIR] [--mirror FILE] [--backups DIR] [--backup FILE] [--host NAME] [--api ADDR] [--admin ADDR]\n\
+     Backups open only with backup.key in the keys folder. Keep a protected copy of the keys folder: \
+     if that key is lost, every existing backup is permanently unrecoverable."
+        .into()
 }
 
 fn parse() -> Result<Args, String> {
@@ -186,9 +191,7 @@ fn serve_cmd(
         .mirror
         .clone()
         .ok_or("give --mirror FILE on another volume (a second disk or a share)")?;
-    if !mirror_off_volume(dir, &mirror) {
-        return Err("the mirror must be on another volume than the data folder".into());
-    }
+    hy_server::mirror::check_volume(dir, &mirror).map_err(|e| e.to_string())?;
     let backups = args.backups.clone().unwrap_or_else(|| dir.join("backups"));
     let backup_key = Arc::new(
         BackupKey::load_or_create(dir, protector)
@@ -265,40 +268,6 @@ fn serve_cmd(
         let _ = admin_task.await;
         Ok::<(), String>(())
     })
-}
-
-/// The mirror is not in the data folder and, where the platform says so, not on the same
-/// volume (drive letter or mount device).
-fn mirror_off_volume(data: &std::path::Path, mirror: &std::path::Path) -> bool {
-    let parent = mirror.parent().filter(|p| !p.as_os_str().is_empty());
-    let (Ok(d), Some(Ok(m))) = (
-        data.canonicalize(),
-        parent.map(std::path::Path::canonicalize),
-    ) else {
-        // A share that is not reachable yet is checked again when the mirror is opened.
-        return true;
-    };
-    if m.starts_with(&d) {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if let (Ok(a), Ok(b)) = (std::fs::metadata(&d), std::fs::metadata(&m)) {
-            return a.dev() != b.dev();
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::path::Component;
-        let first = |p: &std::path::Path| match p.components().next() {
-            Some(Component::Prefix(x)) => Some(x.as_os_str().to_ascii_lowercase()),
-            _ => None,
-        };
-        return first(&d) != first(&m);
-    }
-    #[allow(unreachable_code)]
-    true
 }
 
 fn main() -> ExitCode {

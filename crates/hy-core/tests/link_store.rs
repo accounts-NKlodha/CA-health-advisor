@@ -525,3 +525,63 @@ fn t_s17_a_forged_policy_entry_starts_nothing_and_stops_uploads() {
     assert!(s.store.sharing_policy(Category::Hydration).unwrap().enabled);
     assert!(!s.store.server_status().unwrap().mismatch);
 }
+
+#[test]
+fn nothing_queued_under_one_link_reaches_the_next_after_a_backup_import() {
+    use hy_core::schema::DateRange;
+    let mut s = setup();
+    s.server.push(EntryBody::DeviceConfirmed {
+        device_ref: *s.me.as_bytes(),
+    });
+    s.store
+        .apply_confirmed_state(&s.server.state(0, vec![device(s.me, "PC-1")]))
+        .unwrap();
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 23).unwrap();
+    let op = s
+        .store
+        .request_enable(Category::Hydration, "notice-1")
+        .unwrap();
+    s.store.accept_enable(op, 50, today).unwrap();
+    // Offline under link A: an enable and a deletion wait to be sent.
+    s.store
+        .request_enable(Category::PhoneReports, "notice-1")
+        .unwrap();
+    s.store
+        .record_deletion(
+            Category::Hydration,
+            DateRange {
+                from: today,
+                to: today,
+            },
+        )
+        .unwrap();
+    assert_eq!(s.store.pending_control_ops().unwrap().len(), 2);
+    // A backup of this PC, taken while paired, is imported: the link goes.
+    let contents = s.store.backup_contents().unwrap();
+    s.store.import_contents(&contents).unwrap();
+    assert!(s.store.server_link().unwrap().is_none());
+    // Paired to another server and user (link B).
+    let b = NewLink {
+        pin: [4; 32],
+        head_key: [5; 32],
+        host: "other-pc".into(),
+        port: 8443,
+        last_ip: None,
+        user_id: Uuid::from_bytes([21; 16]),
+        device_ref: Uuid::from_bytes([22; 16]),
+        alias: "u2".into(),
+        token_blob: vec![0; 64],
+    };
+    s.store.save_pairing(&b, "notice-1").unwrap();
+    assert!(
+        s.store.pending_control_ops().unwrap().is_empty(),
+        "link A's enable and deletion are never sent under link B"
+    );
+    for &c in Category::ALL {
+        let p = s.store.sharing_policy(c).unwrap();
+        assert!(!p.enabled && p.seq == 0 && p.share_from.is_none(), "{c:?}");
+    }
+    assert!(!s.store.server_status().unwrap().mismatch);
+    // The deletion still blocks local re-upload of that day (tombstones are permanent).
+    assert!(s.store.outbox().unwrap().is_empty());
+}

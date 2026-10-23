@@ -449,6 +449,8 @@ export interface ShareState {
   share_from: string | null;
   /** Switched on here, waiting for the office server. */
   waiting: boolean;
+  /** This version builds records for it; false: shown as "not yet sharing". */
+  available: boolean;
 }
 
 export interface LinkView {

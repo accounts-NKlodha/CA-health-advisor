@@ -519,13 +519,20 @@ async fn dashboard(State(st): State<AdminState>, headers: HeaderMap) -> Response
     } else {
         "<strong class=\"warn\">not available: control changes are refused until it is back</strong>"
     };
-    let backup = crate::backup::last_backup(s)
-        .ok()
-        .flatten()
-        .map_or_else(|| "none yet".to_owned(), when);
+    let backup = match crate::backup::last_backup(s).ok().flatten() {
+        Some(at) => when(at),
+        // A restored database was copied before its own backup was recorded.
+        None if crate::backup::is_restored_copy(s) => {
+            "no backup recorded in this restored copy".to_owned()
+        }
+        None => "none yet".to_owned(),
+    };
     let _ = write!(
         b,
-        "<p>Control-log mirror: {mirror}.</p><p>Last backup: {backup}.</p>"
+        "<p>Control-log mirror: {mirror}.</p><p>Last backup: {backup}.</p>\
+         <p class=\"note\">Backups open only with this server's backup key (<span class=\"mono\">backup.key</span> \
+         in the keys folder, protected for this PC). Keep a protected copy of the keys folder somewhere safe: \
+         if the key is lost, every existing backup is permanently unrecoverable.</p>"
     );
     if users.iter().any(|u| u.hold) {
         b.push_str("<p class=\"warn\">One or more users are in recovery hold: their shared history is paused.</p>");

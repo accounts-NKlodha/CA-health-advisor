@@ -67,7 +67,7 @@ test('the status line says when sharing is paused or how many categories are sha
   const base = { state: 'confirmed', alias: 'u1', host: 'office-pc', confirmed_on: '2026-10-23' };
   assert.match(statusLine(view({ ...base, hold: true })), /Server recovering: sharing paused/);
   assert.match(statusLine(view({ ...base, mismatch: true })), /history mismatch/);
-  const one = [{ category: 'hydration', label: 'Hydration summary', enabled: true, share_from: '2026-10-23', waiting: false }];
+  const one = [{ category: 'hydration', label: 'Hydration summary', enabled: true, share_from: '2026-10-23', waiting: false, available: true }];
   assert.match(statusLine(view({ ...base, sharing: one, last_sync: '2026-10-23 12:00' })), /Sharing 1 category; last synced 2026-10-23 12:00/);
 });
 
@@ -75,5 +75,13 @@ test('each switch says on from when, waiting, or off; the notice says what is se
   assert.equal(shareLine({ label: 'Hydration summary', enabled: true, share_from: '2026-10-23', waiting: false }), 'Hydration summary: on (from 2026-10-23)');
   assert.equal(shareLine({ label: 'Hydration summary', enabled: false, share_from: null, waiting: true }), 'Hydration summary: waiting for the office server');
   assert.equal(shareLine({ label: 'Hydration summary', enabled: false, share_from: null, waiting: false }), 'Hydration summary: off');
+  // A category with no record producer yet never looks implemented, even if switched on
+  // from another PC.
+  for (const enabled of [false, true]) {
+    assert.equal(
+      shareLine({ label: 'Reminder outcomes', enabled, share_from: null, waiting: false, available: false }),
+      'Reminder outcomes: not yet sharing (coming in a later update)',
+    );
+  }
   assert.match(enableNotice('Hydration summary'), /daily totals.*from today on/);
 });

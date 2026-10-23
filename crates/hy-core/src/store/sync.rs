@@ -50,6 +50,8 @@ pub const SHARE_LOOKBACK_DAYS: u64 = 7;
 const NOTICES: &str = "server_notices";
 const STATUS: &str = "server_status";
 const REVISIONS: &str = "share_revisions";
+/// The "last sent" text that makes a day be sent again (after a release from hold).
+const RESEND: &str = "resend";
 /// Set by a regression reset: the next verified pull applies no enable.
 const REGRESSION_SUPPRESS: &str = "server_regression_suppress";
 /// Notices kept at most (the oldest go first).
@@ -365,7 +367,9 @@ pub(super) fn apply_entries(
         let mut revisions: std::collections::BTreeMap<String, (u32, String)> =
             read_setting(tx, REVISIONS)?.unwrap_or_default();
         for v in revisions.values_mut() {
-            v.1.clear();
+            // Never equal to a real record, and non-empty so that a day emptied since
+            // is still corrected.
+            v.1 = RESEND.to_owned();
         }
         write_setting(tx, REVISIONS, &revisions, now)?;
     }
@@ -374,6 +378,27 @@ pub(super) fn apply_entries(
         s.mismatch = false;
         s.last_sync_ms = Some(to_ms(now));
     })
+}
+
+/// The record of a day with nothing in it, for categories this PC produces.
+fn empty_record(category: Category) -> Option<serde_json::Value> {
+    let v = match category {
+        Category::Hydration => serde_json::to_value(share::Hydration {
+            v: share::SCHEMA_VERSION,
+            ml: 0,
+            goal_ml: None,
+            entries: 0,
+            coverage: None,
+        }),
+        Category::PhoneReports => serde_json::to_value(share::PhoneReports {
+            v: share::SCHEMA_VERSION,
+            work: 0,
+            personal: 0,
+            unsure: 0,
+        }),
+        Category::Outcomes | Category::WorkSession | Category::PostureSummary => return None,
+    };
+    v.ok().filter(|v| share::validate(category, v).is_ok())
 }
 
 impl Store {
@@ -403,6 +428,19 @@ impl Store {
         self.put_setting(NOTICES, &list)
     }
 
+    /// Whether queued rows may be uploaded now: the link is confirmed and its last state
+    /// verified (no history mismatch, no recovery hold).
+    ///
+    /// # Errors
+    /// [`Error::Sqlite`] on a read failure.
+    pub fn uploads_allowed(&self) -> Result<bool> {
+        let Some(link) = self.server_link()? else {
+            return Ok(false);
+        };
+        let status = self.server_status()?;
+        Ok(link.confirmed && !status.mismatch && !status.hold)
+    }
+
     /// The control operations to send, in the order the user made them (at most one
     /// batch).
     ///
@@ -414,7 +452,8 @@ impl Store {
             .conn
             .prepare(
                 "SELECT op_id, category, kind, base_seq, created_at FROM policy_ops
-                 WHERE state = 'pending' ORDER BY local_seq",
+                 WHERE state = 'pending' AND link_device = (SELECT device_ref FROM server_link)
+                 ORDER BY local_seq",
             )?
             .query_map([], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
@@ -439,7 +478,8 @@ impl Store {
             .conn
             .prepare(
                 "SELECT request_id, category, from_date, to_date, created_at FROM tombstones
-                 WHERE state = 'pending' ORDER BY created_at, rowid",
+                 WHERE state = 'pending' AND link_device = (SELECT device_ref FROM server_link)
+                 ORDER BY created_at, rowid",
             )?
             .query_map([], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
@@ -666,10 +706,19 @@ impl Store {
             let mut day = first_day.max(from);
             while day <= today {
                 let next = day.succ_opt();
-                if let Some(record) = self.share_record(category, day)? {
-                    let key = format!("{}:{}", category.as_str(), date_text(day));
+                let key = format!("{}:{}", category.as_str(), date_text(day));
+                let (rev, last) = revisions.get(&key).cloned().unwrap_or((0, String::new()));
+                // A day with nothing left (its last entry undone) is sent as an empty
+                // record if, and only if, something was shared for it before: the
+                // server's earlier total is corrected, and a never-recorded day still
+                // sends nothing.
+                let record = match self.share_record(category, day)? {
+                    Some(r) => Some(r),
+                    None if !last.is_empty() => empty_record(category),
+                    None => None,
+                };
+                if let Some(record) = record {
                     let text = record.to_string();
-                    let (rev, last) = revisions.get(&key).cloned().unwrap_or((0, String::new()));
                     if last != text {
                         match self.enqueue_upload(category, day, rev + 1, &record) {
                             Ok(_) => {

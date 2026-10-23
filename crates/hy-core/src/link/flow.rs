@@ -541,12 +541,27 @@ pub async fn sync_once(
     let mut seq = seq;
     if accepted {
         // Accepted operations settle (and take effect) only through the verified chain.
+        // This second verification is as strict as the first: anything but a verified
+        // extension stops the sync before a single row is uploaded.
         let state = fetch_pages(&client, &token, seq).await?;
-        if let Some(StateOutcome::Applied { seq: s, .. }) = store
+        match store
             .with(|s| s.apply_confirmed_state(&state))
             .map_err(store_err)?
         {
-            seq = s;
+            Some(StateOutcome::Applied { seq: s, .. }) => seq = s,
+            None => return Ok(SyncOutcome::Pending),
+            Some(StateOutcome::HistoryMismatch) => {
+                if let Some(r) = &receipt {
+                    let _ = client.receipt(&token, r).await;
+                }
+                return Ok(SyncOutcome::HistoryMismatch);
+            }
+            Some(StateOutcome::Hold) => {
+                return Ok(SyncOutcome::Hold {
+                    evidence: false,
+                    control_sent,
+                });
+            }
         }
     }
     let (_, receipt, _) = link_and_receipt(store)?.ok_or(FlowError::Protocol)?;
@@ -556,6 +571,11 @@ pub async fn sync_once(
         .map_err(store_err)?;
     let (mut uploaded, mut rejected) = (0, 0);
     loop {
+        // The upload boundary: nothing leaves this PC unless the link is confirmed and
+        // its last state verified (no mismatch, no hold), checked before every batch.
+        if !store.with(|s| s.uploads_allowed()).map_err(store_err)? {
+            break;
+        }
         let batch: Vec<_> = store
             .with(|s| s.outbox())
             .map_err(store_err)?

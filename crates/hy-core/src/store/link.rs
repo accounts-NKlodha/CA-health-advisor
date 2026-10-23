@@ -256,6 +256,18 @@ impl Store {
             "UPDATE sharing_policy SET enabled = 0, updated_at = ?1 WHERE enabled = 1",
             [to_ms(now)],
         )?;
+        // A new link starts from nothing another link owned (also after a backup import
+        // that brought such state without a link): no policy sequence or share dates,
+        // no unsent policy operation, no sync status, notices or upload revisions.
+        tx.execute("UPDATE sharing_policy SET share_from = NULL, seq = 0", [])?;
+        tx.execute(
+            "DELETE FROM policy_ops WHERE state IN ('pending', 'pending_recovery')",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM settings WHERE key IN ('server_status', 'server_notices', 'share_revisions', 'server_regression_suppress')",
+            [],
+        )?;
         tx.execute(
             "INSERT INTO server_link (id, server_key_id, pin, head_key, host, port, last_ip,
                  manual_address, user_id, device_ref, alias, token_blob, confirmed,

@@ -273,6 +273,9 @@ pub struct Faults {
     /// The next control operation stops after its commit, before the mirror append (a
     /// crash in between).
     pub crash_after_commit: bool,
+    /// The next state response that carries entries has its first entry altered, as a
+    /// forked or tampering server would send (the companion must refuse it).
+    pub tamper_next_entries: bool,
 }
 
 /// The server.
@@ -1070,6 +1073,9 @@ impl Server {
                     .map_err(store_err)?;
             let more = entries.len() > ENTRY_PAGE;
             entries.truncate(ENTRY_PAGE);
+            if !entries.is_empty() && self.take_fault(|f| &mut f.tamper_next_entries) {
+                entries[0].at_ms += 1;
+            }
             (entries, more, self.mirrored_head(&conn, &dev.user_id))
         };
         let _ = now;

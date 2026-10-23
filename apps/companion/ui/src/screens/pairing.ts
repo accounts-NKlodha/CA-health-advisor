@@ -54,7 +54,15 @@ export function enableNotice(label: string): string {
 }
 
 /** The switch's words for one category. */
-export function shareLine(s: { label: string; enabled: boolean; share_from: string | null; waiting: boolean }): string {
+export function shareLine(s: {
+  label: string;
+  enabled: boolean;
+  share_from: string | null;
+  waiting: boolean;
+  available?: boolean;
+}): string {
+  // Categories this version does not build records for yet must not look implemented.
+  if (s.available === false) return `${s.label}: not yet sharing (coming in a later update)`;
   if (s.enabled) return `${s.label}: on${s.share_from ? ` (from ${s.share_from})` : ''}`;
   if (s.waiting) return `${s.label}: waiting for the office server`;
   return `${s.label}: off`;

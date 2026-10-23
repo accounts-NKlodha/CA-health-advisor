@@ -156,6 +156,20 @@ impl Server {
                 self.new_mirror(&conn, path)?;
                 return Ok(Startup::Created);
             }
+            // An unreadable mirror proves nothing lost (a permission or share failure):
+            // the server does not start, and changes nothing, until it can be read.
+            (Err(MirrorError::Unreadable), _) => {
+                *self.mirror_path_guard() = None;
+                logging::log(
+                    "startup_paused",
+                    &[("reason", V::Name("mirror_unreadable"))],
+                );
+                return Err(
+                    "the control-log mirror cannot be read (check the share and its permissions); \
+                     nothing was changed and the server will not start until it can be read"
+                        .into(),
+                );
+            }
             (Err(e), _) => {
                 let reason = match e {
                     MirrorError::Missing => "mirror_missing",

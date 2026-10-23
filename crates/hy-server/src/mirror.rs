@@ -34,7 +34,8 @@ const RECORD: &str = "HYM1";
 pub enum MirrorError {
     /// The file does not exist.
     Missing,
-    /// The file cannot be read.
+    /// The file or its folder cannot be read (permissions, an offline share). Nothing is
+    /// proven lost: the server stays stopped with its data intact until it can be read.
     Unreadable,
     /// A line is malformed, or a chain does not verify (flipped byte, cut in the middle,
     /// reordered lines).
@@ -182,7 +183,19 @@ pub fn scan(path: &Path, key_id: &[u8; 32]) -> Result<Scan, MirrorError> {
         Ok(mut f) => f
             .read_to_end(&mut bytes)
             .map_err(|_| MirrorError::Unreadable)?,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(MirrorError::Missing),
+        // Missing only when its folder can be listed and the file is not there; a folder
+        // that cannot be reached (an offline share) is unreadable, never "missing".
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let folder = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            return Err(if std::fs::read_dir(folder).is_ok() {
+                MirrorError::Missing
+            } else {
+                MirrorError::Unreadable
+            });
+        }
         Err(_) => return Err(MirrorError::Unreadable),
     };
     let text = std::str::from_utf8(&bytes).map_err(|_| MirrorError::Corrupt)?;
@@ -408,6 +421,111 @@ impl Mirror {
         }
         self.tails = tails;
         Ok(())
+    }
+}
+
+/// Why a mirror location was refused at service start (contract 7.3: the mirror lives
+/// on another volume than the data folder). Anything that cannot be verified is refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum VolumeError {
+    /// The mirror's folder does not exist or cannot be reached (an offline share, or a
+    /// folder never created): create it on the other volume first.
+    #[error(
+        "the mirror folder does not exist or cannot be reached; create it on another volume first"
+    )]
+    Unreachable,
+    /// The mirror is inside the data folder.
+    #[error("the mirror must not be inside the data folder")]
+    InsideData,
+    /// The mirror is on the data folder's volume.
+    #[error("the mirror must be on another volume than the data folder")]
+    SameVolume,
+    /// The volumes could not be compared.
+    #[error("the mirror's volume could not be verified")]
+    Unverifiable,
+}
+
+/// An opaque volume identity: the mount device on Unix, the drive or share prefix on
+/// Windows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeId(String);
+
+impl VolumeId {
+    /// A volume identity with this name, for tests of [`check_volume_with`].
+    #[doc(hidden)]
+    #[must_use]
+    pub fn for_tests(name: &str) -> Self {
+        Self(name.to_owned())
+    }
+}
+
+/// The volume of an existing, canonical path.
+///
+/// # Errors
+/// The I/O error if it cannot be read.
+pub fn volume_of(path: &Path) -> io::Result<VolumeId> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(VolumeId(std::fs::metadata(path)?.dev().to_string()))
+    }
+    #[cfg(windows)]
+    {
+        use std::path::Component;
+        std::fs::metadata(path)?;
+        match path.components().next() {
+            Some(Component::Prefix(x)) => Ok(VolumeId(
+                x.as_os_str().to_string_lossy().to_ascii_lowercase(),
+            )),
+            _ => Err(io::Error::other("no volume prefix")),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(io::Error::other("unsupported platform"))
+    }
+}
+
+/// Check the mirror location before the service starts: its folder must already exist
+/// (it is never created here, so a mistyped or offline share is not silently replaced
+/// by a new folder on the data drive), lie outside the data folder, and be on another
+/// volume. Fails closed when anything cannot be verified.
+///
+/// # Errors
+/// [`VolumeError`].
+pub fn check_volume(data: &Path, mirror: &Path) -> Result<(), VolumeError> {
+    check_volume_with(data, mirror, volume_of)
+}
+
+/// As [`check_volume`] with the volume lookup supplied (tests).
+///
+/// # Errors
+/// [`VolumeError`].
+#[doc(hidden)]
+pub fn check_volume_with(
+    data: &Path,
+    mirror: &Path,
+    volume: impl Fn(&Path) -> io::Result<VolumeId>,
+) -> Result<(), VolumeError> {
+    let parent = mirror
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or(VolumeError::Unreachable)?;
+    let m = parent
+        .canonicalize()
+        .map_err(|_| VolumeError::Unreachable)?;
+    if !m.is_dir() {
+        return Err(VolumeError::Unreachable);
+    }
+    let d = data.canonicalize().map_err(|_| VolumeError::Unverifiable)?;
+    if m.starts_with(&d) {
+        return Err(VolumeError::InsideData);
+    }
+    match (volume(&d), volume(&m)) {
+        (Ok(a), Ok(b)) if a != b => Ok(()),
+        (Ok(_), Ok(_)) => Err(VolumeError::SameVolume),
+        _ => Err(VolumeError::Unverifiable),
     }
 }
 

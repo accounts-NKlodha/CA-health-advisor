@@ -542,7 +542,7 @@ fn sharing_policy_and_operation_checks() {
     assert!(exec(&conn, "UPDATE sharing_policy SET seq = -1").is_err());
     let op = |id: &str, local_seq: i64, kind: &str, state: &str, seq: Option<i64>| {
         conn.execute(
-            "INSERT INTO policy_ops VALUES (?1, ?2, 'hydration', ?3, 0, ?4, ?5, 0, 0)",
+            "INSERT INTO policy_ops VALUES (?1, ?2, 'hydration', ?3, 0, ?4, ?5, 0, 0, NULL)",
             params![id, local_seq, kind, state, seq],
         )
     };
@@ -619,7 +619,7 @@ fn tombstone_and_consent_checks() {
     let conn = db();
     let tomb = |id: &str, cat: &str, from: &str, to: &str, state: &str| {
         conn.execute(
-            "INSERT INTO tombstones VALUES (?1, ?2, ?3, ?4, ?5, NULL, 0)",
+            "INSERT INTO tombstones VALUES (?1, ?2, ?3, ?4, ?5, NULL, 0, NULL)",
             params![id, cat, from, to, state],
         )
     };

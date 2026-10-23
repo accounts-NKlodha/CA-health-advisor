@@ -20,7 +20,9 @@
 //! discards a rejected row and never re-stamps it.
 
 use chrono::{Days, NaiveDate};
-use hy_core::protocol::chain::{EntryBody, RevocationReason, category_code, day_number};
+use hy_core::protocol::chain::{
+    EntryBody, RevocationReason, category_code, day_number, from_day_number,
+};
 use hy_core::protocol::head::SignedHead;
 use hy_core::protocol::share;
 use hy_core::protocol::wire::{
@@ -232,6 +234,89 @@ fn delete_range(
 
 fn outcome_text(o: &ControlOutcome) -> String {
     serde_json::to_string(o).unwrap_or_default()
+}
+
+/// The policy for `category` as the mirror holds it: the last `policy` entry at or below
+/// `hwm`. An enable committed but not yet mirrored (a crash or mirror failure between
+/// commit and append) authorises nothing (Codex review of PR 17).
+fn durable_policy(
+    tx: &Connection,
+    user: &[u8; 16],
+    category: Category,
+    hwm: u64,
+) -> rusqlite::Result<(bool, Option<NaiveDate>)> {
+    let mut stmt = tx.prepare(
+        "SELECT kind, body FROM control_log WHERE user_id = ?1 AND kind = 1 AND seq <= ?2
+         ORDER BY seq DESC",
+    )?;
+    let mut rows = stmt.query(params![user.as_slice(), i(hwm)])?;
+    while let Some(r) = rows.next()? {
+        let (kind, body): (u8, Vec<u8>) = (r.get(0)?, r.get(1)?);
+        if let Ok(EntryBody::Policy {
+            category: c,
+            enabled,
+            share_from,
+            ..
+        }) = EntryBody::decode(kind, &body)
+            && c == category
+        {
+            return Ok((enabled, from_day_number(share_from)));
+        }
+    }
+    Ok((false, None))
+}
+
+/// Whether the device's `device_confirmed` entry is at or below `hwm` (mirrored).
+fn confirmation_mirrored(
+    tx: &Connection,
+    user: &[u8; 16],
+    device: &[u8; 16],
+    hwm: u64,
+) -> rusqlite::Result<bool> {
+    let mut stmt = tx.prepare(
+        "SELECT kind, body FROM control_log WHERE user_id = ?1 AND kind = 4 AND seq <= ?2",
+    )?;
+    let mut rows = stmt.query(params![user.as_slice(), i(hwm)])?;
+    while let Some(r) = rows.next()? {
+        let (kind, body): (u8, Vec<u8>) = (r.get(0)?, r.get(1)?);
+        if let Ok(EntryBody::DeviceConfirmed { device_ref }) = EntryBody::decode(kind, &body)
+            && &device_ref == device
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The device behind the request, re-read inside the operation's own transaction: it
+/// must still be confirmed, not revoked, and still belong to the same user and origin.
+/// Authentication happens before the request body arrives, so an administrator's
+/// revocation in between must stop the operation (Codex review of PR 17).
+fn still_authorised(
+    tx: &Connection,
+    dev: &AuthedDevice,
+) -> rusqlite::Result<Result<(), WireError>> {
+    let row: Option<(Vec<u8>, Vec<u8>, String)> = tx
+        .query_row(
+            "SELECT user_id, origin_device, state FROM devices WHERE device_ref = ?1",
+            [dev.device_ref.as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        None => Err(WireError::UnknownToken),
+        Some((user, origin, state)) => {
+            if user != dev.user_id || origin != dev.origin_device {
+                Err(WireError::UnknownToken)
+            } else if state == "active" {
+                Ok(())
+            } else if state == "unconfirmed" {
+                Err(WireError::DeviceUnconfirmed)
+            } else {
+                Err(WireError::DeviceRevoked)
+            }
+        }
+    })
 }
 
 impl Server {
@@ -494,8 +579,12 @@ impl Server {
             return refused("other_user");
         }
         let recorded = {
-            let conn = self.db();
-            let hold: bool = conn
+            let mut conn = self.db();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| WireError::CannotRecord)?;
+            still_authorised(&tx, dev).map_err(|_| WireError::CannotRecord)??;
+            let hold: bool = tx
                 .query_row(
                     "SELECT hold FROM users WHERE user_id = ?1",
                     [dev.user_id.as_slice()],
@@ -503,7 +592,7 @@ impl Server {
                 )
                 .map_err(|_| WireError::CannotRecord)?;
             if hold {
-                conn.execute(
+                tx.execute(
                     "INSERT INTO evidence (user_id, device_ref, seq, recorded_at) VALUES (?1, ?2, ?3, ?4)
                      ON CONFLICT (user_id, device_ref) DO UPDATE SET seq = excluded.seq,
                          recorded_at = excluded.recorded_at",
@@ -515,15 +604,17 @@ impl Server {
                     ],
                 )
                 .map_err(|_| WireError::CannotRecord)?;
-                let _ = audit::record(
-                    &conn,
+                audit::record(
+                    &tx,
                     now,
                     AuditEvent::ReceiptRecorded,
                     Some(&dev.user_id),
                     Some(&dev.device_ref),
                     None,
-                );
+                )
+                .map_err(|_| WireError::CannotRecord)?;
             }
+            tx.commit().map_err(|_| WireError::CannotRecord)?;
             hold
         };
         if recorded {
@@ -716,8 +807,11 @@ impl Server {
         if !hold && !self.mirror_sync(&conn, &dev.user_id) {
             return Err(WireError::CannotRecord);
         }
-        let results = (|| -> rusqlite::Result<Option<Vec<ControlResult>>> {
+        let results = (|| -> rusqlite::Result<Result<Option<Vec<ControlResult>>, WireError>> {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if let Err(e) = still_authorised(&tx, dev)? {
+                return Ok(Err(e));
+            }
             let mut out = Vec::with_capacity(req.ops.len());
             for op in &req.ops {
                 let outcome = self.control_op(&tx, dev, op, hold, now)?;
@@ -728,12 +822,12 @@ impl Server {
             }
             if self.take_fault(|f| &mut f.fail_before_commit) {
                 // Dropping the transaction rolls everything back (T-J1).
-                return Ok(None);
+                return Ok(Ok(None));
             }
             tx.commit()?;
-            Ok(Some(out))
+            Ok(Ok(Some(out)))
         })()
-        .map_err(|_| WireError::CannotRecord)?
+        .map_err(|_| WireError::CannotRecord)??
         .ok_or(WireError::CannotRecord)?;
         if req
             .ops
@@ -776,6 +870,7 @@ impl Server {
         confirmed_on: Option<NaiveDate>,
         hold: bool,
         today: NaiveDate,
+        hwm: u64,
     ) -> rusqlite::Result<Result<(NaiveDate, String), WireError>> {
         if row.origin_device.as_bytes() != &dev.origin_device {
             return Ok(Err(WireError::OriginMismatch));
@@ -793,7 +888,17 @@ impl Server {
         if !p.enabled {
             return Ok(Err(WireError::CategoryOff));
         }
-        if p.share_from.is_none_or(|f| date < f) {
+        // Only what the mirror holds authorises: a live change newer than `mirror_hwm`
+        // counts only where it narrows sharing.
+        let mut share_from = p.share_from;
+        if p.seq > hwm {
+            let (on, from) = durable_policy(tx, &dev.user_id, row.category, hwm)?;
+            if !on {
+                return Ok(Err(WireError::CategoryOff));
+            }
+            share_from = share_from.max(from);
+        }
+        if share_from.is_none_or(|f| date < f) {
             return Ok(Err(WireError::BeforeShareFrom));
         }
         let tombstoned: bool = tx.query_row(
@@ -857,19 +962,30 @@ impl Server {
         }
         let now = self.now_ms();
         let mut conn = self.db();
-        let results = (|| -> rusqlite::Result<Vec<RowOutcome>> {
+        let results = (|| -> rusqlite::Result<Result<Vec<RowOutcome>, WireError>> {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if let Err(e) = still_authorised(&tx, dev)? {
+                return Ok(Err(e));
+            }
             let (confirmed_on, hold): (Option<String>, bool) = tx.query_row(
                 "SELECT d.confirmed_on, u.hold FROM devices d JOIN users u ON u.user_id = d.user_id
                  WHERE d.device_ref = ?1",
                 [dev.device_ref.as_slice()],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
-            let confirmed_on = confirmed_on.as_deref().and_then(parse_date);
+            let hwm = Self::mirrored_seq(&tx, &dev.user_id);
+            // The confirmation itself must be mirrored before the device may upload.
+            let confirmed_on = confirmed_on
+                .as_deref()
+                .and_then(parse_date)
+                .filter(|_| {
+                    confirmation_mirrored(&tx, &dev.user_id, &dev.device_ref, hwm)
+                        .unwrap_or(false)
+                });
             let today = Self::user_zone(&tx, &dev.user_id)?.local_date(self.clock.now());
             let mut out = Vec::with_capacity(req.rows.len());
             for row in &req.rows {
-                match Self::check_row(&tx, dev, row, confirmed_on, hold, today)? {
+                match Self::check_row(&tx, dev, row, confirmed_on, hold, today, hwm)? {
                     Ok((date, payload)) => {
                         tx.execute(
                             "INSERT INTO summaries (user_id, category, origin_device, local_date,
@@ -895,9 +1011,9 @@ impl Server {
                 }
             }
             tx.commit()?;
-            Ok(out)
+            Ok(Ok(out))
         })()
-        .map_err(|_| WireError::CannotRecord)?;
+        .map_err(|_| WireError::CannotRecord)??;
         let accepted = results
             .iter()
             .filter(|r| **r == RowOutcome::Accepted)
@@ -943,6 +1059,9 @@ impl Server {
         }
         let res = (|| -> rusqlite::Result<Result<Vec<HistoryRow>, WireError>> {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if let Err(e) = still_authorised(&tx, dev)? {
+                return Ok(Err(e));
+            }
             let hold: bool = tx.query_row(
                 "SELECT hold FROM users WHERE user_id = ?1",
                 [dev.user_id.as_slice()],

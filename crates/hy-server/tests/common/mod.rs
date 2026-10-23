@@ -330,6 +330,11 @@ impl Harness {
         h
     }
 
+    /// Keep `tmp` (returned by [`Harness::stop`]) alive as long as this server runs.
+    pub fn keep(&mut self, tmp: Option<tempfile::TempDir>) {
+        self._tmp = tmp;
+    }
+
     /// Stop the listeners and close the database; returns the folder (kept alive) and
     /// the clock so the server can be opened again.
     pub async fn stop(mut self) -> (Option<tempfile::TempDir>, PathBuf, Arc<ManualClock>) {

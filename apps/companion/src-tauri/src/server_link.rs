@@ -118,6 +118,9 @@ pub struct ShareState {
     pub share_from: Option<String>,
     /// Switched on here, waiting for the office server.
     pub waiting: bool,
+    /// This version builds records for it. When false it is shown as "not yet sharing"
+    /// and cannot be switched on.
+    pub available: bool,
 }
 
 /// A one-line notice about sharing (never blocks anything).
@@ -271,6 +274,7 @@ pub fn view(shell: &Shell, message: Option<String>) -> Result<LinkView, String> 
                     enabled: p.enabled,
                     share_from: p.share_from.filter(|_| p.enabled).map(|d| d.to_string()),
                     waiting: waiting.contains(&c),
+                    available: hy_core::protocol::share::produced(c),
                 });
             }
             let status = store.server_status().map_err(store_error)?;
@@ -402,8 +406,11 @@ pub async fn set_sharing(
     let c = Category::ALL
         .iter()
         .copied()
-        .find(|c| c.as_str() == category && *c != Category::PostureSummary)
+        .find(|c| c.as_str() == category)
         .ok_or_else(|| "Unknown category.".to_owned())?;
+    if enabled && !hy_core::protocol::share::produced(c) {
+        return Err("This category is not yet shared by this version of HealthierYou.".to_owned());
+    }
     let confirmed = shell
         .with_store(|s| s.server_link())
         .map_err(store_error)?

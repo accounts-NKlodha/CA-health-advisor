@@ -117,7 +117,11 @@ function Sharing({
                 type="checkbox"
                 role="switch"
                 checked={s.enabled || s.waiting}
-                disabled={busy || (paused && !s.enabled && !s.waiting)}
+                disabled={
+                  busy ||
+                  (paused && !s.enabled && !s.waiting) ||
+                  (!s.available && !s.enabled && !s.waiting)
+                }
                 onChange={(e) => {
                   const on = e.currentTarget.checked;
                   if (on && !window.confirm(enableNotice(s.label))) {
@@ -132,6 +136,7 @@ function Sharing({
             <button
               type="button"
               class="btn"
+              hidden={!s.available}
               disabled={busy}
               onClick={() => {
                 call('server_share_preview', { category: s.category })

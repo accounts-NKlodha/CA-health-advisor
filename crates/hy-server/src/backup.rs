@@ -15,7 +15,9 @@
 //!
 //! `backup.key` is 32 random bytes protected like the other server keys (machine-scope
 //! DPAPI on Windows) and never written into a backup, so a backup cannot be restored on
-//! another machine (contract 10). The snapshot records its own `snapshot_id`; a restore
+//! another machine (contract 10). **If the key is lost, every existing backup is
+//! permanently unrecoverable**: the administrator keeps a protected copy of the keys
+//! folder (the admin page and the `hy-server` usage text say so). The snapshot records its own `snapshot_id`; a restore
 //! marks the restored database so the next start puts every user in recovery hold and
 //! voids every unused slip (contract 9).
 
@@ -178,6 +180,19 @@ fn header(
     );
     h.extend_from_slice(summary);
     h
+}
+
+/// Whether this database came from a backup (it records the snapshot it was taken as).
+#[must_use]
+pub fn is_restored_copy(server: &Server) -> bool {
+    server
+        .db()
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM meta WHERE key = 'restored_from')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false)
 }
 
 /// Write one encrypted backup into `dir` and apply the retention rules.
@@ -372,7 +387,7 @@ pub fn restore(
             return Err(BackupError::Invalid);
         }
         conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('restore_pending', ?1)
+            "INSERT INTO meta (key, value) VALUES ('restore_pending', ?1), ('restored_from', ?1)
              ON CONFLICT (key) DO UPDATE SET value = excluded.value",
             [now_ms.to_string()],
         )?;
