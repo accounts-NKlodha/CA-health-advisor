@@ -370,3 +370,74 @@ async fn the_page_issues_a_slip_once_and_confirms_only_with_the_words_and_code()
     assert_eq!(s3, 303);
     assert_eq!(state(&h), DeviceState::Active);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t_s12e_a_cancelled_sign_in_keeps_the_permit_and_is_still_counted() {
+    use tower::ServiceExt as _;
+    // Costly enough that the check is still running when the request is cancelled.
+    let config = hy_server::Config {
+        argon2: (32 * 1024, 4, 1),
+        ..test_config()
+    };
+    let h = Harness::start_with(config, test_limits()).await;
+    h.server
+        .set_admin_passphrase(&Secret::new(PASS.to_owned()))
+        .unwrap();
+    let form = format!("passphrase={}", urlencode("wrong passphrase!"));
+    // The request is driven in a task we can abort, exactly as a dropped connection or
+    // the connection timeout drops the handler.
+    let router = hy_server::admin::router(h.server.clone(), h.admin.port());
+    let req = axum::http::Request::post("/login")
+        .header("host", host(&h))
+        .header("origin", origin(&h))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(axum::body::Body::from(form.clone()))
+        .unwrap();
+    let inflight = tokio::spawn(router.oneshot(req));
+    let start = std::time::Instant::now();
+    while h.server.login_checks_running() == 0 {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(20),
+            "check never started"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    inflight.abort();
+    assert!(inflight.await.unwrap_err().is_cancelled());
+    // The cancelled check still holds the permit: another sign-in is refused at once.
+    assert_eq!(
+        h.server.login_checks_running(),
+        1,
+        "the check outlives the request"
+    );
+    let request = admin_request(
+        "POST",
+        "/login",
+        &host(&h),
+        Some(&origin(&h)),
+        None,
+        Some(&form),
+    );
+    let (status, _, _) = http(h.admin, &request).await;
+    assert_eq!(status, 429);
+    // When it finishes, the cancelled failure is counted and the backoff applies.
+    while h.server.login_checks_running() != 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    // The permit is released just after the counter drops; let it go.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (failures, locked_until): (i64, i64) = h
+        .server
+        .db()
+        .query_row(
+            "SELECT failures, locked_until FROM admin WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(failures, 1, "the cancelled attempt was counted");
+    assert!(locked_until > h.clock.now().timestamp_millis());
+    let (status, _, _) = http(h.admin, &request).await;
+    assert_eq!(status, 429, "locked by the counted failure");
+    assert_eq!(h.server.peak_login_checks(), 1, "never two checks at once");
+}
