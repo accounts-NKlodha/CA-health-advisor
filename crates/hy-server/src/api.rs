@@ -68,6 +68,16 @@ fn json_response<T: serde::Serialize>(value: &T) -> Response {
     r
 }
 
+/// True when the declared `Content-Length` is over `limit`: such a body is refused before
+/// a byte of it is read.
+fn declared_too_large(headers: &HeaderMap, limit: usize) -> bool {
+    headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .is_some_and(|n| n > limit as u64)
+}
+
 /// The bearer token from the `Authorization` header only (never a query string).
 fn bearer(headers: &HeaderMap) -> Option<[u8; 32]> {
     let mut values = headers.get_all(header::AUTHORIZATION).iter();
@@ -139,6 +149,7 @@ async fn not_found() -> Response {
 async fn pair(
     State(server): State<Arc<Server>>,
     Extension(Peer(peer)): Extension<Peer>,
+    headers: HeaderMap,
     body: Body,
 ) -> Response {
     let start = Instant::now();
@@ -147,6 +158,9 @@ async fn pair(
     let outcome: Result<_, Refusal> = async {
         let s1 = s.clone();
         blocking(move || s1.count_pair_attempt(peer.ip())).await??;
+        if declared_too_large(&headers, PAIR_BODY_LIMIT) {
+            return Err(WireError::PayloadTooLarge.into());
+        }
         let bytes = to_bytes(body, PAIR_BODY_LIMIT)
             .await
             .map_err(|_| WireError::PayloadTooLarge)?;

@@ -540,12 +540,9 @@ async fn t_s22_idle_connections_slow_headers_huge_bodies_and_floods_leave_a_genu
     big.write_all(b"POST /v1/pair HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 10485760\r\n\r\n")
         .await
         .unwrap();
-    let chunk = vec![b'a'; 64 * 1024];
-    for _ in 0..4 {
-        if big.write_all(&chunk).await.is_err() {
-            break;
-        }
-    }
+    // The answer comes from the declared length alone, before any body byte is sent.
+    // (Reading after streaming the body would race the server's close: on Windows the
+    // reset discards the 413 the client had not read yet.)
     let mut resp = vec![0u8; 512];
     let n = tokio::time::timeout(Duration::from_secs(5), big.read(&mut resp))
         .await
@@ -554,6 +551,16 @@ async fn t_s22_idle_connections_slow_headers_huge_bodies_and_floods_leave_a_genu
     let text = String::from_utf8_lossy(&resp[..n]);
     assert!(text.starts_with("HTTP/1.1 413"), "{text}");
     assert!(text.contains("payload_too_large"));
+    // Sending the body anyway goes nowhere: the connection is closed.
+    let chunk = vec![b'a'; 64 * 1024];
+    let mut sent = 0usize;
+    for _ in 0..160 {
+        if big.write_all(&chunk).await.is_err() {
+            break;
+        }
+        sent += chunk.len();
+    }
+    assert!(sent < 10 * 1024 * 1024, "the 10 MB body was accepted");
 
     // The slow sender was cut off near the header limit (1 s in tests, 10 s in service).
     let slow_for = slow_task.await.unwrap();
