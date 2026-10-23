@@ -5,6 +5,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   Accessibility,
+  BackupDone,
+  BackupSummary,
   CoachConfig,
   MonthReview,
   PanelView,
@@ -60,6 +62,12 @@ interface Commands {
   plan_page: { args: undefined; result: PlanPage };
   plan_save: { args: { plan: RecoveryPlan }; result: PlanPage };
   plan_cancel: { args: undefined; result: PlanPage };
+  open_setup: { args: undefined; result: void };
+  setup_page: { args: undefined; result: SettingsPage };
+  setup_sample: { args: undefined; result: void };
+  setup_finish: { args: undefined; result: void };
+  backup_export: { args: { password: string }; result: BackupDone };
+  backup_import: { args: { password: string }; result: BackupSummary };
 }
 
 type Name = keyof Commands;
@@ -70,6 +78,11 @@ export function call<N extends Name>(
   ...args: Commands[N]['args'] extends undefined ? [] : [Commands[N]['args']]
 ): Promise<Commands[N]['result']> {
   return invoke<Commands[N]['result']>(name, args[0] as Record<string, unknown> | undefined);
+}
+
+/** Hand the shell the bytes of a backup file the user chose (sent as the raw body). */
+export function stageBackup(bytes: Uint8Array): Promise<number> {
+  return invoke<number>('backup_stage', bytes);
 }
 
 interface Events {

@@ -55,7 +55,7 @@ const fn day_short(d: Weekday) -> &'static str {
 }
 
 impl Shell {
-    fn runner(&self) -> Option<Arc<CoachRunner>> {
+    pub(super) fn runner(&self) -> Option<Arc<CoachRunner>> {
         self.app
             .try_state::<Arc<CoachRunner>>()
             .map(|r| Arc::clone(r.inner()))
@@ -123,6 +123,8 @@ impl Shell {
                 .collect(),
             provisional: PROVISIONAL.then_some(PROVISIONAL_NOTICE),
             hotkey,
+            sharing: Self::sharing_rows(&store).map_err(read)?,
+            backup_dir: self.backup_dir().map(|d| d.display().to_string()),
         })
     }
 
@@ -197,6 +199,15 @@ impl Shell {
     /// The display preferences every page follows.
     pub fn display_prefs(&self) -> Accessibility {
         lock(&self.inner).a11y
+    }
+
+    /// The setup wizard's data (the same as the settings tabs').
+    ///
+    /// # Errors
+    /// See [`Shell::settings_page`].
+    pub fn setup_page(&self) -> Result<SettingsPage, String> {
+        self.setup_opened();
+        self.settings_page()
     }
 
     /// Whether a settings page loaded its tabs (for the self-test).

@@ -1,7 +1,7 @@
 //! The pet shell: the pet window, its bubble, the keyboard panel, the settings window,
 //! the review window and the recovery-day plan window, driven by the pure rules in
 //! `hy-pet` (and `hy_core::review` for the reviews; the settings tabs and the plan window
-//! are in [`screens`]).
+//! are in [`screens`]; the setup wizard, the sharing status and the backup in [`data`]).
 //!
 //! Threading: every method of [`Shell`] runs on Tauri's main (UI) thread: synchronous
 //! commands, tray and window events run there already, and everything else is posted
@@ -58,8 +58,12 @@ pub const SCREENS: &str = "screens";
 pub const REVIEW: &str = "review";
 /// The recovery-day plan window's label (wireframe W15).
 pub const PLAN: &str = "plan";
+/// The setup wizard's label (wireframe W1).
+pub const SETUP: &str = "setup";
 
+mod data;
 mod screens;
+pub use data::BackupDone;
 pub use screens::SuggestionAnswer;
 
 /// How long the "Your pet is back above the clock" notice stays.
@@ -99,6 +103,10 @@ struct Inner {
     settings_loaded: bool,
     /// The plan window loaded (for the self-test).
     plan_loaded: bool,
+    /// The setup wizard loaded (for the self-test).
+    setup_loaded: bool,
+    /// A backup file the page read, waiting for its password.
+    staged_backup: Option<Vec<u8>>,
 }
 
 /// The pet shell.
@@ -216,6 +224,8 @@ impl Shell {
                 review_hint: None,
                 settings_loaded: false,
                 plan_loaded: false,
+                setup_loaded: false,
+                staged_backup: None,
             }),
             sink: Mutex::new(None),
             system: Mutex::new(None),

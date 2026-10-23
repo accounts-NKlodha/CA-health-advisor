@@ -337,7 +337,8 @@ select {
   }
 }
 input[type='number'],
-input[type='time'] {
+input[type='time'],
+input[type='password'] {
   font: inherit;
   padding: 5px 8px;
   border: 1px solid var(--line);
@@ -345,6 +346,17 @@ input[type='time'] {
   background: var(--surface);
   color: var(--fg);
   width: 8em;
+}
+input[type='password'] {
+  width: 16em;
+  max-width: 100%;
+}
+.saved-note {
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 0 0 12px;
+  font-weight: 600;
 }
 .inline {
   display: flex;
@@ -427,7 +439,8 @@ kbd {
   .settings-nav .nav-btn[aria-current='page'] {
     border-color: Highlight;
   }
-  .warn {
+  .warn,
+  .saved-note {
     border-color: CanvasText;
   }
 }

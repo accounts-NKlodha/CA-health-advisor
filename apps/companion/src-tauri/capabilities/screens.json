@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "screens",
-  "description": "The settings window (created on open, destroyed on close): pet library and edits, hotkey, bring pet above clock, reminders, water and workweek, movement programme, focus and Pomodoro, accessibility, and links to the reviews.",
+  "description": "The settings window (created on open, destroyed on close): pet library and edits, hotkey, bring pet above clock, reminders, water and workweek, movement programme, focus and Pomodoro, accessibility, sharing status, backup export and import, and links to the reviews and setup.",
   "windows": [
     "screens"
   ],
@@ -17,6 +17,10 @@
     "allow-save-water-settings",
     "allow-save-workweek",
     "allow-save-accessibility",
-    "allow-open-review"
+    "allow-open-review",
+    "allow-backup-export",
+    "allow-backup-stage",
+    "allow-backup-import",
+    "allow-open-setup"
   ]
 }

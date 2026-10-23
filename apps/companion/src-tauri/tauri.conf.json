@@ -15,7 +15,8 @@
         "panel",
         "screens",
         "review",
-        "plan"
+        "plan",
+        "setup"
       ]
     },
     "windows": []

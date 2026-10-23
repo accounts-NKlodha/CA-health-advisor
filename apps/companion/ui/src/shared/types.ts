@@ -387,6 +387,25 @@ export interface SettingsPage {
   library: { name: string; place: string; dose: string; seated: string | null }[];
   provisional: string | null;
   hotkey: string | null;
+  /** Wireframe W8. */
+  sharing: { category: string; label: string; enabled: boolean }[];
+  /** Where exports are written (wireframe W9). */
+  backup_dir: string | null;
+}
+
+// The full personal backup (wireframe W9; hy_core::backup::Summary).
+
+export interface BackupSummary {
+  exported_at: string;
+  events: number;
+  days: number;
+  from: string | null;
+  to: string | null;
+}
+
+export interface BackupDone {
+  path: string;
+  summary: BackupSummary;
 }
 
 // The recovery-day plan window (wireframe W15; PlanPage in view.rs).
