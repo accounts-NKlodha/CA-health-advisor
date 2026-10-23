@@ -1392,7 +1392,9 @@ impl Engine {
             }
             Input::Guide(action) => self.guide_input(ctx, action, out),
             Input::RoutineFinished { offer, outcome } => {
-                let r = self.routine_finished(ctx, offer, outcome, out);
+                // With the guide running, the report is read against the movements
+                // already answered; the reminder and the routine record get the same result.
+                let r = self.routine_finished(ctx, offer, self.reported_outcome(outcome), out);
                 if r == Applied {
                     // A report in one go answers the guide too.
                     self.report_guide(ctx, outcome, out);
