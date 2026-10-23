@@ -339,6 +339,12 @@ impl Server {
         self.login_checks.1.load(Ordering::SeqCst)
     }
 
+    /// Admin passphrase checks running right now (tests only).
+    #[doc(hidden)]
+    pub fn login_checks_running(&self) -> usize {
+        self.login_checks.0.load(Ordering::SeqCst)
+    }
+
     /// Replace the random source (fault-injection tests only).
     #[doc(hidden)]
     #[must_use]

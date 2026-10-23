@@ -334,19 +334,30 @@ fn too_many(wait_s: i64) -> Response {
         .into_response()
 }
 
-/// Sign in. Only one passphrase check runs at a time, process-wide: a sign-in that finds
-/// one running is refused at once (never queued), so concurrent wrong attempts can
-/// neither run many 64 MiB Argon2 jobs nor all read the same failure count. The count
-/// and the lock are read again after the permit is taken and the failure is written
-/// from that fresh value before the permit is released.
-async fn login(State(st): State<AdminState>, Form(form): Form<LoginForm>) -> Response {
-    let pass = Secret::new(form.passphrase);
-    let Ok(_permit) = st.server.login_gate.try_acquire() else {
-        return too_many(1);
+/// What one sign-in attempt came to.
+enum LoginOutcome {
+    /// No passphrase is set.
+    NoAdmin,
+    /// Another check is running, or the backoff is in force: wait this many seconds.
+    Wait(i64),
+    /// The passphrase is wrong (already counted).
+    Wrong,
+    /// Signed in with this new session cookie (already stored).
+    Session([u8; 32]),
+    /// The random source failed: nothing was issued.
+    NoRandom,
+}
+
+/// One whole sign-in attempt, run on a blocking thread: the permit, the fresh read of the
+/// lock, the Argon2 check and the recorded outcome all happen here, so cancelling the
+/// request (a client that goes away, the connection timeout) can neither free the permit
+/// while a check still runs nor skip counting a failure.
+fn attempt_login(server: &Server, pass: &Secret<String>) -> LoginOutcome {
+    let Ok(_permit) = server.login_gate.try_acquire() else {
+        return LoginOutcome::Wait(1);
     };
-    let now = st.server.clock.now().timestamp_millis();
-    let row: Option<(String, i64)> = st
-        .server
+    let now = server.clock.now().timestamp_millis();
+    let row: Option<(String, i64)> = server
         .db()
         .query_row(
             "SELECT passphrase_hash, locked_until FROM admin WHERE id = 1",
@@ -356,23 +367,17 @@ async fn login(State(st): State<AdminState>, Form(form): Form<LoginForm>) -> Res
         .optional()
         .unwrap_or(None);
     let Some((stored, locked_until)) = row else {
-        return to_login();
+        return LoginOutcome::NoAdmin;
     };
     if now < locked_until {
-        return too_many((locked_until - now + 999) / 1000);
+        return LoginOutcome::Wait((locked_until - now + 999) / 1000);
     }
-    let server = st.server.clone();
-    let ok = tokio::task::spawn_blocking(move || {
-        let (running, peak) = &server.login_checks;
-        let n = running.fetch_add(1, Ordering::SeqCst) + 1;
-        peak.fetch_max(n, Ordering::SeqCst);
-        let ok = verify_passphrase(&stored, &pass);
-        running.fetch_sub(1, Ordering::SeqCst);
-        ok
-    })
-    .await
-    .unwrap_or(false);
-    let conn = st.server.db();
+    let (running, peak) = &server.login_checks;
+    let n = running.fetch_add(1, Ordering::SeqCst) + 1;
+    peak.fetch_max(n, Ordering::SeqCst);
+    let ok = verify_passphrase(&stored, pass);
+    running.fetch_sub(1, Ordering::SeqCst);
+    let conn = server.db();
     if !ok {
         // Counted from the stored value, inside the permit.
         let _ = conn.execute(
@@ -382,15 +387,11 @@ async fn login(State(st): State<AdminState>, Form(form): Form<LoginForm>) -> Res
             params![now, MAX_BACKOFF_S],
         );
         let _ = audit::record(&conn, now, AuditEvent::AdminLoginFailed, None, None, None);
-        return (
-            StatusCode::UNAUTHORIZED,
-            page("Sign in", "<p class=\"warn\">That passphrase is not right.</p><p><a href=\"/login\">Try again</a></p>"),
-        )
-            .into_response();
+        return LoginOutcome::Wrong;
     }
     let mut cookie = [0u8; 32];
     if getrandom::fill(&mut cookie).is_err() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "random source failed").into_response();
+        return LoginOutcome::NoRandom;
     }
     let _ = conn.execute(
         "UPDATE admin SET failures = 0, locked_until = 0 WHERE id = 1",
@@ -401,14 +402,42 @@ async fn login(State(st): State<AdminState>, Form(form): Form<LoginForm>) -> Res
         params![session_hash(&cookie).as_slice(), now],
     );
     let _ = audit::record(&conn, now, AuditEvent::AdminLogin, None, None, None);
-    let mut r = Redirect::to("/").into_response();
-    if let Ok(v) = HeaderValue::from_str(&format!(
-        "{COOKIE}={}; HttpOnly; SameSite=Strict; Path=/; Max-Age=1800",
-        b64(&cookie)
-    )) {
-        r.headers_mut().insert(header::SET_COOKIE, v);
+    LoginOutcome::Session(cookie)
+}
+
+/// Sign in. Only one passphrase check runs at a time, process-wide: a sign-in that finds
+/// one running is refused at once (never queued), so concurrent wrong attempts can
+/// neither run many 64 MiB Argon2 jobs nor all read the same failure count. The whole
+/// attempt, permit included, runs in [`attempt_login`] on a blocking thread, which
+/// finishes and records its outcome even if this request is cancelled.
+async fn login(State(st): State<AdminState>, Form(form): Form<LoginForm>) -> Response {
+    let pass = Secret::new(form.passphrase);
+    let server = st.server.clone();
+    let outcome = tokio::task::spawn_blocking(move || attempt_login(&server, &pass))
+        .await
+        .unwrap_or(LoginOutcome::Wait(1));
+    match outcome {
+        LoginOutcome::NoAdmin => to_login(),
+        LoginOutcome::Wait(s) => too_many(s),
+        LoginOutcome::Wrong => (
+            StatusCode::UNAUTHORIZED,
+            page("Sign in", "<p class=\"warn\">That passphrase is not right.</p><p><a href=\"/login\">Try again</a></p>"),
+        )
+            .into_response(),
+        LoginOutcome::NoRandom => {
+            (StatusCode::SERVICE_UNAVAILABLE, "random source failed").into_response()
+        }
+        LoginOutcome::Session(cookie) => {
+            let mut r = Redirect::to("/").into_response();
+            if let Ok(v) = HeaderValue::from_str(&format!(
+                "{COOKIE}={}; HttpOnly; SameSite=Strict; Path=/; Max-Age=1800",
+                b64(&cookie)
+            )) {
+                r.headers_mut().insert(header::SET_COOKIE, v);
+            }
+            r
+        }
     }
-    r
 }
 
 #[derive(Deserialize)]
