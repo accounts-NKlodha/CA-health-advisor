@@ -467,10 +467,13 @@ fn monthly_bars_rates_and_coverage() {
     let july = m.bars[1];
     assert_eq!(july.coverage.recorded, 0);
     assert_eq!(july.movement.pct, None); // no data, not 0
+    assert_eq!(july.kind.movement, BarKind::NoData);
     let august = m.bars[2];
     assert!(august.coverage.recorded > 0);
     assert_eq!(august.movement.pct, Some(0)); // measured zero
     assert_eq!(august.water.pct, Some(0));
+    assert_eq!(august.kind.movement, BarKind::Zero);
+    assert_eq!(m.bars[4].kind.movement, BarKind::Measured);
     let october = m.bars[4];
     assert!(october.in_progress);
     assert!(!m.bars[3].in_progress);
@@ -492,6 +495,84 @@ fn monthly_bars_rates_and_coverage() {
     assert!(b.movement.den > 0);
     assert_eq!(m.previous_month, Some(MonthKey::new(2026, 9).unwrap()));
     assert_eq!(m.next_month, None);
+}
+
+#[test]
+fn an_off_day_only_month_is_measured_not_no_data() {
+    // In use since 1 Jun 2026, Monday to Saturday workdays. August's only record is a
+    // Sunday with some water below the goal; September's only record is Sunday 6 Sep,
+    // with the routine done and the water goal reached. No workday was recorded in
+    // either month, yet those days count (an off day counts once something was done).
+    let c = cal(oct(20), d(2026, 6, 1));
+    let sel = MonthKey::new(2026, 10).unwrap();
+    let ((from, to), _) = month_ranges(&c, sel);
+    let facts = facts_for(from, to, |date| {
+        let mut f = DayFacts::empty(date);
+        if date == d(2026, 8, 2) {
+            f.events = 1;
+            f.water_entries = 1;
+            f.water_ml = 500;
+            f.water_goal_ml = Some(2000);
+        }
+        if date == d(2026, 9, 6) {
+            f.events = 3;
+            f.note_routine(RoutineOutcome::Done);
+            f.water_entries = 2;
+            f.water_ml = 2000;
+            f.water_goal_ml = Some(2000);
+        }
+        f
+    });
+    let m = month(&c, sel, &facts, &[]);
+    let bar = |key: &str| *m.bars.iter().find(|b| b.month.to_string() == key).unwrap();
+    let sep = bar("2026-09");
+    assert_eq!(sep.coverage.recorded, 0);
+    assert_eq!(sep.movement, Ratio::new(1, 1));
+    assert_eq!(sep.water, Ratio::new(1, 1));
+    assert_eq!(sep.kind.movement, BarKind::Measured);
+    assert_eq!(sep.kind.water, BarKind::Measured);
+    assert_eq!(sep.kind.breaks, BarKind::NoData); // no break offered, no workday recorded
+    let aug = bar("2026-08");
+    assert_eq!(aug.coverage.recorded, 0);
+    assert_eq!(aug.water, Ratio::new(0, 1));
+    assert_eq!(aug.kind.water, BarKind::Zero); // a measured zero, not "no data"
+    assert_eq!(aug.kind.movement, BarKind::NoData); // the Sunday is off for movement
+    let jul = bar("2026-07");
+    assert_eq!(jul.kind.movement, BarKind::NoData);
+    assert_eq!(jul.kind.water, BarKind::NoData);
+    let v = serde_json::to_value(sep).unwrap();
+    assert_eq!(v["kind"]["movement"], "measured");
+    assert_eq!(v["kind"]["breaks"], "no_data");
+    // The same Sunday in the weekly review counts as 1 of 1.
+    let w = week(
+        &c,
+        &week_of(d(2026, 8, 31), |date| {
+            facts.iter().find(|f| f.date == date).unwrap().clone()
+        }),
+        &[],
+        phone_none(),
+    );
+    assert_eq!(w.coverage.recorded, 0);
+    assert_eq!(w.rows[0].value, Ratio::new(1, 1));
+    assert_eq!(w.rows[0].marks[6], DayMark::Met);
+}
+
+#[test]
+fn a_month_with_workdays_but_no_goal_has_nothing_to_count() {
+    let c = cal(oct(20), d(2026, 6, 1));
+    let sel = MonthKey::new(2026, 9).unwrap();
+    let ((from, to), _) = month_ranges(&c, sel);
+    let facts = facts_for(from, to, |date| {
+        let mut f = recorded(date);
+        f.water_ml = 300;
+        f
+    });
+    let m = month(&c, sel, &facts, &[]);
+    let sep = *m.bars.last().unwrap();
+    assert!(sep.coverage.recorded > 0);
+    assert_eq!(sep.water.den, 0);
+    assert_eq!(sep.kind.water, BarKind::NothingToCount);
+    assert_eq!(sep.kind.movement, BarKind::Zero);
 }
 
 #[test]

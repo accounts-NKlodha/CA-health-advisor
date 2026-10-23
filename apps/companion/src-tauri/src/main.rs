@@ -250,6 +250,14 @@ mod tests {
         let json = serde_json::to_value(&month).unwrap();
         assert_eq!(json["review"]["status"], "too_early");
         assert_eq!(json["review"]["month"].as_str().unwrap().len(), 7);
+        // Each bar carries the engine's kind per metric, in the names Month.tsx maps.
+        for metric in ["movement", "breaks", "water"] {
+            let kind = json["review"]["bars"][0]["kind"][metric].as_str().unwrap();
+            assert!(
+                ["no_data", "nothing_to_count", "zero", "measured"].contains(&kind),
+                "{metric}: {kind}"
+            );
+        }
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

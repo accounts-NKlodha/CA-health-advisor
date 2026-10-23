@@ -686,6 +686,53 @@ pub fn week(
     }
 }
 
+/// How one metric's bar on the monthly chart is drawn and labelled (wireframe W14).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BarKind {
+    /// Nothing counted and no workday recorded: "no data" (app not running).
+    NoData,
+    /// Days were recorded, but none counts for this metric (water with no goal set).
+    NothingToCount,
+    /// Days counted, none met: a measured zero.
+    Zero,
+    /// Days counted, some met.
+    Measured,
+}
+
+impl BarKind {
+    /// The kind of a bar with `value` over a month with `coverage`.
+    ///
+    /// The metric's own denominator decides first: coverage counts workdays only, while a
+    /// rate also counts an off day on which something was done, so a month whose only
+    /// record is a Sunday routine has a measured 1 of 1, not "no data".
+    #[must_use]
+    pub const fn of(coverage: Coverage, value: Ratio) -> Self {
+        if value.den > 0 {
+            if value.num == 0 {
+                Self::Zero
+            } else {
+                Self::Measured
+            }
+        } else if coverage.recorded == 0 {
+            Self::NoData
+        } else {
+            Self::NothingToCount
+        }
+    }
+}
+
+/// Each metric's [`BarKind`] for one month.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct BarKinds {
+    /// Movement routine days.
+    pub movement: BarKind,
+    /// Breaks taken.
+    pub breaks: BarKind,
+    /// Water goal days.
+    pub water: BarKind,
+}
+
 /// One month on the monthly chart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct MonthBar {
@@ -701,6 +748,9 @@ pub struct MonthBar {
     pub breaks: Ratio,
     /// Water goal days.
     pub water: Ratio,
+    /// How each metric's bar is drawn: a rate with a counted day is measured even when
+    /// no workday was recorded (an off day counts once something was done).
+    pub kind: BarKinds,
 }
 
 /// One day of the selected month, for the day strip.
@@ -827,13 +877,24 @@ pub fn month(
     let mut m = first_shown_month(cal, selected);
     loop {
         let days = slice_of(&by_date, m.first_day(), m.last_day());
+        let cov = coverage(cal, &days);
+        let (movement, breaks, water) = (
+            rate(cal, &days, Metric::Movement),
+            rate(cal, &days, Metric::Breaks),
+            rate(cal, &days, Metric::Water),
+        );
         bars.push(MonthBar {
             month: m,
             in_progress: m.last_day() >= cal.today,
-            coverage: coverage(cal, &days),
-            movement: rate(cal, &days, Metric::Movement),
-            breaks: rate(cal, &days, Metric::Breaks),
-            water: rate(cal, &days, Metric::Water),
+            coverage: cov,
+            movement,
+            breaks,
+            water,
+            kind: BarKinds {
+                movement: BarKind::of(cov, movement),
+                breaks: BarKind::of(cov, breaks),
+                water: BarKind::of(cov, water),
+            },
         });
         if m >= selected {
             break;
