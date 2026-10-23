@@ -1,6 +1,7 @@
 //! IPC commands. Each window may call only the commands its capability file grants
 //! (`capabilities/*.json`). The commands are synchronous, so Tauri runs them on the main
-//! thread, which the shell requires.
+//! thread, which the shell requires; the exceptions are the server-link commands that
+//! wait on the network, which are async and touch only the store.
 
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ use hy_pet::profile::PetEdit;
 use tauri::State;
 use uuid::Uuid;
 
+use crate::server_link::{self, LinkView};
 use crate::shell::{BackupDone, ImportOutcome, Shell, SuggestionAnswer};
 use crate::view::{PanelView, PetView, PlanPage, ReviewPage, SettingsPage, SettingsView};
 
@@ -369,4 +371,60 @@ pub fn backup_stage(
 #[tauri::command]
 pub fn backup_import(shell: ShellState<'_>, password: String) -> Result<ImportOutcome, String> {
     shell.import_backup(password)
+}
+
+// ------------------------------------------------------------- office server
+
+/// The pairing section of Settings > Sharing & server.
+///
+/// # Errors
+/// A read failure, worded for the user.
+#[tauri::command]
+pub fn server_status(shell: ShellState<'_>) -> Result<LinkView, String> {
+    server_link::view(&shell, None)
+}
+
+/// "Pair" with the slip the user pasted or typed.
+///
+/// # Errors
+/// The reason, worded for the user; nothing was stored.
+#[tauri::command]
+pub async fn server_pair(shell: ShellState<'_>, slip: String) -> Result<LinkView, String> {
+    server_link::pair(shell.inner().clone(), slip).await
+}
+
+/// "Check again": ask the server for this PC's state.
+///
+/// # Errors
+/// A store failure, worded for the user.
+#[tauri::command]
+pub async fn server_refresh(shell: ShellState<'_>) -> Result<LinkView, String> {
+    server_link::refresh(shell.inner().clone()).await
+}
+
+/// "Unpair this PC".
+///
+/// # Errors
+/// A store failure, worded for the user.
+#[tauri::command]
+pub async fn server_unpair(shell: ShellState<'_>) -> Result<LinkView, String> {
+    server_link::unpair(shell.inner().clone()).await
+}
+
+/// "Server address": the IP address to try when the server moved (empty clears it).
+///
+/// # Errors
+/// A malformed address or a store failure, worded for the user.
+#[tauri::command]
+pub fn server_set_address(shell: ShellState<'_>, address: String) -> Result<LinkView, String> {
+    server_link::set_address(&shell, &address)
+}
+
+/// The user saw the new-device notice for a PC.
+///
+/// # Errors
+/// A malformed id or a store failure, worded for the user.
+#[tauri::command]
+pub fn server_notice_seen(shell: ShellState<'_>, device_ref: String) -> Result<LinkView, String> {
+    server_link::notice_seen(&shell, &device_ref)
 }

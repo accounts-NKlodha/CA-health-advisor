@@ -8,8 +8,8 @@
 //! policy operation, its consent-log entry, its event and the purge of that category's
 //! upload queue are one transaction, and the same holds for a deletion tombstone. Schema
 //! triggers enforce the queue rules as a second line of defence, so a blocked date can
-//! never be queued even by code that bypasses this API. The server-side control log,
-//! mirror and receipts are V1-5.
+//! never be queued even by code that bypasses this API. The link to the office server,
+//! its receipt and the device list are in `link` (V1-5).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -34,12 +34,14 @@ use crate::time::{UserZone, WorkSchedule};
 
 mod backup;
 mod coach;
+mod link;
 mod prefs;
 mod review;
 #[cfg(test)]
 mod tests;
 
 pub use coach::{ActivityDay, CoachCommit, SavedCoachState};
+pub use link::{NewLink, PairedDevice, ServerLink, StateOutcome};
 
 /// Setting keys with typed accessors.
 pub mod keys {

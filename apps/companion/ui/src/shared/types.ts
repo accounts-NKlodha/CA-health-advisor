@@ -429,6 +429,33 @@ export interface SettingsPage {
   backup_dir: string | null;
 }
 
+// Pairing with the office server (wireframe W8; LinkView in server_link.rs).
+
+export interface PairedPc {
+  device_ref: string;
+  label: string;
+  confirmed: boolean;
+  this_pc: boolean;
+  /** Newly paired since the user last looked: show the new-PC notice. */
+  new: boolean;
+}
+
+export interface LinkView {
+  state: 'none' | 'pending' | 'confirmed';
+  alias: string | null;
+  host: string | null;
+  /** The six words of the server's fingerprint, to read out. */
+  words: string[];
+  /** This PC's check code, to read out. */
+  check_code: string | null;
+  confirmed_on: string | null;
+  /** The address the user entered for when the server's IP changed. */
+  manual_address: string | null;
+  devices: PairedPc[];
+  /** About the last action (offline, revoked, history mismatch...). */
+  message: string | null;
+}
+
 // The full personal backup (wireframe W9; hy_core::backup::Summary).
 
 export interface BackupSummary {

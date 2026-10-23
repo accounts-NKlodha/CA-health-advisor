@@ -79,6 +79,16 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/0004_entry_corrections.sql"),
         compat: Compat::Expand,
     },
+    Migration {
+        version: 5,
+        name: "server_link",
+        sql: include_str!("../migrations/0005_server_link.sql"),
+        // Contract, not expand: it replaces `outbox_guard` (nothing is queued until the
+        // PC is confirmed) and rebuilds the consent log with new kinds, so a v4 build
+        // would open the data and then fail its own sharing writes. A v4 build refuses
+        // it and the rollback path restores the pre-upgrade copy instead.
+        compat: Compat::Contract,
+    },
 ];
 
 /// The schema version this build writes.
@@ -411,6 +421,32 @@ mod tests {
     }
 
     #[test]
+    fn a_v4_build_refuses_a_v5_store_instead_of_failing_its_sharing_writes() {
+        // Rollback regression: v5 changes the queue guard, so a v4 reader must not open
+        // it (it would accept the data and then fail every queued sharing write).
+        assert_eq!(MIGRATIONS[4].compat, Compat::Contract);
+        let mut conn = mem();
+        migrate(&mut conn).unwrap();
+        let err = migrate_with(&mut conn, &MIGRATIONS[..4], MigrateOptions::default()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::SchemaTooNew {
+                    found: 5,
+                    required_reader: 5,
+                    supported: 4
+                }
+            ),
+            "{err}"
+        );
+        // A v4 store still opens with the v4 list (the pre-upgrade copy is usable).
+        let mut old = mem();
+        migrate_with(&mut old, &MIGRATIONS[..4], MigrateOptions::default()).unwrap();
+        let r = migrate_with(&mut old, &MIGRATIONS[..4], MigrateOptions::default()).unwrap();
+        assert_eq!((r.from, r.to), (4, 4));
+    }
+
+    #[test]
     fn checksum_ignores_line_endings_only() {
         assert_eq!(checksum("a;\nb;\n"), checksum("a;\r\nb;\r\n"));
         assert_ne!(checksum("a;\nb;\n"), checksum("a;\nc;\n"));
@@ -427,7 +463,8 @@ mod tests {
         assert_eq!(report.pre_migration_copy, None);
         let status = schema_status(&conn).unwrap();
         assert_eq!(status.version, latest_version());
-        assert_eq!(status.required_reader, 1);
+        // v5 is a contract step: readers older than v5 must refuse.
+        assert_eq!(status.required_reader, 5);
         for t in [
             "store_meta",
             "events",
@@ -445,11 +482,52 @@ mod tests {
             "schema_migrations",
             "coach_state",
             "activity_day",
+            "server_link",
+            "head_receipt",
+            "paired_devices",
         ] {
             assert!(table_exists(&conn, t), "missing table {t}");
         }
-        // Pairing material is deliberately absent until V1-5.
-        assert!(!table_exists(&conn, "server_link"));
+        // Pairing material arrives only with v5 (V1-5), after the pairing security gate.
+        let mut v4 = mem();
+        migrate_with(&mut v4, &MIGRATIONS[..4], MigrateOptions::default()).unwrap();
+        assert!(!table_exists(&v4, "server_link"));
+    }
+
+    #[test]
+    fn v5_keeps_every_consent_entry_and_its_append_only_rule() {
+        let mut conn = mem();
+        migrate_with(&mut conn, &MIGRATIONS[..4], MigrateOptions::default()).unwrap();
+        conn.execute_batch(
+            "INSERT INTO consent_log (at, kind, category, notice_version) VALUES
+                 (1, 'notice_shown', 'hydration', 'n1'), (2, 'enable_requested', 'hydration', 'n1');",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let rows: Vec<(i64, i64, String)> = conn
+            .prepare("SELECT id, at, kind FROM consent_log ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (1, 1, "notice_shown".to_string()),
+                (2, 2, "enable_requested".to_string())
+            ]
+        );
+        assert!(conn.execute("UPDATE consent_log SET at = 9", []).is_err());
+        conn.execute(
+            "INSERT INTO consent_log (at, kind, notice_version) VALUES (3, 'paired', 'p1')",
+            [],
+        )
+        .unwrap();
+        assert!(
+            conn.execute("INSERT INTO consent_log (at, kind) VALUES (4, 'bogus')", [])
+                .is_err()
+        );
     }
 
     #[test]
@@ -687,10 +765,18 @@ mod tests {
             "provenance",
             ImportProvenance::ALL.iter().map(|v| v.as_str()).collect(),
         );
+        // The consent log was rebuilt with more kinds in v5 (V1-5): v1 holds the first
+        // six, and the v5 rebuild holds every kind.
         expect(
             "kind",
-            ConsentKind::ALL.iter().map(|v| v.as_str()).collect(),
+            ConsentKind::ALL[..6].iter().map(|v| v.as_str()).collect(),
         );
+        let v5 = MIGRATIONS[4].sql;
+        let needle = format!(
+            "kind IN ({})",
+            list(ConsentKind::ALL.iter().map(|v| v.as_str()).collect())
+        );
+        assert!(v5.contains(&needle), "v5 lacks `{needle}`");
         expect("edge", PetEdge::ALL.iter().map(|v| v.as_str()).collect());
         expect("tone", PetTone::ALL.iter().map(|v| v.as_str()).collect());
         // Every category gets a seeded, switched-off policy row.

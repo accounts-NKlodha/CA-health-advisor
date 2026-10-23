@@ -34,6 +34,23 @@ thiserror = "2.0.21"
 uuid = { version = "1.28.0", features = ["serde", "v7"] }
 proptest = "1.12.0"
 tempfile = "3.27.0"
+# V1-5 pairing and sync (docs/V1-5_Pairing_Security.md section 15). Each version is the
+# newest patch of its minor version that was at least 14 days old when V1-5 started.
+aws-lc-rs = { version = "1.18.1", default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "form", "query"] }
+data-encoding = "2.11.1"
+hyper = { version = "1.12.0", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio", "service"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json"] }
+rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "prefer-post-quantum", "std"] }
+subtle = "2.6.1"
+tokio = { version = "1.54.0", features = ["rt-multi-thread", "net", "time", "signal", "macros", "sync", "io-util"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs"] }
+tower = { version = "0.5.3", default-features = false, features = ["util", "limit", "timeout"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["std", "fmt", "json", "registry"] }
+zeroize = { version = "1.9.1", features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

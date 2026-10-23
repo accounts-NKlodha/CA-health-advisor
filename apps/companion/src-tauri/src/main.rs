@@ -13,7 +13,9 @@
 //! - the settings window with the pet library and edits;
 //! - the review window (slice V1-4): the weekly review and monthly progress, read from
 //!   the store's per-day tallies and events (`hy_core::review`), with phone-report label
-//!   corrections.
+//!   corrections;
+//! - pairing with the office server (slice V1-5a) in [`server_link`]: the slip, the six
+//!   words and check code for the administrator, "Check again" and unpair.
 //!
 //! The tracker, coaching engine and suppression (V1-2) drive the pet through
 //! `hy_pet::shell::PetShell`, implemented by [`shell::ShellHandle`]. [`coach`] runs the
@@ -28,6 +30,7 @@
 mod coach;
 mod commands;
 mod selftest;
+mod server_link;
 mod shell;
 mod tray;
 mod view;
@@ -174,6 +177,12 @@ fn main() {
             commands::backup_export,
             commands::backup_stage,
             commands::backup_import,
+            commands::server_status,
+            commands::server_pair,
+            commands::server_refresh,
+            commands::server_unpair,
+            commands::server_notice_seen,
+            commands::server_set_address,
         ])
         .setup(setup)
         .build(tauri::generate_context!());
