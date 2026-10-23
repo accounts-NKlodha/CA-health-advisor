@@ -303,11 +303,23 @@ async fn t_d5_t_s15_t_s16_t_s26_a_restore_holds_the_user_until_every_device_chec
         "the maximum never moves"
     );
 
-    // A checks in last: released at that moment, without waiting for the maximum.
     assert!(matches!(
         a.synced().await,
         SyncOutcome::Hold { evidence: true, .. }
     ));
+    // The pending P counts as paired (contract 9, "Pending devices"): it can never
+    // present a receipt and cannot be confirmed during hold, so it blocks release...
+    assert!(in_hold(&h, &u), "P is still listed");
+    assert_eq!(evidence(&h, &u, &p.dev.device_ref), Some(None));
+    let code = hy_core::protocol::words::device_check_code(&p.dev.device_ref);
+    assert_eq!(
+        h.server.confirm_device(&p.dev.device_ref, &code),
+        Err(hy_server::server::AdminError::Hold)
+    );
+    assert_eq!(h.audits("user_released"), 0);
+    // ...until the administrator rejects it: the last piece of evidence is then in, and
+    // U is released at that moment, without waiting for the maximum.
+    h.server.revoke_device(&p.dev.device_ref).unwrap();
     assert!(!in_hold(&h, &u));
     assert_eq!(h.audits("user_released"), 1);
     // The held disable and deletion were sequenced; every PC syncs normally again.

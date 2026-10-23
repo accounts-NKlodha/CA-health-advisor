@@ -19,10 +19,11 @@
 //! paired after the snapshot authenticate with their own tokens (T-S16).
 //!
 //! **Release** of user U needs all of: the mirror (checked at startup), a receipt from
-//! every device U's chain lists as confirmed and not revoked (a pending device never
-//! received a head, so it has none to present), each presented with that
+//! every device U's chain lists as paired and not revoked, each presented with that
 //! device's own token, at or below U's tail with a matching hash, and the administrator's
-//! witness of the list of users and of U's devices. Release is immediate once complete;
+//! witness of the list of users and of U's devices. A pending device counts too (contract
+//! 9, "Pending devices"): it holds no receipt and cannot be confirmed during hold, so the
+//! administrator revokes it before U can be released. Release is immediate once complete;
 //! disables and deletions accepted during hold are then sequenced. Elapsed time is never
 //! evidence: at the 7-day maximum an incomplete user is discarded.
 //!
@@ -551,7 +552,7 @@ impl Server {
             .prepare(
                 "SELECT d.device_ref, e.seq FROM devices d
                  LEFT JOIN evidence e ON e.device_ref = d.device_ref AND e.user_id = d.user_id
-                 WHERE d.user_id = ?1 AND d.state NOT IN ('unconfirmed', 'revoked')",
+                 WHERE d.user_id = ?1 AND d.state <> 'revoked'",
             )?
             .query_map([user.as_slice()], |r| Ok((id16(r.get(0)?)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;

@@ -654,7 +654,10 @@ fn recovery_section(b: &mut String, s: &Server, csrf: &str, now: i64) {
         let mut pcs = String::new();
         for (dev, label, state, seq) in &r.devices {
             let status = match (state, seq) {
-                (DeviceState::Pending, _) => "waiting for confirmation (not needed)".to_owned(),
+                (DeviceState::Pending, _) => {
+                    "<strong>waiting for confirmation</strong>: it can never check in; reject it (the user re-pairs after release)"
+                        .to_owned()
+                }
                 (_, Some(seq)) => format!("checked in (entry {seq})"),
                 (_, None) => "<strong>missing</strong>".to_owned(),
             };
