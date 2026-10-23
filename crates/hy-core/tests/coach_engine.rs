@@ -1238,27 +1238,40 @@ fn guide_is_ended_by_starting_a_pomodoro() {
 
 #[test]
 fn guide_answered_in_one_go_from_the_menu_records_the_report() {
-    // (answers in the guide, report) -> (outcome, done, skipped) recorded.
+    use RoutineOutcome as O;
+    // (answers in the guide, report) -> (outcome, done, skipped) recorded. Answered
+    // movements stand; the report covers the movements not answered yet.
     let cases = [
-        (vec![], RoutineOutcome::Done, (3, 0)),
-        (vec![GuideAction::Skip], RoutineOutcome::Done, (3, 0)),
-        (vec![GuideAction::Done], RoutineOutcome::Partial, (1, 0)),
-        (vec![], RoutineOutcome::Partial, (1, 0)),
+        (vec![], O::Done, (O::Done, 3, 0)),
+        (vec![GuideAction::Done], O::Done, (O::Done, 3, 0)),
+        (vec![GuideAction::Skip], O::Done, (O::Partial, 2, 1)),
+        (vec![GuideAction::Done], O::Partial, (O::Partial, 1, 0)),
+        (vec![], O::Partial, (O::Partial, 1, 0)),
+        (vec![GuideAction::Skip], O::Partial, (O::Partial, 1, 1)),
         (
             vec![GuideAction::Done, GuideAction::Skip],
-            RoutineOutcome::Partial,
-            (1, 1),
+            O::Partial,
+            (O::Partial, 1, 1),
         ),
         (
             vec![GuideAction::Done, GuideAction::Done],
-            RoutineOutcome::Partial,
-            (2, 0),
+            O::Partial,
+            (O::Partial, 2, 0),
         ),
-        (vec![GuideAction::Skip], RoutineOutcome::None, (0, 1)),
-        (vec![GuideAction::Done], RoutineOutcome::None, (0, 0)),
+        (vec![], O::None, (O::None, 0, 0)),
+        (vec![GuideAction::Skip], O::None, (O::None, 0, 1)),
+        (vec![GuideAction::Done], O::None, (O::Partial, 1, 0)),
+        (vec![], O::Skipped, (O::Skipped, 0, 0)),
+        (vec![GuideAction::Skip], O::Skipped, (O::None, 0, 1)),
+        (vec![GuideAction::Done], O::Skipped, (O::Partial, 1, 0)),
+        (
+            vec![GuideAction::Skip, GuideAction::Done],
+            O::Skipped,
+            (O::Partial, 1, 1),
+        ),
     ];
-    for (answers, outcome, (done, skipped)) in cases {
-        let why = format!("{answers:?} then {outcome:?}");
+    for (answers, report, (outcome, done, skipped)) in cases {
+        let why = format!("{answers:?} then {report:?}");
         let mut h = guided(RoutineVariant::Seated);
         for a in &answers {
             h.g(*a);
@@ -1268,7 +1281,7 @@ fn guide_answered_in_one_go_from_the_menu_records_the_report() {
         assert_eq!(
             h.input(Input::RoutineFinished {
                 offer: None,
-                outcome,
+                outcome: report,
             })
             .outcome,
             InputOutcome::Applied,
@@ -1285,12 +1298,22 @@ fn guide_answered_in_one_go_from_the_menu_records_the_report() {
             "{why}"
         );
         assert_eq!(h.steps().len(), answers.len(), "{why}");
-        // Done and partial restart the movement timer; none keeps it.
+        assert_counts_include_steps(&h, &why);
+        // Done and partial restart the movement timer; none and skipped keep it.
         assert_eq!(
             h.accum(Activity::Movement) == Duration::ZERO,
             outcome.resets_movement_timer(),
             "{why}"
         );
+        // The reminder's chip and dismissals follow the recorded outcome.
+        let chip = match outcome {
+            O::Done => ChipStatus::Done,
+            O::Partial => ChipStatus::Partial,
+            O::None => ChipStatus::NoneRecorded,
+            O::Skipped => ChipStatus::Skipped,
+        };
+        assert_eq!(h.status(Activity::Movement), chip, "{why}");
+        assert_eq!(h.dismissals(), u32::from(outcome == O::Skipped), "{why}");
     }
 
     // Before a variant is chosen there is no routine to record: the report applies to
@@ -1308,11 +1331,29 @@ fn guide_answered_in_one_go_from_the_menu_records_the_report() {
     assert_eq!(q.status(Activity::Movement), ChipStatus::Done);
 }
 
+/// The session's counts include every movement answered in the guide (each has its
+/// `movement.step` event): never fewer done or skipped than the steps recorded.
+fn assert_counts_include_steps(h: &H, why: &str) {
+    for s in h.sessions() {
+        let steps: Vec<_> = h.steps().into_iter().filter(|st| st.0 == s.0).collect();
+        let done = steps.iter().filter(|st| st.3 == StepOutcome::Done).count() as u32;
+        let skipped = steps.len() as u32 - done;
+        assert!(
+            s.4 >= done && s.5 >= skipped,
+            "{why}: {:?} {}/{} with steps {steps:?}",
+            s.3,
+            s.4,
+            s.5
+        );
+    }
+}
+
 #[test]
-fn guide_reported_skipped_after_an_answer_is_none() {
+fn guide_reported_skip_after_an_answer_is_a_stop() {
     // The shrunk trace from `engine_invariants_hold_for_any_trace`: a menu routine, seated,
     // the first movement done, then "skipped" reported in one go. Skip today is over once
-    // a movement is answered, so this is recorded as none, never as a skip with answers.
+    // a movement is answered, so this is a stop: partial, as the movement was done, with
+    // the counts of the movements answered.
     let mut h = H::at(
         ist(20, 9, 40),
         CoachConfig::default(),
@@ -1335,37 +1376,78 @@ fn guide_reported_skipped_after_an_answer_is_none() {
     assert_eq!(h.view().guide, None);
     let steps = h.steps();
     assert_eq!(steps.len(), 1);
-    let s = h.sessions();
+    assert_eq!(steps[0].3, StepOutcome::Done);
     assert_eq!(
-        s,
+        h.sessions(),
         vec![(
             steps[0].0,
             steps[0].1.clone(),
             Some(RoutineVariant::Seated),
-            RoutineOutcome::None,
-            0,
+            RoutineOutcome::Partial,
+            1,
             0
         )]
     );
 
+    // From the menu after a done movement: partial, and the movement timer restarts.
+    let menu = |answer: GuideAction| {
+        let mut m = H::only(true, false, false);
+        m.wait(mins(20));
+        m.input(Input::RoutineStarted);
+        m.g(GuideAction::Variant(RoutineVariant::Standing));
+        m.g(answer);
+        assert_eq!(report(&mut m), InputOutcome::Applied);
+        m
+    };
+    let m = menu(GuideAction::Done);
+    assert_eq!(
+        m.steps().iter().map(|s| s.3).collect::<Vec<_>>(),
+        vec![StepOutcome::Done]
+    );
+    let s = m.sessions();
+    assert_eq!((s[0].3, s[0].4, s[0].5), (RoutineOutcome::Partial, 1, 0));
+    assert_eq!(m.accum(Activity::Movement), Duration::ZERO);
+    assert_eq!(m.status(Activity::Movement), ChipStatus::Partial);
+    assert_eq!(m.dismissals(), 0);
+    assert_eq!(m.count_notices(|n| matches!(n, Notice::Celebrate(_))), 0);
+
     // From the menu after a skipped movement: none, and the movement timer keeps running.
-    let mut m = H::only(true, false, false);
-    m.wait(mins(20));
-    m.input(Input::RoutineStarted);
-    m.g(GuideAction::Variant(RoutineVariant::Standing));
-    m.g(GuideAction::Skip);
-    assert_eq!(report(&mut m), InputOutcome::Applied);
+    let m = menu(GuideAction::Skip);
+    assert_eq!(
+        m.steps().iter().map(|s| s.3).collect::<Vec<_>>(),
+        vec![StepOutcome::Skipped]
+    );
     let s = m.sessions();
     assert_eq!((s[0].3, s[0].4, s[0].5), (RoutineOutcome::None, 0, 1));
     assert_eq!(m.accum(Activity::Movement), mins(20));
     assert_eq!(m.status(Activity::Movement), ChipStatus::NotDue);
+    assert_eq!(m.dismissals(), 0);
 
-    // From a reminder: none recorded, not a dismissal, the timer kept and movement
-    // rescheduled a full cycle later.
+    // From a reminder after a done movement: partial, not a dismissal, the timer restarts.
     let mut r = guided(RoutineVariant::Seated);
     r.g(GuideAction::Done);
+    assert_eq!(report(&mut r), InputOutcome::Applied);
+    assert_eq!(
+        r.steps().iter().map(|s| s.3).collect::<Vec<_>>(),
+        vec![StepOutcome::Done]
+    );
+    let s = r.sessions();
+    assert_eq!((s[0].3, s[0].4, s[0].5), (RoutineOutcome::Partial, 1, 0));
+    assert_eq!(r.status(Activity::Movement), ChipStatus::Partial);
+    assert_eq!(r.dismissals(), 0);
+    assert_eq!(r.accum(Activity::Movement), Duration::ZERO);
+    assert_eq!(r.view().active_routine, None);
+    assert_eq!(r.count_notices(|n| matches!(n, Notice::Celebrate(_))), 0);
+
+    // From a reminder after a skipped movement: none recorded, not a dismissal, the timer
+    // kept and movement rescheduled a full cycle later.
+    let mut r = guided(RoutineVariant::Seated);
     r.g(GuideAction::Skip);
     assert_eq!(report(&mut r), InputOutcome::Applied);
+    assert_eq!(
+        r.steps().iter().map(|s| s.3).collect::<Vec<_>>(),
+        vec![StepOutcome::Skipped]
+    );
     let s = r.sessions();
     assert_eq!((s[0].3, s[0].4, s[0].5), (RoutineOutcome::None, 0, 1));
     assert_eq!(r.status(Activity::Movement), ChipStatus::NoneRecorded);
@@ -1381,6 +1463,64 @@ fn guide_reported_skipped_after_an_answer_is_none() {
     assert_eq!((s[0].3, s[0].4, s[0].5), (RoutineOutcome::Skipped, 0, 0));
     assert_eq!(k.status(Activity::Movement), ChipStatus::Skipped);
     assert_eq!(k.dismissals(), 1);
+}
+
+#[test]
+fn guide_report_from_a_reminder_keeps_the_answered_movements() {
+    use RoutineOutcome as O;
+    // (answer in the guide, report) -> (outcome, done, skipped) recorded, for a routine
+    // started from a reminder. The chip, dismissals, celebration and movement timer follow
+    // the recorded outcome, and the counts include the answered movement.
+    let cases = [
+        (GuideAction::Done, O::Done, (O::Done, 3, 0)),
+        (GuideAction::Done, O::Partial, (O::Partial, 1, 0)),
+        (GuideAction::Done, O::None, (O::Partial, 1, 0)),
+        (GuideAction::Done, O::Skipped, (O::Partial, 1, 0)),
+        (GuideAction::Skip, O::Done, (O::Partial, 2, 1)),
+        (GuideAction::Skip, O::Partial, (O::Partial, 1, 1)),
+        (GuideAction::Skip, O::None, (O::None, 0, 1)),
+        (GuideAction::Skip, O::Skipped, (O::None, 0, 1)),
+    ];
+    for (answer, report, (outcome, done, skipped)) in cases {
+        let why = format!("{answer:?} then {report:?}");
+        let mut r = guided(RoutineVariant::Seated);
+        r.g(answer);
+        assert_eq!(
+            r.input(Input::RoutineFinished {
+                offer: None,
+                outcome: report,
+            })
+            .outcome,
+            InputOutcome::Applied,
+            "{why}"
+        );
+        assert_eq!(r.view().guide, None, "{why}");
+        assert_eq!(r.view().active_routine, None, "{why}");
+        assert_eq!(r.steps().len(), 1, "{why}");
+        let s = r.sessions();
+        assert_eq!(s.len(), 1, "{why}");
+        assert_eq!(s[0].0, r.steps()[0].0, "{why}");
+        assert_eq!((s[0].3, s[0].4, s[0].5), (outcome, done, skipped), "{why}");
+        assert_counts_include_steps(&r, &why);
+        let chip = match outcome {
+            O::Done => ChipStatus::Done,
+            O::Partial => ChipStatus::Partial,
+            _ => ChipStatus::NoneRecorded,
+        };
+        assert_eq!(r.status(Activity::Movement), chip, "{why}");
+        assert_eq!(r.dismissals(), 0, "{why}");
+        assert_eq!(
+            r.count_notices(|n| matches!(n, Notice::Celebrate(_))),
+            usize::from(outcome == O::Done),
+            "{why}"
+        );
+        if outcome.resets_movement_timer() {
+            assert_eq!(r.accum(Activity::Movement), Duration::ZERO, "{why}");
+        } else {
+            assert!(r.accum(Activity::Movement) >= mins(45), "{why}");
+            assert_eq!(next_movement(&mut r).0, hm(11, 30), "{why}");
+        }
+    }
 }
 
 #[test]
@@ -3698,16 +3838,29 @@ mod property {
                         prop_assert!(self.sessions.insert(session_id), "two results");
                         let s = self.steps.get(&session_id).cloned().unwrap_or_default();
                         let recorded = s.len() as u32;
+                        let done_steps =
+                            s.iter().filter(|o| **o == StepOutcome::Done).count() as u32;
                         let (done, skipped) = if report {
                             // Reported in one go from the menu: the counts follow the
-                            // report, never more movements than the routine has.
+                            // report for the movements not answered, never more movements
+                            // than the routine has, and they include every answered one.
                             prop_assert!(recorded <= steps_total);
                             prop_assert!(steps_done + steps_skipped <= steps_total);
+                            prop_assert!(
+                                steps_done >= done_steps && steps_skipped >= recorded - done_steps,
+                                "{:?} with {} done, {} skipped after answers {:?}",
+                                outcome,
+                                steps_done,
+                                steps_skipped,
+                                s
+                            );
                             (steps_done, steps_skipped)
                         } else {
-                            let done = s.iter().filter(|o| **o == StepOutcome::Done).count() as u32;
-                            prop_assert_eq!((steps_done, steps_skipped), (done, recorded - done));
-                            (done, recorded - done)
+                            prop_assert_eq!(
+                                (steps_done, steps_skipped),
+                                (done_steps, recorded - done_steps)
+                            );
+                            (done_steps, recorded - done_steps)
                         };
                         let ok = match outcome {
                             RoutineOutcome::Done => done == steps_total,

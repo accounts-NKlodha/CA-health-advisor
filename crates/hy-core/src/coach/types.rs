@@ -137,14 +137,16 @@ pub enum Input {
     RoutineStarted,
     /// An answer in the movement guide.
     Guide(GuideAction),
-    /// A quick report of a whole routine without the guide's steps (no routine record is
-    /// written). It closes an open guide. `offer` is the reminder it was started from, if
-    /// any.
+    /// A quick report of a whole routine without the guide's steps. It closes an open
+    /// guide; a routine record is written only for a running guide (a skip, or any result
+    /// once its variant is chosen). `offer` is the reminder it was started from, if any.
     RoutineFinished {
         /// The reminder that started the routine, if any.
         offer: Option<Uuid>,
-        /// Done (all steps), partial (some), none (zero) or skipped (skip today). Skipped
-        /// after a movement in the guide was answered is taken as none.
+        /// Done (all steps), partial (some), none (zero) or skipped (skip today). With the
+        /// guide running, movements already answered in it stand and the report covers the
+        /// rest: done after a skipped movement, or none after a done one, is partial; a skip
+        /// after an answer is a stop (partial with a movement done, otherwise none).
         outcome: RoutineOutcome,
     },
     /// "Later" in a movement guide started from a reminder: snoozes movement.

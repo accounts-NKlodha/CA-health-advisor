@@ -22,7 +22,8 @@
 //!   like any routine under a hold ([`crate::coach::CoachView::active_routine`]): the pet
 //!   shows the hold, the routine keeps running, and a click on the pet (or "Show movement
 //!   guide") brings it back at the same movement without lifting the hold. The menu's
-//!   result entries answer it in one go too: the result is recorded from the user's report.
+//!   result entries answer it in one go too: the result is recorded from the user's report
+//!   for the movements not answered yet, keeping those already answered.
 //! - The app restarting, starting a Pomodoro, or 30 minutes without a result ends the
 //!   routine. Movements already answered are kept: the result is recorded from them as a
 //!   stop (D). With nothing answered, nothing is recorded and a routine started from a
@@ -398,27 +399,53 @@ impl Engine {
         }
     }
 
-    /// The outcome a report in one go ([`crate::coach::Input::RoutineFinished`]) stands for.
-    /// Skipping today is offered only before the first movement is answered; once one is,
-    /// a reported skip is a stop with none recorded, as skipping every movement or stopping
-    /// on the first one is: not a dismissal, and the movement timer is not restarted.
+    /// The outcome a report in one go ([`crate::coach::Input::RoutineFinished`]) stands for,
+    /// for the reminder chip, the dismissal count and the movement timer. It is the outcome
+    /// [`Self::report_guide`] records (see [`Self::reported_result`]).
     pub(super) fn reported_outcome(&self, outcome: RoutineOutcome) -> RoutineOutcome {
         match self.s.guide {
-            Some(g)
-                if outcome == RoutineOutcome::Skipped && g.running() && g.done + g.skipped > 0 =>
-            {
-                RoutineOutcome::None
-            }
+            Some(g) if g.running() => self.reported_result(g, outcome).0,
             _ => outcome,
         }
     }
 
+    /// The result a report in one go records for a running guide: the outcome and the
+    /// movements done and skipped. Movements already answered in the guide stand (each has
+    /// its `movement.step` event, which the counts include); the report speaks only for the
+    /// movements not answered yet, and the outcome follows the guide's own rule (every
+    /// movement done is done, some done is partial, none done is none).
+    ///
+    /// - Done: the movements not answered were done; with one skipped this is partial.
+    /// - Partial: some were done; with none done in the guide, one not answered was.
+    /// - None: none of those not answered were done; with one done in the guide this is
+    ///   partial, as stopping after a done movement is.
+    /// - Skipped: skip today, offered only before the first movement is answered. After an
+    ///   answer it is a stop: partial with a movement done, none with only skipped ones (not
+    ///   a dismissal, and none does not restart the movement timer).
+    fn reported_result(&self, g: Guide, outcome: RoutineOutcome) -> (RoutineOutcome, u32, u32) {
+        let total = MOVEMENTS_PER_ROUTINE;
+        let answered = g.done + g.skipped;
+        match outcome {
+            RoutineOutcome::Skipped if answered == 0 => (RoutineOutcome::Skipped, 0, 0),
+            RoutineOutcome::Done if g.skipped == 0 => (RoutineOutcome::Done, total, 0),
+            RoutineOutcome::Done => (
+                RoutineOutcome::Partial,
+                total.saturating_sub(g.skipped),
+                g.skipped,
+            ),
+            RoutineOutcome::Partial => (RoutineOutcome::Partial, g.done.max(1), g.skipped),
+            RoutineOutcome::None | RoutineOutcome::Skipped => {
+                (self.outcome_so_far(g), g.done, g.skipped)
+            }
+        }
+    }
+
     /// A result reported in one go from the menu or tray ([`crate::coach::Input::RoutineFinished`])
-    /// while the guide runs: the routine's result is recorded from the report, with the
-    /// movements already answered as far as the report allows, and the guide closes. A
+    /// while the guide runs: the routine's result is recorded from the report and the
+    /// movements already answered ([`Self::reported_result`]), and the guide closes. A
     /// routine whose variant was not chosen yet has no result record (as a routine started
     /// without the guide).
-    pub(super) fn report_guide(&mut self, ctx: &Context, outcome: RoutineOutcome, out: &mut Out) {
+    pub(super) fn report_guide(&mut self, ctx: &Context, reported: RoutineOutcome, out: &mut Out) {
         let Some(g) = self.s.guide.take() else {
             return;
         };
@@ -429,16 +456,7 @@ impl Engine {
         let Some(r) = routine_for(g.day) else {
             return;
         };
-        let total = MOVEMENTS_PER_ROUTINE;
-        let (done, skipped) = match outcome {
-            RoutineOutcome::Done => (total, 0),
-            RoutineOutcome::Partial => {
-                let done = g.done.clamp(1, total - 1);
-                (done, g.skipped.min(total - done))
-            }
-            RoutineOutcome::None => (0, g.skipped.min(total)),
-            RoutineOutcome::Skipped => (0, 0),
-        };
+        let (outcome, done, skipped) = self.reported_result(g, reported);
         if g.variant.is_none() && outcome != RoutineOutcome::Skipped {
             return;
         }
@@ -451,7 +469,7 @@ impl Engine {
                 outcome,
                 steps_done: done,
                 steps_skipped: skipped,
-                steps_total: total,
+                steps_total: MOVEMENTS_PER_ROUTINE,
             })
             .at(ctx.wall),
         );
