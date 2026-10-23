@@ -1,6 +1,18 @@
 # V1-5 pairing and sync security proposal
 
-Status: **proposal for Codex security sign-off**, revision 1 (23 Oct 2026). No product code. No V1-5 code lands until Codex signs off on the decisions in section 17 and the owner answers those in section 18.
+Status: **proposal for Codex security sign-off**, revision 2 (23 Oct 2026). No product code. The owner answered O1 to O5 on 23 Oct 2026 (section 18). No V1-5 code lands until Codex signs off on the decisions in section 17.
+
+**Revision 2 changes** (revision 1 was reviewed at `2ae43b5`):
+
+| # | Change | Sections | Source |
+| --- | --- | --- | --- |
+| R1 | Administrator confirmation of every new PC is **mandatory** in V1. The "active on pairing" fallback is removed everywhere. Confirmation checks the six words **and** a device check code, read out by the user personally | 0, 3 (TH2, TH3), 4.2, 4.5, 16 (F3, F4), 17 (C14), 18 (O1) | Owner O1 (yes); Codex P1-1 |
+| R2 | A **pending** (unconfirmed) device gets no history, control, upload, receipt or chain access. It learns only its own pairing status and U's alias. The chain, policy, tombstones and first receipt arrive only after confirmation. TH3's residual risk and T-S3/T-S4 are updated | 3 (TH3), 4.2, 4.4, 4.5, 8.1, 9, 14 (T-S3, T-S4) | Codex P1-1 |
+| R3 | `POST /v1/receipt` requires the **device's own token**. "Known or unknown token during a hold" is removed. A bare signed receipt never counts as any device's check-in. A device that cannot authenticate is revoked and later re-pairs with administrator confirmation. New test T-S26; T-S16 and T-S21 extended. The seven-day maximum hold is unchanged | 7.4, 8.1, 9, 14 (T-S16, T-S21, T-S26), 17 (C8, C19) | Codex P1-2 |
+| R4 | The per-PC confirmation of a remote enable is **removed**. A remote enable applies on the user's other PCs with a non-blocking notice. The residual risk is recorded | 0, 3 (TH7), 8.3, 8.5, 13, 14 (T-S17), 16 (F10), 17 (C13), 18 (O2) | Owner O2 (no) |
+| R5 | A newly confirmed PC uploads only from its confirmation date (no backfill of its earlier days into an already-enabled category) | 8.3, 8.6, 14 (T-S17) | Consequence of R4 |
+| R6 | The BitLocker deployment check is dropped. The residual risk is recorded | 3 (TH9), 10, 18 (O3) | Owner O3 (no) |
+| R7 | Full re-pairing on server replacement (no key backup) is decided; the extra 1 to 1.5 build days are accepted | 6.2, 16 (F16), 18 (O4, O5) | Owner O4 (yes), O5 (OK) |
 
 **What this is.** Architecture section 5.2 says Codex must sign off the PC-to-server pairing contract before V1-5 work starts, not at the end of V1-5. This document gives Codex one complete contract to review. It covers the pairing ceremony, transport, credentials, signed head receipts, the server control log, sync rules, the recovery-hold interaction, storage at rest, logging, failure behaviour and tests. It also lists the crates to be used.
 
@@ -26,16 +38,16 @@ Labels: **Arch** = already in the architecture; **New** = added here, needs sign
 | --- | --- | --- |
 | Pairing ceremony | Pinned TLS 1.3 plus an 80-bit single-use secret, both on an admin-issued pairing slip, valid for 24 h. No PAKE | Arch |
 | Slip encoding | `hy1-<host>-<port>-<fp52>-<secret16>-<check4>`, parsed right to left, case-insensitive Crockford base32, with a 4-character checksum so a typo is never reported as a "wrong server" | New (format detail) |
-| Confirming a new device | The device starts **unconfirmed**. The administrator confirms it after the user reads out the six fingerprint words the companion pinned. Until then the device can enable nothing, restore nothing and delete nothing | New, Owner |
+| Confirming a new device | **Mandatory.** The device starts **pending** (unconfirmed). The administrator confirms it after the user personally reads out the six fingerprint words the companion pinned and the device check code. Until then the device gets no history, chain, control, upload or receipt access | New (owner decided O1) |
 | Transport | rustls 0.23, TLS 1.3 only, no 0-RTT, no session resumption, ALPN `hy/1`, HTTP/1.1, and a custom verifier that pins the full SHA-256 of the certificate DER and **delegates signature checking** to the provider | Arch + Clar |
 | Crypto provider | aws-lc-rs, the rustls default. On Windows MSVC it builds with prebuilt NASM objects and needs no CMake | New |
 | Device credential | 256-bit bearer token. User-scope DPAPI with app entropy on the PC; the server stores SHA-256(token) | Arch |
 | Token rotation | No periodic rotation in V1. Re-pairing is the rotation. Clones and restored PCs are detected from echoed receipts (7.4) | Clar, New |
 | Server keys | ECDSA P-256 TLS key plus a **separate Ed25519 head-signing key**. Both are generated at install, protected with machine-scope DPAPI, sit behind a folder ACL, and are never put in backups. The service runs under a virtual service account | Clar, New |
 | Control log | One hash chain per user, a fixed binary encoding, a mirror off the database volume, and a database-side mirror high-water used for startup checks | Arch + Clar |
-| Receipts | Ed25519-signed head {key id, user, seq, chain hash, issued at}. The device checks that every new head **extends** its stored receipt, using the entries in between | Arch + Clar |
-| Sync | Pull, then discard, then push. Strict per-category schemas. User id taken from the token. A remote enable needs confirmation on each PC before that PC uploads | Arch + New |
-| At rest | Server database unencrypted, as disclosed (Q4). Backups encrypted with a DPAPI-protected key. `secure_delete` on | Arch + New |
+| Receipts | Ed25519-signed head {key id, user, seq, chain hash, issued at}. The device checks that every new head **extends** its stored receipt, using the entries in between. A receipt counts as recovery evidence only when presented with the presenting device's own token | Arch + Clar + New |
+| Sync | Pull, then discard, then push. Strict per-category schemas. User id taken from the token. A remote enable applies on the user's other PCs with a non-blocking notice (owner decided O2) | Arch |
+| At rest | Server database unencrypted, as disclosed (Q4). Backups encrypted with a DPAPI-protected key. `secure_delete` on. No BitLocker check (owner decided O3; residual risk in 10) | Arch + New |
 | Logging | Allowlisted fields only, redacting secret newtypes, and canary tests that grep every log for planted secrets and payloads | New |
 
 ---
@@ -109,16 +121,16 @@ Each row gives the threat, what it would achieve, the control, what risk remains
 | # | Threat | Impact if it succeeds | Controls | Residual risk | Tests |
 | --- | --- | --- | --- | --- | --- |
 | TH1 | **Rogue server**: a LAN host that answers on the server's name or IP, or advertises itself | Collects tokens and uploads; feeds false policy | Every connection is accepted only if the certificate DER's full SHA-256 equals the pin, compared in constant time. The pin, not the address, gives trust. The client aborts before any HTTP bytes, so no token or secret is sent. There is no "continue anyway" button | None, unless the server's private key is stolen (TH9) | T-P1, T-P6, T-S1, T-S2 |
-| TH2 | **MITM on first pairing**: the slip is altered in transit (fingerprint and host swapped), and the attacker relays to the real server | Permanent MITM: reads all of U's uploads and holds U's token | (a) The full fingerprint check is authoritative for the pin. (b) **New:** the device stays unconfirmed until the administrator compares the six fingerprint words the companion actually pinned with the server's own six words (4.5). A swapped fingerprint gives different words, so confirmation fails and the device can never enable sharing. (c) The owner chooses the delivery channel (O1) | Faking the 66-bit word prefix needs a 2^66 second-preimage search, which is not a realistic threat from an office insider. With no confirmation step (if the owner declines O1), the delivery channel must be printed or in person | T-S3 |
-| TH3 | **Slip theft**: the attacker reads the slip (for example in chat) and redeems it first | A device paired as U | Single use. The genuine user sees "slip already used" and tells the administrator. The thief's device stays unconfirmed, so it cannot enable, delete, restore history or upload. Unconfirmed devices expire after 7 days. The administrator revokes it | Until it is revoked, the thief's device knows U's alias and that U exists | T-P2, T-S4 |
+| TH2 | **MITM on first pairing**: the slip is altered in transit (fingerprint and host swapped), and the attacker relays to the real server | Permanent MITM: reads all of U's uploads and holds U's token | (a) The full fingerprint check is authoritative for the pin. (b) **New:** the device stays unconfirmed until the administrator compares the six fingerprint words the companion actually pinned with the server's own six words (4.5). A swapped fingerprint gives different words, so confirmation fails and the device never leaves the pending state. (c) Confirmation is **mandatory** in V1 (owner decided O1); there is no path that makes a device active without it. A pending device gets no history, chain, control, upload or receipt access (4.5) | Faking the 66-bit word prefix needs a 2^66 second-preimage search, which is not a realistic threat from an office insider. Because confirmation is mandatory, the slip may be delivered printed, in person or over internal chat | T-S3 |
+| TH3 | **Slip theft or copying**: the attacker sees, copies or takes the slip (for example in chat or on a desk) and redeems it first | A device paired as U | Single use. The genuine user then gets `slip_invalid` and tells the administrator. The thief's device stays **pending**: until confirmed it receives only its own pairing status and U's alias, and every history, state-content, control, upload and receipt request is refused with `device_unconfirmed` (4.5). Confirmation needs U personally to read out, from the PC being paired, the six words and that device's check code, in person or on a call the administrator places to U's known extension (4.2 step 9). A thief who redeemed an unaltered slip shows the right six words but not U's voice or presence, and the check code identifies which pending row is being confirmed. When U reports `slip_invalid`, the administrator rejects every pending device for U. Pending devices are revoked automatically after 7 days | Until it is revoked, the thief's device knows U's alias and that U exists. If the administrator is deceived into confirming the thief's device (impersonation of U), the thief can read U's shared history; that read writes a `history_access` entry, and U's other PCs show the new-device notice and the device list (TH13). The control is procedural and depends on the administrator following 4.2 step 9 | T-P2, T-S4 |
 | TH4 | **Slip guessing** | As TH3 | 80-bit secret; per-IP and global rate limits; 24 h validity; the server stores SHA-256(secret) only | Negligible (2^80 online guesses) | T-S5 |
 | TH5 | **Replay**: of a pairing request, a control operation or an upload | Double pairing; reapplying an old enable; duplicate rows | TLS 1.3 without 0-RTT or resumption, so the network cannot replay. Atomic single-use slip update. Operations are idempotent by `op_id` or `request_id`. An enable must have `base_seq` at or above the latest disable. Uploads are upserted by revision. A replayed old enable returns its original result and never re-applies | None identified | T-P3, T-P5, T-D3, T-S6 |
 | TH6 | **Stolen token** (DPAPI blob plus the user's master key, malware as the user, or a cloned profile) | Reads U's shared history (all of U's devices), uploads false data for that device, disables or deletes | User-scope DPAPI. The token is never logged. Revocation works immediately (nothing is cached). **New:** clone detection by echoed receipts (7.4). U's other devices see every new pairing and revocation, and the companion lists U's devices | The token is a bearer secret until revoked. Anyone able to steal it already has U's local data. Binding to TPM or CNG is deferred (16, F11) | T-S7, T-S13, T-S19 |
-| TH7 | **Rogue paired PC** (a device of U that is malicious) | False uploads under its own origin; deleting or disabling U's sharing; enabling U's sharing on U's other PCs | Uploads are bound to the token's device (origin must equal the device), and reviews show each device separately. Disables and deletions can only reduce sharing, and the change is shown on U's other PCs. **New:** a remote enable never starts uploads on another PC until that PC's user confirms it there (8.3). Receipts must carry a valid server signature, and a forged receipt is refused and logged without starting a discard | A rogue device can delete U's server history (a harm to availability, not confidentiality) | T-S8, T-S17, T-S21 |
+| TH7 | **Rogue paired PC** (a device of U that is malicious) | False uploads under its own origin; deleting or disabling U's sharing; enabling U's sharing on U's other PCs | Uploads are bound to the token's device (origin must equal the device), and reviews show each device separately. Disables and deletions can only reduce sharing, and the change is shown on U's other PCs. A remote enable applies on U's other PCs with a non-blocking notice naming the PC that made it, and any of U's PCs can switch it off (8.3). Every device of U passed mandatory administrator confirmation before it could send any control operation. Receipts must carry a valid server signature and the presenting device's own token, and a forged or unauthenticated receipt is refused and logged without starting a discard | A rogue device can delete U's server history (a harm to availability, not confidentiality). **Owner decided O2 (no per-PC ask):** a rogue but confirmed device of U can switch sharing on, and U's other PCs then upload that category from the enable date until U notices the notice and switches it off. The data goes only to U's own server record, which the administrator can already read (Q4) | T-S8, T-S17, T-S21, T-S26 |
 | TH8 | **Another user's PC, or an unpaired LAN host** | Reading Y's data; denial of service | The user id comes from the token only, never from a path or body. No endpoint returns another user's data or any aggregate. Body, rate and connection limits. The admin page is not on the LAN listener | Denial of service from inside the LAN is limited, not prevented | T-S8, T-S9, T-S22 |
-| TH9 | **Server key theft** (an administrator, or someone who gets the server's DPAPI machine key and the key files) | Can impersonate the server to every PC | Machine-scope DPAPI **plus** a folder ACL (machine scope alone lets any local user decrypt). Virtual service account. Keys never go in backups or the mirror | An OS administrator on the server PC is trusted (B3) | Review item |
+| TH9 | **Server key theft** (an administrator, or someone who gets the server's DPAPI machine key and the key files) | Can impersonate the server to every PC | Machine-scope DPAPI **plus** a folder ACL (machine scope alone lets any local user decrypt). Virtual service account. Keys never go in backups or the mirror | An OS administrator on the server PC is trusted (B3). **Owner decided O3 (no BitLocker check):** someone who takes the server PC or its disk can read it offline, including the unencrypted database and, by recovering the DPAPI machine secrets from that disk, the keys (10) | Review item |
 | TH10 | **PC reimage or restore** (new Windows profile; or an older disk image or file restore) | Lost pairing; old queued records; a lost offline withdrawal; two live copies | Reimage: the DPAPI blob cannot be decrypted, so the app shows "re-pair needed" and keeps working locally. Restore: on reconnect the device pulls, then discards, then pushes (T-D1). **New:** the server sees a lower echoed receipt than the device presented before, so the PC is told to switch every category off until the user confirms each one (7.4) | A withdrawal made offline and lost with the restored disk cannot be recovered. Regression detection then turns sharing off, which is the safe direction | T-S13, T-L7 |
-| TH11 | **Server restore or rollback** (backup restore, file copy, disk rollback) | Resurrected data, permissions, revoked devices or slips | Architecture 5.3 per-user recovery hold with a 7-day maximum. **New:** a startup comparison of database and mirror high-waters detects a rollback even when it happened outside the admin tool (7.3). **New:** a restore voids every outstanding slip. **Clar:** pairing entries carry the token verifier, so devices paired after the snapshot can still authenticate (9) | Covered by architecture 5.3. Global discard on shared-state failures | T-D5 to T-D13, T-J1 to T-J6, T-S15, T-S16 |
+| TH11 | **Server restore or rollback** (backup restore, file copy, disk rollback) | Resurrected data, permissions, revoked devices or slips | Architecture 5.3 per-user recovery hold with a 7-day maximum. **New:** a startup comparison of database and mirror high-waters detects a rollback even when it happened outside the admin tool (7.3). **New:** a restore voids every outstanding slip. **Clar:** pairing entries carry the token verifier, so devices paired after the snapshot can still authenticate (9). **New:** a receipt counts as a device's evidence only when presented with that device's own token (9) | Covered by architecture 5.3. Global discard on shared-state failures | T-D5 to T-D13, T-J1 to T-J6, T-S15, T-S16 |
 | TH12 | **Server fork** (two instances with the same key, for example a copied VM) | Diverging histories; a deletion on one is missing on the other | Devices verify that each new head extends their receipt (7.4). A fork shows as a mismatch: the device stops uploading and reports it | Detected only once a device has seen both branches | T-S14 |
 | TH13 | **Administrator misuse**: pairing a device as U to read U's history, revoking or discarding U, or reading the database | Confidentiality and availability for U | No admin endpoint returns habit data. Every pairing, confirmation and revocation is a control-log entry in U's chain, signed into U's heads, and shown on U's devices with "Devices paired to you" and a new-device notice. The audit log has no habit data | An OS administrator can open the unencrypted database (disclosed, Q4). Misuse is made visible, not prevented | T-S18 |
 | TH14 | **Health-data leaks in logs or diagnostics** | Data leaves the intended store | An allowlist logging schema and redacting newtypes. Payloads, aliases, tokens, secrets and slips are never logged. Canary tests (section 11) | Accidental future fields; canary tests check every build | T-S10 |
@@ -147,15 +159,15 @@ Before any step, the server has been installed (architecture 5.1). At install it
 | Step | Actor | Action | Abort and error conditions |
 | --- | --- | --- | --- |
 | 1 | Administrator | On the admin page, creates user U (display alias only) or picks an existing user, and clicks **New slip**. The server makes a 10-byte secret from the OS CSPRNG, stores `slip_hash = SHA-256("HY-SLIP1" ‖ secret)`, `user_id`, `expires_at = now + 24 h` and `used_at = NULL`, and shows the slip **once**. It can be copied or printed. Printing also shows the six words | A user may have at most 3 outstanding slips. Creating a new slip never voids existing devices |
-| 2 | Administrator to user | Hands over the slip by the channel the owner allows (O1) | n/a |
+| 2 | Administrator to user | Hands over the slip, printed, in person or over internal chat. Any of these is acceptable because confirmation (step 9) is mandatory | n/a |
 | 3 | User | Companion, Settings → Sharing & server → **Pair with the office server** → pastes or types the slip. First the pairing notice is shown, with the operational data disclosure (architecture 6.2, PRD 150) | Local checks: format, length, checksum. A checksum failure says "The slip looks mistyped", never "wrong server" |
 | 4 | Companion | Resolves the host with the OS resolver (DNS, LLMNR, or mDNS `.local` handled by Windows), then the slip's port. Opens TLS 1.3 with the pinning verifier (section 5) set to the slip's fingerprint | Fingerprint mismatch: **abort before any application bytes**, show "This is not the office server named on your slip. Do not continue; tell your administrator", and log only `pin_mismatch` with the first 8 hex characters of each fingerprint. TLS below 1.3, no shared ALPN or a handshake error: abort |
 | 5 | Companion | `POST /v1/pair` with `{protocol: 1, secret, origin_device, device_label, app_version, windows_build}` | n/a |
-| 6 | Server | One `BEGIN IMMEDIATE` transaction (4.4). Returns `{user_id, device_ref, token, head_key, server_fingerprint, state}`, where `state` holds U's current policy, `share_from` dates, tombstones, devices, the chain from seq 1 and the signed head | `slip_invalid`, the same response for unknown, used or expired (timing-equalised), to avoid an oracle. `origin_conflict` if `origin_device` belongs to another user. 429 when rate-limited |
-| 7 | Companion | Checks that `server_fingerprint` equals the pin. Verifies the chain from seq 1 and the head signature with `head_key`. Then, in one local transaction: stores `server_link` (pin, head key, host, port, user id, device ref, DPAPI(token)), stores the head as its receipt, applies the policy (every category stays **off**), merges tombstones (union), and writes a `paired` consent-log entry with the notice version | Any check fails: nothing is stored and the token is discarded. The server-side pairing expires as unconfirmed after 7 days |
-| 8 | Companion | Shows "Paired as `<alias>`. Waiting for your administrator to confirm this PC" and the **six fingerprint words of the pin it holds**, with a device check code | n/a |
-| 9 | User and administrator | The user reads the six words out, in person or by phone. The administrator compares them with the server's six words on the admin page, row for U's new device, and clicks **Confirm**. The server writes a `device_confirmed` control entry in U's chain | Words differ: the administrator clicks **Reject**, which revokes the device, and investigates. A MITM is likely |
-| 10 | Companion | At the next sync it sees `confirmed`. It can now enable categories and restore history | n/a |
+| 6 | Server | One `BEGIN IMMEDIATE` transaction (4.4). Returns only `{user_id, device_ref, alias, token, head_key, server_fingerprint, status: "pending"}`. It returns **no** policy, `share_from` dates, tombstones, device list, chain entries or head: a pending device receives none of U's state (4.5) | `slip_invalid`, the same response for unknown, used or expired (timing-equalised), to avoid an oracle. `origin_conflict` if `origin_device` belongs to another user. `recovery_hold` if U is in recovery hold (9). 429 when rate-limited |
+| 7 | Companion | Checks that `server_fingerprint` equals the pin. Then, in one local transaction: stores `server_link` (pin, head key, host, port, user id, device ref, DPAPI(token), `confirmed = 0`), keeps every category **off**, and writes a `paired` consent-log entry with the notice version. No receipt is stored yet | Any check fails: nothing is stored and the token is discarded. The server-side pairing expires as unconfirmed after 7 days |
+| 8 | Companion | Shows "Paired as `<alias>`. Waiting for your administrator to confirm this PC", the **six fingerprint words of the pin it holds**, and the **device check code**: 4 Crockford base32 characters, the first 20 bits of `SHA-256("HY-DEVCHK1\0" ‖ device_ref)`. The admin page shows the same code on the pending row | n/a |
+| 9 | User and administrator | **Mandatory.** U personally reads out the six words and the check code from the PC being paired, either in person or on a call that the administrator places to U's known extension (never a call or chat message that arrives claiming to be U). The administrator checks that the six words equal the server's six words, that the check code matches the pending row, and that U has not reported `slip_invalid` for this slip. Then the administrator clicks **Confirm**, and the server writes a `device_confirmed` control entry in U's chain. Confirmation is refused while U is in recovery hold | Words differ: the administrator clicks **Reject**, which revokes the device, and investigates (a MITM is likely). Check code matches no pending row, or U reports `slip_invalid`: the administrator rejects every pending device for U and issues a new slip |
+| 10 | Companion | At the next sync it sees `confirmed`. `GET /v1/state` now returns U's chain from seq 1 and the signed head. The companion verifies the chain from genesis and the head signature with `head_key`, and only then, in one local transaction: stores the head as its first receipt, applies the policy, merges tombstones (union) and caches the device list. Any check fails: nothing is applied and the device enters "server history mismatch" (7.4). Categories already on for U start uploading from this PC's confirmation date (8.3) with a one-line notice. It can now enable categories and restore history | n/a |
 
 **Distinct proofs (Arch):**
 
@@ -163,7 +175,7 @@ Before any step, the server has been installed (architecture 5.1). At install it
 - **Client to server, at pairing:** possession of the slip secret, sent once inside that channel.
 - **Client to server, afterwards:** possession of the token, inside a channel pinned the same way.
 
-Every proof is carried by TLS. There is no application-level handshake, HMAC or exporter binding (Codex, 20 Oct). Step 9 is an **administrative check of slip integrity, not a cryptographic proof**. It adds no protocol messages.
+Every proof is carried by TLS. There is no application-level handshake, HMAC or exporter binding (Codex, 20 Oct). Step 9 is an **administrative check of slip integrity and of who holds the new device, not a cryptographic proof**. It adds no protocol messages. The check code is a label that tells pending rows apart; it is not a secret and not a security control by itself.
 
 ### 4.3 Slip format (New: a format detail on top of architecture 5.2)
 
@@ -182,10 +194,10 @@ hy1-<host>-<port>-<fingerprint: 52 base32 chars>-<secret: 16 base32 chars>-<chec
 All in one `BEGIN IMMEDIATE` transaction, in WAL mode with `synchronous=FULL`. Any failure rolls back everything:
 
 1. `UPDATE slips SET used_at=:now WHERE slip_hash=:h AND used_at IS NULL AND expires_at>:now AND voided=0`. It must affect exactly 1 row.
-2. Check that `origin_device` is not bound to a different user. The same user re-pairing the same PC is allowed: a new `device_ref`, and the old device must already be revoked or is revoked here with reason `superseded`.
-3. Make `token` (32 bytes, CSPRNG). Insert the `devices` row {device_ref, user_id, origin_device, label, token_verifier = SHA-256("HY-TOK1" ‖ token), state='unconfirmed', created_at}.
+2. Check that U is not in recovery hold (otherwise roll back and return `recovery_hold`; the slip stays unused). Check that `origin_device` is not bound to a different user. The same user re-pairing the same PC is allowed: a new `device_ref`, and the old device must already be revoked or is revoked here with reason `superseded`.
+3. Make `token` (32 bytes, CSPRNG). Insert the `devices` row {device_ref, user_id, origin_device, label, token_verifier = SHA-256("HY-TOK1" ‖ token), state='unconfirmed' (pending), created_at}.
 4. Append U's control entry `pairing` {device_ref, origin_device, token_verifier} with the next seq and chain hash (7.1).
-5. After commit, append to the mirror and fsync, update `mirror_hwm` (7.3), and only then send the response (architecture 5.3 ordering). If the response is lost, the device retries with the same slip and gets `slip_invalid`. The administrator then sees an unconfirmed device that never checked in and issues a new slip. This is accepted for 3 users, and it is better than making slips reusable.
+5. After commit, append to the mirror and fsync, update `mirror_hwm` (7.3), and only then send the response (architecture 5.3 ordering). If the response is lost, the device retries with the same slip and gets `slip_invalid`. The administrator then sees a pending device that never checked in, rejects it and issues a new slip. This is accepted for 3 users, and it is better than making slips reusable.
 
 **Rate limits:** `/v1/pair` allows 5 attempts per source IP per minute and 30 per hour, and 60 per hour globally. When exceeded, the server answers 429 with `Retry-After`, and the attempt counter is persisted so a restart does not reset it. Failed attempts are counted per IP in the audit log, without the secret.
 
@@ -193,12 +205,11 @@ All in one `BEGIN IMMEDIATE` transaction, in WAL mode with `synchronous=FULL`. A
 
 | Rule | Detail | Label |
 | --- | --- | --- |
-| Unconfirmed device | Can call only `GET /v1/state` (and receives only its own pairing status, U's alias and the head) and `POST /v1/unpair`. Control operations, uploads and history are refused with `device_unconfirmed` | New |
-| Confirmation | A `device_confirmed` entry in U's chain. Shown on the admin page with the confirmation time | New |
-| Expiry | An unconfirmed device is revoked automatically after 7 days (a `revocation` entry with reason `unconfirmed_expired`) | New |
+| Pending (unconfirmed) device | Can call only `GET /v1/state` and `POST /v1/unpair`. `GET /v1/state` returns only `{status: "pending", alias}`: no policy, `share_from`, tombstones, device list, chain entries or head. `GET /v1/history`, `POST /v1/control`, `POST /v1/upload`, `POST /v1/receipt` and `GET /v1/update/manifest` are refused with `device_unconfirmed`, checked before any other processing. A pending device holds no receipt and so can never supply recovery evidence (9) | New |
+| Confirmation | **Mandatory in V1** (owner decided O1). There is no setting, build flag or fallback that makes a device active without it. A `device_confirmed` entry in U's chain, written only by the admin page after 4.2 step 9. Shown on the admin page with the confirmation time | New |
+| Expiry | A pending device is revoked automatically after 7 days (a `revocation` entry with reason `unconfirmed_expired`) | New |
 | New-device notice | U's other confirmed devices show once: "A new PC '`<label>`' was paired to your HealthierYou on `<date>`. Not you? Tell your administrator." The same applies to revocations | New |
 | Device list | Companion → Sharing & server shows "PCs paired to you" (label, paired date, last seen, confirmed or not) from `state.devices` | New |
-| If the owner declines confirmation (O1 alternative) | The architecture's ceremony stands: the device is active at once, and the slip must be delivered printed or in person | Owner |
 
 ---
 
@@ -239,7 +250,7 @@ All in one `BEGIN IMMEDIATE` transaction, in WAL mode with `synchronous=FULL`. A
 ### 6.2 Server key handling
 
 - **Generation:** at install, by the service's first run under its own account. The service runs as the virtual account `NT SERVICE\HealthierYouServer`, not LocalSystem (New). Keys come from aws-lc-rs and the OS CSPRNG.
-- **Keys are never exported, printed, backed up or written to the mirror.** On replacement hardware or an OS reinstall, the keys and the DPAPI machine master key are gone, so architecture 5.3's global discard and re-pair apply. That is consistent with "lost server key resets every user". An escrowed key backup is **not** recommended: a copy of the key lets someone impersonate the server to every PC (O4).
+- **Keys are never exported, printed, backed up or written to the mirror.** On replacement hardware or an OS reinstall, the keys and the DPAPI machine master key are gone, so architecture 5.3's global discard and re-pair apply. That is consistent with "lost server key resets every user". There is no escrowed key backup: a copy of the key would let someone impersonate the server to every PC (owner decided O4: full re-pairing, no key backup).
 - **Separate head-signing key (Clar).** The architecture asks for a "server signature" on heads without naming the key. A separate Ed25519 key keeps the two protocols apart: the TLS key is only ever used by rustls, and the head key only for `HY-HEAD1` messages. Both are "the server key" for the global-discard rule. Alternative: sign heads with the TLS key using a domain-separation prefix, which means one key fewer. This is decision C5.
 
 ### 6.3 Rotation and revocation
@@ -275,7 +286,7 @@ key_id       = SHA-256("HY-KEYID1\0" ‖ head_public_key[32])
 | 1 `policy` | category u8, enabled u8, share_from u32 (0 if off), op_id[16], device_ref[16] | `policy` row |
 | 2 `deletion` | category u8, from u32, to u32, request_id[16], device_ref[16] | Tombstone; delete the matching summaries |
 | 3 `pairing` | device_ref[16], origin_device[16], token_verifier[32] | `devices` row |
-| 4 `device_confirmed` | device_ref[16] | `devices.state='active'` |
+| 4 `device_confirmed` | device_ref[16] | `devices.state='active'`, `confirmed_on` = the entry's date in U's zone |
 | 5 `revocation` | device_ref[16], reason u8 (admin, self, superseded, unconfirmed_expired, recovery_discard) | `devices.state='revoked'` |
 | 6 `recovery_discard` | snapshot_id[16] | Discard U's restored history; categories off (architecture 5.3) |
 | 7 `history_access` | device_ref[16] | Records a history read by a newly confirmed device, so the user can see it |
@@ -320,9 +331,9 @@ A restore done through the admin tool also sets the hold explicitly, and voids a
 | --- | --- |
 | Store | Table `head_receipt` holds one row: the highest valid head the device has received for (server key, user). A trigger refuses a lower seq. Replacing it needs a verified chain extension (next row) |
 | Extension check (Clar) | Sync responses include U's chain entries with seq greater than the device's receipt seq (paged at 500). The device recomputes the hashes from `receipt.chain_hash` up to `head.chain_hash`, then verifies the signature. If both hold, it replaces the receipt and applies the entries' effects (policy, tombstones, device list). If not, it does not apply anything, enters **"server history mismatch"** (uploads stop, local use carries on, the pet shows the sharing-paused badge) and reports the receipt at the next contact. This is what makes "never replace a receipt with a lower seq or a different chain" checkable on the device |
-| Echo (New) | Every authenticated request carries `HY-Receipt`. The server records `max_echoed_seq(device)` |
+| Echo (New) | Every authenticated request from a confirmed device carries `HY-Receipt`. The server records `max_echoed_seq(device)`. An echo is never recovery evidence; only `POST /v1/receipt` is (9) |
 | Regression (New) | The device's echoed receipt for U is valid and lower than `max_echoed_seq(device)` (not during a hold). That means the PC was restored from an older copy or cloned. The server answers `409 device_regressed`. The device switches every category off locally (purging its outbox) and asks the user to confirm each category again. The admin page shows "possible restored or duplicated PC". If it happens again within 24 h, which suggests two live copies, the server revokes that device automatically with reason `superseded`. Echoes reflect only what the device stored, so a lost response never causes a false positive |
-| Head during hold | The device presents its stored receipt first (`POST /v1/receipt`). It receives no new head. Disables and deletions are acknowledged as `accepted_pending_recovery` with no seq, and are kept locally as `pending_recovery` (that state already exists in the schema) (architecture 5.3, T-D11) |
+| Head during hold | The device presents its stored receipt first (`POST /v1/receipt`, authenticated with its own token; 9). It receives no new head. Disables and deletions are acknowledged as `accepted_pending_recovery` with no seq, and are kept locally as `pending_recovery` (that state already exists in the schema) (architecture 5.3, T-D11) |
 
 ---
 
@@ -333,13 +344,13 @@ A restore done through the admin tool also sets the hold explicitly, and voids a
 | Method and path | Auth | Purpose |
 | --- | --- | --- |
 | `POST /v1/pair` | Slip secret | 4.2 and 4.4 |
-| `GET /v1/state?after_seq=` | Token | Policy, `share_from`, tombstones, devices, chain entries after `after_seq`, signed head, hold state, `confirmed`. Unconfirmed devices get pairing status only |
+| `GET /v1/state?after_seq=` | Token | Confirmed: policy, `share_from`, tombstones, devices, chain entries after `after_seq`, signed head, hold state. Pending: `{status: "pending", alias}` only (4.5) |
 | `POST /v1/control` | Token, confirmed | Batch of {enable, disable, delete}, idempotent by op_id or request_id |
 | `POST /v1/upload` | Token, confirmed | Batch of summary rows (8.6) |
 | `GET /v1/history?from=&to=` | Token, confirmed | "Restore from server": U's opted-in daily summaries, keyed by origin, read-only. Writes a `history_access` entry |
-| `POST /v1/receipt` | Token, or a known or unknown token during a hold | Presents a receipt as evidence (architecture 5.3) |
+| `POST /v1/receipt` | Token of the presenting device, confirmed and not revoked; no other form of authentication | Presents that device's stored receipt as **that device's** evidence (architecture 5.3, section 9). A request with no token, an unknown or wrong token, or a revoked or pending device's token is refused before the receipt is parsed for evidence |
 | `POST /v1/unpair` | Token | Self-revocation |
-| `GET /v1/update/manifest` | Token | V1-6 |
+| `GET /v1/update/manifest` | Token, confirmed | V1-6 |
 
 **Common rules for every endpoint:**
 
@@ -367,11 +378,13 @@ Each category has a versioned JSON schema in `hy-core` with `deny_unknown_fields
 | --- | --- | --- |
 | Ordering | A disable is always accepted. An enable needs `base_seq` at or above the seq of the category's latest disable or deletion, otherwise `stale_enable` (architecture 5.3; already implemented in the V1-0 store with durable `local_seq` and stale-response classification) | Arch |
 | `share_from` | Set to the server's local date (in U's zone) when the enable is accepted. No backfill | Arch |
-| **Remote enable** | When device B pulls an enable that device A made, B records it but **does not start building outbox records** until B's user confirms on B: "Sharing of `<category>` was switched on from '`<A label>`' on `<date>`. Share from this PC too?" (with the preview). B's consent log records `notice_shown` and `enabled`. Until then B treats the category as off for uploads. B's decision is local only, unless B's user picks "Switch off everywhere", which sends a disable | New, Owner (UX) |
+| **Remote enable** | **Owner decided O2: no per-PC ask.** When device B pulls, through a verified chain extension (7.4), an enable that device A made, B applies it at once, as the architecture already says (each user's policy is shared across that user's PCs), and starts queuing that category from `share_from` (no backfill). B shows a **non-blocking** one-line notice, "Sharing of `<category>` was switched on from '`<A label>`' on `<date>`", with a link to the preview and a **Switch off** button, which sends an ordinary disable. B's consent log records `remote_enable_applied` with the notice version. The per-PC confirmation of revision 1 is removed | Arch (owner decided O2) |
+| Residual risk of O2 | A confirmed device of U, including a rogue one, can start uploads from U's other PCs without a question on those PCs. Limits: every device of U passed mandatory administrator confirmation (4.5); the notice appears on every PC; any PC can switch it off at once; only the schema fields of that category are sent; the data goes only to U's own server record, which the disclosed audience can already read (Q4) | Owner |
+| Newly confirmed PC (Clar) | A PC confirmed after a category was enabled uploads that category only for local dates on or after its own confirmation date (server date in U's zone), never its earlier days, even when they are after `share_from`. The server enforces this (8.6), with the same notice as a remote enable | Clar |
 | Remote disable | Applied on B at once: purge, off, and a one-line notice | Arch |
-| Unconfirmed device | Cannot send enables (4.5) | New |
+| Pending device | Cannot send any control operation (4.5) | New |
 
-**Local schema effect (8.3):** `sharing_policy.enabled` keeps meaning "the server has accepted it". A new column `local_confirmed` (default 0, set by a local enable or by the remote-enable confirmation) must be 1 for `outbox_guard` to accept a record (section 13).
+**Local schema effect (8.3):** `sharing_policy.enabled` keeps meaning "the server has accepted it". Revision 1's `local_confirmed` column is dropped. `outbox_guard` additionally refuses rows dated before `server_link.confirmed_on` and refuses everything while `server_link.confirmed = 0` (section 13).
 
 ### 8.4 Deletion and tombstone propagation
 
@@ -389,7 +402,7 @@ Each category has a versioned JSON schema in `hy-core` with `deny_unknown_fields
 | Local disable | That category, at once, even offline | Existing trigger `sharing_disable_purges_outbox` |
 | Later `share_from` | Rows before it | Existing trigger |
 | Tombstone (local or pulled) | Rows in its range | Existing trigger |
-| Remote enable not yet confirmed on this PC | Nothing can be queued | New `outbox_guard` condition |
+| Device pending, or a row dated before this PC's confirmation date | Nothing can be queued | New `outbox_guard` condition |
 | Unpair, revocation or `device_regressed` | Everything, and every category off | New, one local transaction |
 | `server history mismatch` | Nothing is purged, but nothing is sent until it is resolved | New |
 
@@ -397,7 +410,7 @@ Each category has a versioned JSON schema in `hy-core` with `deny_unknown_fields
 
 A row {category, origin_device, local_date, revision, payload} is accepted only if **all** of these hold:
 
-- the device is confirmed and not revoked;
+- the device is confirmed and not revoked, and `local_date` is on or after the device's confirmation date (8.3);
 - `origin_device` equals the token device's origin;
 - U is not in recovery hold;
 - the category is enabled now and `local_date ≥ share_from`;
@@ -414,13 +427,15 @@ Otherwise the row is rejected with a per-row reason, and the client discards it,
 
 ## 9. Recovery-hold interaction
 
-Architecture 5.3, revision 5, is unchanged: per-user hold, 7-day maximum (owner, 21 Oct), release only on the mirror plus all of that user's device receipts plus the administrator witness, and per-user or global discard. This proposal adds four points.
+Architecture 5.3, revision 5, is unchanged: per-user hold, 7-day maximum (owner, 21 Oct), release only on the mirror plus all of that user's device receipts plus the administrator witness, and per-user or global discard. Revision 2 does **not** change the seven-day maximum. This proposal adds the points below.
 
 | Point | Contract | Label |
 | --- | --- | --- |
-| Authentication after a restore | `pairing` entries carry `token_verifier`, so replaying the mirror into a restored database recreates the device rows. A device paired after the snapshot can then authenticate with its token and present its receipt. Without this, it would show up as an unknown-token device | Clar |
+| Authentication after a restore | `pairing` entries carry `token_verifier`, and replaying `device_confirmed` and `revocation` entries re-applies their effects (including the confirmation date, from the entry's `at_ms`), so replaying the mirror into a restored database recreates every device row with its verifier and state, including devices paired after the snapshot. Replay finishes before the API opens | Clar |
+| **Receipt evidence needs device possession** | A receipt counts as device D's check-in only when `POST /v1/receipt` authenticates with **D's own token** (its SHA-256 matches D's replayed `token_verifier` in constant time), D is confirmed and not revoked in the replayed chain, the receipt's `user_id` is D's user, and the signature verifies under the stored `key_id`. The evidence is recorded against the device ref taken from the token, never from the request body. A signed receipt submitted with no token, an unknown or wrong token, a revoked or pending device's token, or **another device's token (even one of U's)** never satisfies D's evidence: with no valid token it is refused (`unknown_token`, `device_revoked` or `device_unconfirmed`) and logged; with another valid device E's token it can only ever be E's evidence. A signed head proves the server once issued it, not that D is checking in now | New (Codex P1-2) |
+| Device that cannot authenticate | For example a reimaged PC whose DPAPI blob is gone, or a lost PC. There is no bare-receipt or administrator-attested substitute. The administrator either waits for D (within the seven-day maximum) or revokes D (a disable-class operation, allowed during hold), which removes D from U's evidence set and is recorded in U's chain. After release or per-user discard, the PC re-pairs with a new slip and mandatory administrator confirmation (4.2). Slip redemption for a user in hold is refused (4.4) | New (Codex P1-2) |
 | Slips | Any start from a restored snapshot voids every unused slip (`voided=1`). A slip redeemed after the snapshot cannot be redeemed again | New |
-| Unconfirmed devices | They count as paired for U's evidence: strict, and consistent with "every device that U's chain lists as paired and not revoked". The administrator can revoke one (a disable-class operation, allowed during hold) before confirming U's list | Clar |
+| Pending devices | They count as paired for U's evidence: strict, and consistent with "every device that U's chain lists as paired and not revoked". A pending device holds no receipt and cannot call `POST /v1/receipt`, so it can never supply evidence, and confirmation is refused during hold. The administrator therefore revokes it (disable-class, allowed during hold) before confirming U's list; the user re-pairs after release | Clar |
 | Regression checks during hold | Turned off for U while U is in hold. Pre-restore receipts are expected to be higher than the restored database knows. After release, `max_echoed_seq` is rebuilt from the evidence receipts | Clar |
 | Companion UI | "Server recovering: sharing paused". Local coaching, reviews and export are unaffected (T-D13) | Arch |
 
@@ -433,7 +448,7 @@ Architecture 5.3, revision 5, is unchanged: per-user hold, 7-day maximum (owner,
 | Database (`server.db`) | SQLite (WAL, `synchronous=FULL`, `secure_delete=ON`, `foreign_keys=ON`) in `%ProgramData%\HealthierYou\Server`. The folder ACL allows the service account, Administrators and SYSTEM only. Summary payloads are **unencrypted**, as disclosed in the sharing audience text (Q4). Encrypting them with a key held on the same PC would not stop the administrator and would make the disclosure harder to state | Arch |
 | Backups | Daily and catch-up schedule as in architecture 5.1. Each is `VACUUM INTO` a temporary file, then encrypted with AES-256-GCM (the `.hybackup` container with a raw-key variant: version, nonce, AAD = header plus `snapshot_id` plus a high-water summary) under `backup.key`, then the temporary file is deleted. Reason: backups may sit on a second disk or a share that more people can read. Backups cannot be restored on another machine, which matches "lost server key means global reset" | New |
 | Mirror | Holds no payloads, only random ids (7.1). Off the database volume (architecture 5.3, A1). It is not encrypted, so the recovery path stays inspectable. ACL as for the database where the medium allows | Arch |
-| Disk | Recommend BitLocker on the server PC as a deployment check (A1). Not required: that is the owner's call (O3) | Owner |
+| Disk | **No BitLocker deployment check** (owner decided O3). Residual risk, recorded: anyone who takes the server PC or its disk (theft, disposal, repair) can read it offline. That exposes the unencrypted database (summaries for the retention window, aliases, device labels) and, because DPAPI machine secrets are recoverable from an unencrypted system disk, the TLS, head-signing and backup keys, which would let the holder impersonate the server to every PC and decrypt backups. Mitigations that remain: the 90-day retention, keys never in backups, and the administrator's physical custody of the server PC. If the PC is lost or stolen, treat it as key theft: install new keys and re-pair every PC (O4) | Owner (decided O3) |
 | Data minimisation | The server stores a user alias only (no email, phone or employee number), random ids and the device label | Arch |
 
 ---
@@ -460,7 +475,7 @@ The companion never waits on the server. Every failure leaves local coaching, lo
 | Server unreachable | Backoff from 30 s to 15 min with jitter. Disconnected badge. The outbox is kept and its purge rules still apply offline | n/a |
 | Pin mismatch on a paired PC | Sharing stops. "The office server's identity has changed. Ask your administrator." No override. The token is never sent | n/a |
 | Slip mistyped, used, expired or unknown | Mistyped: caught locally by the checksum. The others: one generic message, "This slip can't be used. Ask for a new one." | One generic `slip_invalid`, with timing equalised |
-| `device_unconfirmed` | "Waiting for your administrator to confirm this PC", with the six words shown | Read-only status |
+| `device_unconfirmed` | "Waiting for your administrator to confirm this PC", with the six words and the device check code shown | Status and alias only (4.5) |
 | `device_revoked` | Local unpair transaction; offer to re-pair | 401 |
 | `stale_enable` | The toggle reverts, with "Switched off on another PC on `<date>`. Switch on again?" | n/a |
 | Recovery hold | "Server recovering: sharing paused". Disables and deletions stay `pending_recovery` | No history, uploads or enables for U; no new head |
@@ -480,11 +495,11 @@ The v1 migration is frozen (PR #5), so these changes go in a new forward migrati
 
 | Change | Reason |
 | --- | --- |
-| `server_link` (one row): `server_key_id`, `pin` BLOB(32), `head_key` BLOB(32), `host`, `port`, `last_ip`, `user_id`, `device_ref`, `token_blob` (DPAPI), `confirmed` 0/1, `paired_at` | Deferred from V1-0 |
-| `head_receipt` (one row): `key_id`, `user_id`, `seq`, `chain_hash`, `issued_at`, `sig`. A trigger refuses any decrease in seq. It is deleted only together with `server_link` | Deferred from V1-0 (architecture 6.1) |
+| `server_link` (one row): `server_key_id`, `pin` BLOB(32), `head_key` BLOB(32), `host`, `port`, `last_ip`, `user_id`, `device_ref`, `token_blob` (DPAPI), `confirmed` 0/1, `confirmed_on` (date, NULL while pending), `paired_at` | Deferred from V1-0 |
+| `head_receipt` (one row): `key_id`, `user_id`, `seq`, `chain_hash`, `issued_at`, `sig`. A trigger refuses any decrease in seq. It is first written only after confirmation (4.2 step 10) and deleted only together with `server_link` | Deferred from V1-0 (architecture 6.1) |
 | `paired_devices` (cache of `state.devices`) | Device list and new-device notices |
-| `sharing_policy.local_confirmed` and an extra `outbox_guard` condition | Remote-enable confirmation (8.3) |
-| `consent_log.kind` gains `paired`, `unpaired`, `remote_enable_confirmed`, `regression_reset`. That needs a **table rebuild**, because SQLite cannot change a CHECK constraint, and the rebuild must re-create the append-only trigger and keep the rows | Consent record |
+| Extra `outbox_guard` conditions: refuse while `server_link.confirmed = 0` and for dates before `server_link.confirmed_on` (revision 1's `sharing_policy.local_confirmed` is dropped) | Pending devices and newly confirmed PCs (4.5, 8.3) |
+| `consent_log.kind` gains `paired`, `unpaired`, `remote_enable_applied`, `regression_reset`. That needs a **table rebuild**, because SQLite cannot change a CHECK constraint, and the rebuild must re-create the append-only trigger and keep the rows | Consent record |
 | Tombstones pulled from the server inserted as `acknowledged` | Propagation (8.4) |
 | Backup (V1-4) keeps excluding `server_link`, `head_receipt` and `paired_devices` | Pairing never travels in a backup (PR #14) |
 
@@ -507,8 +522,8 @@ All run against the real server binary on Linux CI, and the Windows-specific ite
 | --- | --- | --- |
 | T-S1 | Pin enforcement on **every** connection: pairing, sync, history, receipt and manifest each go to a test server with a different self-signed certificate. A raw TCP capture on the test server records the bytes it receives | The handshake fails, and the server receives **no application data bytes**, so no `Authorization` header and no secret |
 | T-S2 | Certificate replay: the test server presents the genuine pinned certificate DER but holds a different private key | The handshake fails (the signature check is delegated). Also a unit test that the verifier returns an error from `verify_tls12_signature` |
-| T-S3 | Tampered slip, with a relay MITM: the attacker's slip carries the attacker's fingerprint, and the attacker relays to the real server | Pairing completes on the attacker's path, but the six words on the companion differ from the admin page's. The device stays unconfirmed, and enable, history and upload are all refused by the real server |
-| T-S4 | Stolen slip redeemed first | The genuine user gets `slip_invalid`. The thief's device cannot enable, delete, upload or read history. It is auto-revoked at day 7 (injected clock) |
+| T-S3 | Tampered slip, with a relay MITM: the attacker's slip carries the attacker's fingerprint, and the attacker relays to the real server | Pairing completes on the attacker's path, but the six words on the companion differ from the admin page's. The device stays pending. The real server refuses history, control, upload and receipt requests with `device_unconfirmed`, and `GET /v1/state` returns only status and alias (no chain, policy, tombstones, devices or head) |
+| T-S4 | Stolen or copied slip redeemed first (unaltered slip, so the thief's six words are correct) | The genuine user gets `slip_invalid`. While pending, the thief's device gets `device_unconfirmed` on `GET /v1/history`, every `POST /v1/control` kind (enable, disable, delete), `POST /v1/upload`, `POST /v1/receipt` and the manifest, and `GET /v1/state` returns only `{status, alias}`; a network capture shows no summary row, chain entry, tombstone or head reaching it. No configuration, build flag or admin action other than **Confirm** makes it active (the test searches the settings and admin API for any such path). Rejecting it from the admin page revokes it; otherwise it is auto-revoked at day 7 (injected clock). After a confirmation, the `device_confirmed` entry appears in U's chain and U's other PC shows the new-device notice |
 | T-S5 | Slip guessing: 1,000 random secrets from one IP and from 20 IPs | 429 after the limits. Counters survive a restart. A genuine slip still works after the window. Response timing does not tell unknown, used and expired apart (statistical check, generous bound) |
 | T-S6 | Replay: resend a captured `/v1/control` enable after a later disable; resend a pairing body; resend an upload with the same revision | Original results only. No enable re-applied, no second device, no duplicate row |
 | T-S7 | Token misuse: wrong, truncated, revoked, other-user and empty tokens; the token in a query string | 401 with the right enum. A revoked token gets `device_revoked`. Nothing else leaks |
@@ -520,16 +535,17 @@ All run against the real server binary on Linux CI, and the Windows-specific ite
 | T-S13 | Regression and clone: restore an older copy of a paired companion's database and reconnect; then run two copies alternately | First: `device_regressed`, every category off locally, outbox empty, admin flag. A repeat within 24 h: the device is revoked |
 | T-S14 | Server fork: two server instances from one key and database copy diverge (a deletion on one). A device syncs with both in turn | The device detects the extension mismatch, stops uploading, does not apply the other branch's policy, and reports its receipt |
 | T-S15 | Restore voids slips: snapshot, then redeem slip S, then restore the snapshot, then redeem S again | `slip_invalid` |
-| T-S16 | Post-snapshot pairing after a restore: device D paired after the snapshot | D authenticates after mirror replay and its receipt counts as evidence. Without the `token_verifier` in the entry (a negative test with a fault-injected build), D would be unknown, which proves the field is needed |
-| T-S17 | Remote enable: A enables hydration; B syncs | B uploads nothing until B's user confirms. The consent logs show it on both PCs. A network capture from B shows no hydration payload before confirmation |
+| T-S16 | Post-snapshot pairing after a restore: device D paired after the snapshot | D authenticates with its own token after mirror replay, and its receipt counts as D's evidence. Without the `token_verifier` in the entry (a negative test with a fault-injected build), D would be unknown and its receipt would not count, which proves the field is needed |
+| T-S17 | Remote enable (owner decided O2): A enables hydration; B syncs. Then C is paired and confirmed 10 days later, holding local hydration rows from before its confirmation | B applies the enable only after a verified chain extension, shows the non-blocking notice, records `remote_enable_applied`, and uploads hydration rows dated on or after `share_from` only. **Switch off** on B sends a disable that A then applies. C uploads only rows dated on or after its confirmation date; the server rejects an earlier row from C even when it is after `share_from`. A forged policy entry (bad chain extension) starts nothing on B |
 | T-S18 | Administrator visibility: the administrator pairs a second device for U and confirms it | U's existing PC shows the new-device notice and the device list. The `pairing`, `device_confirmed` and `history_access` entries are in U's chain under signed heads |
 | T-S19 | Revocation propagation: revoke B while B is offline with a queued outbox | On reconnect: 401 `device_revoked`, local unpair transaction, outbox empty. The network capture shows no payload after the 401 |
 | T-S20 | Mirror tamper: flip one byte; truncate in the middle; reorder two lines; use another install's mirror | Each takes the global discard path at startup. A torn final line alone is repaired (T-J4) |
-| T-S21 | Forged receipts: bad signature, wrong `key_id`, another user's receipt, a valid receipt replayed by a different user's device | Refused and logged. No discard is started. Only genuine signed receipts count (architecture 5.3) |
+| T-S21 | Forged receipts: bad signature, wrong `key_id`, another user's receipt, a valid receipt replayed by a different user's device | Refused and logged. No discard is started. Only genuine signed receipts presented with the presenting device's own token count (architecture 5.3, section 9). See also T-S26 |
 | T-S22 | Denial of service: 200 idle connections, a slowloris header drip, a 10 MB body, 1,000 requests a second from one IP | Limits apply. A genuine client still syncs within 5 s. Memory stays within budget |
 | T-S23 | Network capture (pktmon, architecture 11): before pairing, nothing; paired with every category off, operational data only; each category on, only its schema fields; after a disable, nothing for that category | As stated |
 | T-S24 | Rogue server by mDNS or name: a second host answers to the server's name | Pin mismatch, abort, message shown; the token is never sent |
 | T-S25 | Fuzzing (cargo-fuzz, Linux CI, time-boxed): slip parser, control-entry decoder and chain verifier, head and receipt decoder, upload JSON | No panics. Property tests: any single-bit change to an entry or head fails verification |
+| T-S26 | Receipt possession during hold (Codex P1-2). U has confirmed devices D and E, and D was paired after the snapshot. Restore the snapshot so U enters hold, and replay the mirror. Then submit D's genuine, validly signed receipt (a) with no `Authorization` header, (b) with a wrong or truncated token, (c) with an unknown well-formed token, (d) with E's valid token, (e) with a revoked device's token, (f) with a pending device's token, and (g) with D's own token, plus a variant that puts D's device ref in the body while using E's token | (a) to (f) and the body variant: D's evidence stays **missing** on the admin page, and U's release stays blocked (the release action refuses). (a) to (c) get `unknown_token`, (e) `device_revoked` and (f) `device_unconfirmed`, and each is logged. (d) is recorded, at most, as E's evidence, never as D's. Only (g) records D's evidence. Revoking an absent D during hold removes it from the evidence set and is a `revocation` entry. No case changes the seven-day maximum, and none starts a discard |
 
 **Evidence for Codex at implementation review** (architecture 5.2 implementation gates):
 
@@ -578,20 +594,21 @@ None of these silently changes the architecture. Each one is either a reading of
 | --- | --- | --- | --- |
 | F1 | Slip `hy1-<host>-<port>-<fp>-<secret>` | Same fields, parsed right to left (hyphenated host names are otherwise ambiguous), plus a 4-character typo checksum | New (format) |
 | F2 | "Finds the host by mDNS or host name" | Uses the OS resolver, which already handles `.local` on Windows, plus the last-known IP and a manual address. No application mDNS listener on clients, to avoid firewall prompts | Clar |
-| F3 | Six words are "an aid for humans" | They stay auxiliary to the pin. **Also** used in an administrator confirmation step that checks slip integrity (4.5). The full fingerprint stays the only authoritative pin check | New, Owner |
-| F4 | The device is active as soon as it pairs | The device starts unconfirmed, and enable, delete, history and upload wait for confirmation | New, Owner |
+| F3 | Six words are "an aid for humans" | They stay auxiliary to the pin. **Also** used, with a device check code, in a mandatory administrator confirmation step that checks slip integrity and who holds the device (4.2 step 9, 4.5). The full fingerprint stays the only authoritative pin check | New (owner decided O1) |
+| F4 | The device is active as soon as it pairs | The device starts pending. Every history, state-content, control, upload and receipt request waits for confirmation, which is mandatory in V1; there is no active-on-pairing fallback | New (owner decided O1; Codex P1-1) |
 | F5 | "Server signature" on heads | A separate Ed25519 head key with a fixed binary signing format | Clar (C5) |
 | F6 | "Never replaces its receipt with a lower seq or a different chain" | The device verifies chain extensions using the entries in between, and stops on a mismatch | Clar |
 | F7 | Static token; nothing said about rotation | No periodic rotation in V1. Regression and clone detection from echoed receipts | Clar, New |
 | F8 | Pairings are control operations | `pairing` entries carry `token_verifier`, so post-snapshot devices authenticate after replay | Clar |
 | F9 | Any restore enters hold | Also detected automatically at startup (database vs mirror high-water). A restore voids outstanding slips | New |
-| F10 | Each user's policy is shared across that user's PCs | A remote enable needs confirmation on each PC before that PC uploads | New, Owner (UX) |
+| F10 | Each user's policy is shared across that user's PCs | **Withdrawn in revision 2** (owner decided O2): the architecture's text stands. A remote enable applies on every PC with a non-blocking notice. Only addition: a newly confirmed PC uploads from its confirmation date, not earlier (8.3) | Arch, plus Clar |
 | F11 | Server: machine-scope DPAPI | Kept, plus a folder ACL and a virtual service account, because machine scope alone lets any local user decrypt. TPM or CNG binding of device credentials is deferred | Clar |
 | F12 | Shared summaries unencrypted (Q4) | Unchanged for the database. **Backups encrypted** with a machine-bound key | New |
 | F13 | "The server keeps data no longer than the device" | Server daily summaries pruned at 90 days; no monthly rows on the server | Clar |
 | F14 | Admin page localhost and Argon2id | Plus a separate listener, CSRF protection, a `Host` and `Origin` allowlist and backoff | Clar |
 | F15 | `consent_log` kinds fixed in v1 | Migration 0005 rebuilds the table for new kinds | Clar (implementation) |
-| F16 | V1-5 is 3.5 to 5 build days | The additions add about 1 to 1.5 days (confirmation, extension checks, regression, backup encryption, hardening, T-S tests). Suggested split into V1-5a (server core, pairing, transport, sync) and V1-5b (control log, mirror, receipts, hold, backup). Scheduling is the owner's decision | Owner |
+| F16 | V1-5 is 3.5 to 5 build days | The additions add about 1 to 1.5 days (confirmation, extension checks, regression, backup encryption, hardening, T-S tests). Suggested split into V1-5a (server core, pairing, transport, sync) and V1-5b (control log, mirror, receipts, hold, backup) | Owner (decided O5: accepted) |
+| F17 | Release needs "all of that user's device receipts" | A receipt counts as a device's evidence only when presented with that device's own token; a device that cannot authenticate is revoked and re-pairs with confirmation (9) | Clar, New (Codex P1-2) |
 
 Document location: the architecture and PRD 0.3 live on the architecture branch (PR #3), not on `main`. This document links to them by name. The owner may want them merged to `main` alongside this document, so the V1-5 baseline is in one place.
 
@@ -599,7 +616,7 @@ Document location: the architecture and PRD 0.3 live on the architecture branch 
 
 ## 17. Decisions needing Codex sign-off
 
-Each item asks for **accept**, **change** or **reject**. V1-5 starts only when every item is accepted or changed.
+Each item asks for **accept**, **change** or **reject**. V1-5 starts only when every item is accepted or changed. Items marked **(rev 2)** changed in revision 2 and are the scope of the re-review; the others are unchanged from revision 1.
 
 | # | Decision | Recommended |
 | --- | --- | --- |
@@ -610,31 +627,32 @@ Each item asks for **accept**, **change** or **reject**. V1-5 starts only when e
 | C5 | A separate Ed25519 head-signing key, delivered at pairing over the pinned channel; the `HY-HEAD1` binary message (6.2, 7.2) | Accept (or sign with the TLS key under a domain prefix) |
 | C6 | Control-entry encoding and per-user chain; mirror format; `mirror_hwm` before acknowledgement; the startup comparison table (7.1, 7.3) | Accept |
 | C7 | Device-side extension verification and the "server history mismatch" state (7.4) | Accept |
-| C8 | `token_verifier` in `pairing` entries; restore voids slips; unconfirmed devices count as paired in evidence (9) | Accept |
+| C8 | `token_verifier` in `pairing` entries; restore voids slips; pending devices count as paired in evidence, hold no receipt and must be revoked during hold (9) **(rev 2)** | Accept |
 | C9 | No periodic token rotation in V1; regression and clone detection by echoed receipt; revocation and self-unpair semantics (6.3, 7.4) | Accept |
 | C10 | Secret handling: client DPAPI user scope with entropy; server machine scope plus ACL plus virtual account; `Secret<T>` with zeroize; keys never backed up (6) | Accept |
 | C11 | Admin page hardening (TH15, F14) | Accept |
 | C12 | Upload validation rules and per-category strict schemas (8.2, 8.6) | Accept |
-| C13 | Remote enable needs confirmation on each PC (8.3), subject to the owner's UX answer (O2) | Accept |
-| C14 | Device confirmation gate (4.5), subject to the owner's answer (O1). Confirms the six words are used only as a slip-integrity check and never replace the full pin | Accept |
+| C13 | Remote enable applies on every PC of the user with a non-blocking notice, as the architecture says; the per-PC confirmation is removed (owner decided O2); a newly confirmed PC uploads only from its confirmation date; residual risk accepted as stated in TH7 and 8.3 **(rev 2)** | Accept |
+| C14 | **Mandatory** device confirmation (owner decided O1), with no active-on-pairing fallback. A pending device gets only its status and alias: no history, chain, policy, control, upload or receipt access. Confirmation uses the six words plus the device check code, read out by the user personally (4.2 step 9, 4.5). The six words never replace the full pin (TH3, T-S3, T-S4) **(rev 2)** | Accept |
 | C15 | At rest: database unencrypted (as disclosed), backups encrypted, `secure_delete` on (10) | Accept |
 | C16 | Logging allowlist and canary tests (11, T-S10) | Accept |
 | C17 | The test plan (14) is sufficient as the implementation evidence named in architecture 5.2 | Accept |
 | C18 | Crate list (15), with `cargo-deny` added in V1-5 | Accept |
+| C19 | Recovery receipts need authenticated device possession: `POST /v1/receipt` only with the presenting device's own token; evidence is recorded against the token's device; no bare-receipt path; a device that cannot authenticate is revoked and re-pairs with confirmation; the seven-day maximum is unchanged (8.1, 9, T-S21, T-S26) **(rev 2)** | Accept |
 
 ---
 
-## 18. Decisions needing the owner
+## 18. Owner decisions
 
-These are product or operational choices, not security mechanisms. Each has a recommended answer, and nothing is assumed until the owner answers.
+These are product or operational choices, not security mechanisms. The owner answered all five on 23 Oct 2026. Codex's sign-off (section 17) is still required on the security contract that results.
 
-| # | Question | Options | Recommended |
+| # | Question | Decision (23 Oct 2026, the owner) | Effect in this document |
 | --- | --- | --- | --- |
-| O1 | **Confirming new PCs.** After pairing, should the administrator confirm each new PC by comparing six words the employee reads out (in person or by phone) before that PC can share or restore anything? | (a) Yes: slips may then be sent over internal chat. (b) No: slips must be handed over printed or in person, and a PC is active as soon as it pairs | (a). It catches a tampered or stolen slip and costs about a minute per PC |
-| O2 | **Several PCs per person.** When sharing is switched on from one PC, should each of that person's other PCs ask before sharing from it too? | (a) Ask on each PC. (b) Apply to every PC automatically | (a). Consent is shown on the PC that will send the data |
-| O3 | **Server PC disk encryption.** Ask for BitLocker on the server PC as a deployment check? | Yes, or no (record as a known risk) | Yes, if the PC supports it. Not a blocker |
-| O4 | **Replacement server hardware.** If the server PC is replaced or reinstalled, every PC re-pairs and shared history restarts. A key backup file would avoid that, but anyone who copied it could impersonate the server | (a) Re-pair (no key backup). (b) A passphrase-protected key backup held by the administrator | (a). The 7-day hold and per-user rules stay as decided on 21 Oct |
-| O5 | **Schedule.** The additions add about 1 to 1.5 build days to V1-5, which may be split into two PRs (F16) | Accept, or drop items (for example O1 and O2) | Accept |
+| O1 | **Confirming new PCs.** Should the administrator confirm each new PC (six words and device check code read out by the employee, in person or by phone) before that PC can share or restore anything? | **Decided: yes.** | Confirmation is mandatory in V1, with no "active on pairing" fallback (4.2, 4.5, TH2, TH3, F3, F4, C14). Slips may be delivered printed, in person or over internal chat |
+| O2 | **Several PCs per person.** When sharing is switched on from one PC, should each of that person's other PCs ask before sharing from it too? | **Decided: no.** | A remote enable applies on the person's other PCs with a non-blocking notice and a **Switch off** button (8.3). Residual risk recorded in TH7 and 8.3; administrator confirmation still gates every new device (C13) |
+| O3 | **Server PC disk encryption.** Ask for BitLocker on the server PC as a deployment check? | **Decided: no.** | No deployment check. Residual risk recorded in 10 and TH9 |
+| O4 | **Replacement server hardware.** If the server PC is replaced or reinstalled, every PC re-pairs and shared history restarts, or there is a key backup file that anyone who copied it could use to impersonate the server | **Decided: full re-pairing, no key backup.** | 6.2 unchanged in substance. The 7-day hold and per-user rules stay as decided on 21 Oct |
+| O5 | **Schedule.** The additions add about 1 to 1.5 build days to V1-5, which may be split into two PRs (F16) | **Decided: accepted.** | F16 |
 | (existing) | Q3: a named firm contact and confirmed notice wording before the pilot. Q4: the disclosure-only default stays. A1: mirror location and server deployment checks on install day | n/a | Unchanged |
 
 The 7-day maximum hold (Q9) is already decided and is not reopened here.
@@ -647,4 +665,4 @@ The 7-day maximum hold (Q9) is already decided and is not reopened here.
 
 ## Appendix B. Domain-separation strings
 
-`HY-SLIP1`, `HY-SLIPCHK1`, `HY-TOK1`, `HY-KEYID1\0`, `HY-CL1\0`, `HY-CL1-GENESIS\0`, `HY-HEAD1\0`, ALPN `hy/1`, SNI `hy-server.invalid`, DPAPI entropy `HealthierYou/server_link/v1`. Every one is versioned, so a later format change cannot be confused with v1.
+`HY-SLIP1`, `HY-SLIPCHK1`, `HY-DEVCHK1\0`, `HY-TOK1`, `HY-KEYID1\0`, `HY-CL1\0`, `HY-CL1-GENESIS\0`, `HY-HEAD1\0`, ALPN `hy/1`, SNI `hy-server.invalid`, DPAPI entropy `HealthierYou/server_link/v1`. Every one is versioned, so a later format change cannot be confused with v1.
