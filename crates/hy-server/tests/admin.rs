@@ -385,7 +385,7 @@ async fn the_page_shows_the_hold_and_takes_the_witness_only_with_csrf() {
     assert!(page.contains("Recovery hold"));
     assert!(page.contains("Control-log mirror: open"));
     // The restored database predates its own backup record, and says so honestly.
-    assert!(page.contains("Last backup: no backup recorded in this restored copy"));
+    assert!(page.contains("Last backup: No backup recorded in this restored copy"));
     assert!(
         page.contains("permanently unrecoverable"),
         "the backup-key warning is shown"

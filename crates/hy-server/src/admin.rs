@@ -523,7 +523,7 @@ async fn dashboard(State(st): State<AdminState>, headers: HeaderMap) -> Response
         Some(at) => when(at),
         // A restored database was copied before its own backup was recorded.
         None if crate::backup::is_restored_copy(s) => {
-            "no backup recorded in this restored copy".to_owned()
+            "No backup recorded in this restored copy".to_owned()
         }
         None => "none yet".to_owned(),
     };
