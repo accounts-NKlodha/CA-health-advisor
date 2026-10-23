@@ -46,6 +46,7 @@ const COMMANDS: &[&str] = &[
     "server_refresh",
     "server_unpair",
     "server_notice_seen",
+    "server_set_address",
 ];
 
 fn main() {
