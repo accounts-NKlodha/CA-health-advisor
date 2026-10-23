@@ -87,6 +87,36 @@ pub struct BubbleFigure {
 /// Most numbered steps in one bubble.
 pub const MAX_BUBBLE_STEPS: usize = 5;
 
+/// A line of a list in a bubble with its own actions (the water panel's entries, each
+/// with Edit and Remove, and its amount chooser).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BubbleRow {
+    /// For example "09:50 - 250 ml".
+    pub text: String,
+    /// The row's actions; their ids are unique across the whole bubble.
+    #[serde(default)]
+    pub actions: Vec<BubbleAction>,
+}
+
+/// A progress bar with its value in words (the water panel's total against the user's
+/// own goal). The page draws a native progress element, so nothing depends on colour.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BubbleProgress {
+    /// The value, for example 750.
+    pub value: u32,
+    /// The full bar, for example 2000. At least 1; a value above it shows a full bar.
+    pub max: u32,
+    /// The value in words, for example "750 of 2000 ml".
+    pub label: String,
+}
+
+/// Most rows in one bubble.
+pub const MAX_BUBBLE_ROWS: usize = 24;
+/// Most actions in one row.
+pub const MAX_ROW_ACTIONS: usize = 4;
+
 /// One bubble (the engine's reminder card, offer or notice).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -117,6 +147,12 @@ pub struct Bubble {
     /// panel stays open instead of closing.
     #[serde(default)]
     pub continues: bool,
+    /// A progress bar under the title.
+    #[serde(default)]
+    pub progress: Option<BubbleProgress>,
+    /// A list of rows with their own actions, after the lines.
+    #[serde(default)]
+    pub rows: Vec<BubbleRow>,
 }
 
 /// Most actions in one bubble.
@@ -133,6 +169,15 @@ impl Bubble {
             title: title.to_owned(),
             ..Self::default()
         }
+    }
+
+    /// Whether the bubble offers the action `id`, in its action row or in one of its rows.
+    #[must_use]
+    pub fn has_action(&self, id: &str) -> bool {
+        self.actions
+            .iter()
+            .chain(self.rows.iter().flat_map(|r| &r.actions))
+            .any(|a| a.id == id)
     }
 
     /// Check the bubble's limits.
@@ -156,11 +201,35 @@ impl Bubble {
         if self.actions.len() > MAX_BUBBLE_ACTIONS {
             return Err(format!("at most {MAX_BUBBLE_ACTIONS} actions"));
         }
+        if self.rows.len() > MAX_BUBBLE_ROWS {
+            return Err(format!("at most {MAX_BUBBLE_ROWS} rows"));
+        }
+        if self
+            .rows
+            .iter()
+            .any(|r| !short(&r.text, 120) || r.actions.len() > MAX_ROW_ACTIONS)
+        {
+            return Err(format!(
+                "rows need text of 1 to 120 characters and at most {MAX_ROW_ACTIONS} actions"
+            ));
+        }
         let mut ids = BTreeSet::new();
-        for a in &self.actions {
+        for a in self
+            .actions
+            .iter()
+            .chain(self.rows.iter().flat_map(|r| &r.actions))
+        {
             if !short(&a.id, 64) || !short(&a.label, 40) || !ids.insert(a.id.as_str()) {
                 return Err("actions need unique ids and labels of 1 to 40 characters".into());
             }
+        }
+        if let Some(p) = &self.progress
+            && (p.max == 0 || !short(&p.label, 80))
+        {
+            return Err(
+                "a progress bar needs a maximum of at least 1 and a label of 1 to 80 characters"
+                    .into(),
+            );
         }
         if self.steps.len() > MAX_BUBBLE_STEPS || !self.steps.iter().all(|s| short(s, 160)) {
             return Err(format!(
@@ -196,6 +265,10 @@ pub struct MenuAction {
     /// Also list it in the tray menu (for example "Pause...").
     #[serde(default)]
     pub in_tray: bool,
+    /// It opens a card (for example the water confirmation), so the keyboard panel stays
+    /// open and shows that card instead of closing.
+    #[serde(default)]
+    pub continues: bool,
 }
 
 /// Why a bubble closed.
@@ -457,9 +530,7 @@ impl ShellModel {
     /// replaces it.
     pub fn bubble_action(&self, bubble_id: &str, action_id: &str) -> Vec<Effect> {
         match &self.open {
-            Open::Bubble { bubble }
-                if bubble.id == bubble_id && bubble.actions.iter().any(|a| a.id == action_id) =>
-            {
+            Open::Bubble { bubble } if bubble.id == bubble_id && bubble.has_action(action_id) => {
                 vec![Effect::Emit(ShellEvent::BubbleAction {
                     bubble_id: bubble_id.to_owned(),
                     action_id: action_id.to_owned(),

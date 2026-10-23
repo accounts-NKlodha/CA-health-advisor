@@ -5,12 +5,56 @@
 //! [`WATER_BEHIND_ML`] below the amount expected by now. A daily total below the goal is
 //! not, by itself, "behind". Once the goal is reached, hydration reminders pause; manual
 //! logging stays available and nothing encourages drinking past the goal (WAT-01).
+//!
+//! The water panel (wireframe B3) lists today's [`WaterEntry`]s and logs, corrects and
+//! removes them. Its buttons use the fixed serving sizes and steps below.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use super::config::WATER_BEHIND_ML;
+use crate::schema::MAX_WATER_ENTRY_ML;
 use crate::time::{UserZone, WorkSchedule};
+
+/// The serving buttons (wireframe B3; the prototype's defaults). Choosing other sizes is
+/// part of the Water settings window (W5), a later slice.
+pub const WATER_SERVINGS_ML: [u32; 3] = [150, 250, 500];
+
+/// The serving logged by "Log 250 ml" on a water reminder and "+250 ml water" on the pet
+/// menu, and where the panel's other amount starts.
+pub const WATER_DEFAULT_SERVING_ML: u32 = 250;
+
+/// One press of "-50 ml" or "+50 ml" on an amount in the water panel (D).
+pub const WATER_STEP_ML: u32 = 50;
+
+/// The amounts the panel's buttons can set (D). The pet window never takes keyboard focus,
+/// so amounts are chosen with buttons; the store accepts any amount from 1 to 2000 ml.
+pub const WATER_PANEL_RANGE_ML: std::ops::RangeInclusive<u32> = WATER_STEP_ML..=MAX_WATER_ENTRY_ML;
+
+/// `ml` one step up or down, kept inside [`WATER_PANEL_RANGE_ML`].
+#[must_use]
+pub fn step_amount(ml: u32, up: bool) -> u32 {
+    let next = if up {
+        ml.saturating_add(WATER_STEP_ML)
+    } else {
+        ml.saturating_sub(WATER_STEP_ML)
+    };
+    next.clamp(*WATER_PANEL_RANGE_ML.start(), *WATER_PANEL_RANGE_ML.end())
+}
+
+/// One of today's water entries as it stands now (after corrections; removed entries are
+/// not listed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaterEntry {
+    /// The stored event that holds the entry's current amount. A correction or removal
+    /// supersedes this event.
+    pub id: Uuid,
+    /// When it was drunk, in the time zone the entry was recorded in.
+    pub time: NaiveTime,
+    /// Amount in ml.
+    pub amount_ml: u32,
+}
 
 /// What the store knows about today's water.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -111,6 +155,24 @@ mod tests {
             &UserZone::KOLKATA,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn panel_steps_stay_in_range() {
+        assert_eq!(step_amount(250, true), 300);
+        assert_eq!(step_amount(250, false), 200);
+        assert_eq!(step_amount(50, false), 50);
+        assert_eq!(step_amount(2000, true), 2000);
+        // An amount entered off the steps moves onto the range.
+        assert_eq!(step_amount(30, true), 80);
+        assert_eq!(step_amount(30, false), 50);
+        assert_eq!(step_amount(1990, true), 2000);
+        assert!(
+            WATER_SERVINGS_ML
+                .iter()
+                .all(|s| WATER_PANEL_RANGE_ML.contains(s))
+        );
+        assert!(WATER_SERVINGS_ML.contains(&WATER_DEFAULT_SERVING_ML));
     }
 
     #[test]

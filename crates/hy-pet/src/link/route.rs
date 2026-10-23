@@ -8,13 +8,17 @@
 //! the engine or the store; the resulting [`Command`] is applied by the link afterwards.
 
 use chrono::{NaiveDate, Weekday};
+use hy_core::coach::water::WATER_SERVINGS_ML;
 use hy_core::coach::{
     CheckInAnswer, GuideAction, Input, PauseLength, PomodoroPreset, RecoveryAction, Reflection,
-    Response,
+    Response, WaterInput,
 };
-use hy_core::schema::{RoutineOutcome, RoutineVariant};
+use hy_core::schema::{PhoneLabel, RoutineOutcome, RoutineVariant};
+use uuid::Uuid;
 
-use super::present::{BubbleKind, WATER_SERVING_ML, action, day_key};
+use super::present::{
+    BubbleKind, PHONE_LABELS, WATER_SERVING_ML, action, day_key, phone_label_key,
+};
 use crate::shell::{CloseCause, Handled, ShellEvent};
 
 /// Something for the link to do.
@@ -33,11 +37,46 @@ pub enum Command {
         /// The engine input it means.
         input: Input,
     },
-    /// Log water from the pet menu (not an answer to a reminder), then re-evaluate.
+    /// Log water from the pet menu (not an answer to a reminder); the confirmation opens.
     LogWater {
         /// Amount in ml.
         ml: u32,
     },
+    /// Note a phone interruption from the pet menu; the note opens.
+    NotePhone,
+    /// Change a self-reported entry from the card `bubble_id` (water confirmation, water
+    /// panel, phone note). Like [`Command::Answer`], the link applies it only while that
+    /// card is still the one on show, so a second quick click on Undo, Save or a label
+    /// writes nothing more. The link reads the amounts and entry ids from the engine's
+    /// view at that moment, never from the event.
+    Change {
+        /// The shell bubble id the change was asked on.
+        bubble_id: String,
+        /// What to record.
+        change: EntryChange,
+    },
+}
+
+/// A change to the user's own entries, asked on a card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryChange {
+    /// Log a serving from the water panel.
+    LogWater {
+        /// Amount in ml.
+        ml: u32,
+    },
+    /// Log the panel's other amount.
+    AddOther,
+    /// Undo the water just logged (a retraction).
+    UndoWater,
+    /// Save the amount of the entry being edited (a correction).
+    SaveEdit,
+    /// Remove one of today's water entries (a retraction).
+    RemoveWater(Uuid),
+    /// Label the phone note (a correction).
+    LabelPhone(PhoneLabel),
+    /// Undo the phone note (a retraction).
+    UndoPhone,
 }
 
 /// What the link last drew, as far as routing needs it.
@@ -96,8 +135,19 @@ pub fn route(state: &RouteState, event: &ShellEvent) -> Routed {
             if state.bubble_id.as_deref() != Some(bubble_id.as_str()) {
                 return Routed::none();
             }
-            BubbleKind::parse(bubble_id)
-                .and_then(|k| bubble_command(k, action_id))
+            let Some(kind) = BubbleKind::parse(bubble_id) else {
+                return Routed::none();
+            };
+            if let Some(change) = bubble_change(kind, action_id) {
+                return Routed {
+                    handled: Handled::Yes,
+                    command: Some(Command::Change {
+                        bubble_id: bubble_id.clone(),
+                        change,
+                    }),
+                };
+            }
+            bubble_command(kind, action_id)
                 .map_or_else(Routed::none, |input| Routed::answer(bubble_id, input))
         }
         ShellEvent::BubbleClosed { bubble_id, cause } => match cause {
@@ -131,7 +181,50 @@ pub fn route(state: &RouteState, event: &ShellEvent) -> Routed {
     }
 }
 
-/// The engine input for an action in a bubble of this kind.
+/// The entry change an action in a bubble of this kind asks for, if it records one.
+#[must_use]
+pub fn bubble_change(kind: BubbleKind, action_id: &str) -> Option<EntryChange> {
+    use action as a;
+    match kind {
+        BubbleKind::WaterLogged => (action_id == a::UNDO).then_some(EntryChange::UndoWater),
+        BubbleKind::WaterPanel => match action_id {
+            a::OTHER_ADD => Some(EntryChange::AddOther),
+            a::EDIT_SAVE => Some(EntryChange::SaveEdit),
+            other => {
+                if let Some(ml) = other.strip_prefix(a::ADD_PREFIX) {
+                    let ml = WATER_SERVINGS_ML
+                        .into_iter()
+                        .find(|s| s.to_string() == ml)?;
+                    return Some(EntryChange::LogWater { ml });
+                }
+                Some(EntryChange::RemoveWater(parse_id(
+                    other.strip_prefix(a::ENTRY_REMOVE_PREFIX)?,
+                )?))
+            }
+        },
+        BubbleKind::PhoneNote => {
+            if action_id == a::UNDO {
+                return Some(EntryChange::UndoPhone);
+            }
+            let key = action_id.strip_prefix(a::LABEL_PREFIX)?;
+            PHONE_LABELS
+                .into_iter()
+                .find(|l| phone_label_key(*l) == key)
+                .map(EntryChange::LabelPhone)
+        }
+        _ => None,
+    }
+}
+
+/// An entry id in an action suffix, in the form [`Uuid`] prints.
+fn parse_id(text: &str) -> Option<Uuid> {
+    Uuid::parse_str(text)
+        .ok()
+        .filter(|id| id.to_string() == text)
+}
+
+/// The engine input for an action in a bubble of this kind (actions that record an
+/// entry are [`bubble_change`]'s).
 #[must_use]
 pub fn bubble_command(kind: BubbleKind, action_id: &str) -> Option<Input> {
     use action as a;
@@ -229,6 +322,23 @@ pub fn bubble_command(kind: BubbleKind, action_id: &str) -> Option<Input> {
                 _ => return None,
             }))
         }
+        BubbleKind::WaterLogged => match action_id {
+            a::DETAILS => Input::Water(WaterInput::OpenPanel),
+            a::OK => Input::CloseBubble,
+            _ => return None,
+        },
+        BubbleKind::WaterPanel => Input::Water(match action_id {
+            a::EDIT_LESS => WaterInput::StepEdit { up: false },
+            a::EDIT_MORE => WaterInput::StepEdit { up: true },
+            a::OTHER_LESS => WaterInput::StepOther { up: false },
+            a::OTHER_MORE => WaterInput::StepOther { up: true },
+            a::EDIT_CANCEL => WaterInput::CancelEdit,
+            other => WaterInput::Edit(parse_id(other.strip_prefix(a::ENTRY_EDIT_PREFIX)?)?),
+        }),
+        BubbleKind::PhoneNote => match action_id {
+            a::OK => Input::CloseBubble,
+            _ => return None,
+        },
     };
     Some(input)
 }
@@ -279,9 +389,8 @@ pub fn menu_command(id: &str) -> Option<Command> {
     let coach = |i| Some(Command::Coach(i));
     match id {
         a::OPEN_PENDING => coach(Input::OpenPending),
-        a::WATER => Some(Command::LogWater {
-            ml: WATER_SERVING_ML,
-        }),
+        a::WATER_PANEL => coach(Input::Water(WaterInput::OpenPanel)),
+        a::PHONE_NOTE => Some(Command::NotePhone),
         a::MOVEMENT_START => coach(Input::RoutineStarted),
         a::MOVEMENT_DONE | a::MOVEMENT_PARTIAL | a::MOVEMENT_STOP => {
             coach(Input::RoutineFinished {
@@ -308,6 +417,12 @@ pub fn menu_command(id: &str) -> Option<Command> {
         a::PAUSE_UNTIL_RESUMED => coach(Input::Pause(PauseLength::UntilResumed)),
         a::RESUME_COACHING => coach(Input::ResumeCoaching),
         _ => {
+            if let Some(ml) = id.strip_prefix(a::WATER_PREFIX) {
+                return WATER_SERVINGS_ML
+                    .into_iter()
+                    .find(|s| s.to_string() == ml)
+                    .map(|ml| Command::LogWater { ml });
+            }
             if let Some(rest) = id.strip_prefix(a::FOCUS_PREFIX) {
                 let (minutes, flags) = number_and_flags(rest, &[a::REPLACES_POMODORO])?;
                 if ![30, 60, 90].contains(&minutes) {

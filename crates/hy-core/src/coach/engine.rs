@@ -41,8 +41,12 @@
 //!   is "none recorded" and does not restart the movement timer (P).
 //! - The deadline day and the recovery-day plan ([`recovery`], slice V1-3) use the same
 //!   single bubble, after the reminders and with their calm gap.
+//! - The water confirmation, the water panel and the phone note ([`note`], V1-3 follow-up)
+//!   answer the user's own action in the same single bubble; while one is open nothing
+//!   opens on its own.
 
 mod guide;
+mod note;
 mod recovery;
 
 use std::collections::BTreeMap;
@@ -63,7 +67,7 @@ use super::types::{
     Input, InputOutcome, Notice, PauseLength, PetMode, PomodoroPause, PomodoroPhase, PomodoroView,
     ReminderReason, Response,
 };
-use super::water::{WaterPace, WaterSnapshot, pace};
+use super::water::{WaterEntry, WaterPace, WaterSnapshot, pace};
 use crate::schema::{
     Activity, EventPayload, MAX_WATER_ENTRY_ML, MeasurementStatus, NewEvent, ReminderOutcome,
     RoutineOutcome, SessionState,
@@ -108,6 +112,8 @@ pub struct Context {
     pub schedule: WorkSchedule,
     /// Today's water total and goal.
     pub water: WaterSnapshot,
+    /// Today's water entries as they stand, oldest first (for the water panel).
+    pub water_entries: Vec<WaterEntry>,
     /// The user's coaching settings.
     pub config: CoachConfig,
 }
@@ -329,6 +335,9 @@ pub struct EngineState {
     /// The one pending recovery-day plan.
     #[serde(default)]
     plan: Option<RecoveryPlan>,
+    /// The water confirmation, the water panel or the phone note, when open.
+    #[serde(default)]
+    note: Option<note::NoteCard>,
 }
 
 /// What one step produced.
@@ -407,6 +416,7 @@ impl Engine {
                 prompt_opened_under: None,
                 prompt_since: 0,
                 plan: None,
+                note: None,
             },
         }
     }
@@ -499,6 +509,7 @@ impl Engine {
             }
         }
         self.clear_prompt();
+        self.s.note = None;
         self.s.exercise_since = None;
         let since = self.s.now;
         let was_away = self.s.away;
@@ -1139,6 +1150,10 @@ impl Engine {
                 self.after_done(ctx, a);
                 self.finish_offer(o, ChipStatus::Done, out);
                 out.notices.push(Notice::Celebrate(a));
+                if a == Activity::Water {
+                    // "Already did it" opens the water panel (wireframe B2).
+                    self.open_water_panel_after_reminder(ctx, out);
+                }
             }
             Response::LogWater { ml } => {
                 if a != Activity::Water {
@@ -1324,21 +1339,7 @@ impl Engine {
             }
             Input::Respond { offer, response } => self.respond(ctx, offer, response, out),
             Input::CloseBubble => {
-                if let Some(o) = self.s.offer
-                    && matches!(o.phase, OfferPhase::Showing { .. })
-                {
-                    self.collapse(out);
-                    Applied
-                } else if self.close_guide_card(out) {
-                    Applied
-                } else if self.s.prompt.is_some() {
-                    self.clear_prompt();
-                    self.s.gap_until = self.s.now + ms(CALM_GAP);
-                    Applied
-                } else if let Some(p) = self.s.pomodoro.as_mut()
-                    && p.card_open
-                {
-                    p.card_open = false;
+                if self.close_open_card(out) {
                     Applied
                 } else {
                     Ignored("no bubble")
@@ -1368,6 +1369,8 @@ impl Engine {
                 {
                     p.card_open = true;
                     p.card_opened_under = holds;
+                    // The user asked for this card: it takes the bubble from a note.
+                    self.clear_note(out);
                     Applied
                 } else {
                     Ignored("nothing waiting")
@@ -1579,10 +1582,14 @@ impl Engine {
                     p.card_open = false;
                 } else {
                     // The user acted: the next card answers them, even under a hold, but
-                    // only where they can see it (not while the pet is hidden).
+                    // only where they can see it (not while the pet is hidden). It takes
+                    // the bubble from a note.
                     p.phase = PomodoroPhase::RoundDone;
                     p.card_open = visible;
                     p.card_opened_under = holds;
+                    if visible {
+                        self.clear_note(out);
+                    }
                 }
                 Applied
             }
@@ -1614,6 +1621,38 @@ impl Engine {
                 }
                 Applied
             }
+            Input::Water(w) => self.water_input(ctx, w, out),
+            Input::Phone(p) => self.phone_input(ctx, p, out),
+        }
+    }
+
+    /// Close the card on show as its close button does (no answer is recorded): a
+    /// reminder collapses to its waiting badge, the movement guide waits behind the pet, a
+    /// check-in, offer or recovery card closes with the calm gap, a note closes, and a
+    /// Pomodoro card closes (its phase stays for the menu). Returns false if none is open.
+    fn close_open_card(&mut self, out: &mut Out) -> bool {
+        if let Some(o) = self.s.offer
+            && matches!(o.phase, OfferPhase::Showing { .. })
+        {
+            self.collapse(out);
+            true
+        } else if self.close_guide_card(out) {
+            true
+        } else if self.s.prompt.is_some() {
+            self.clear_prompt();
+            self.s.gap_until = self.s.now + ms(CALM_GAP);
+            out.significant = true;
+            true
+        } else if self.clear_note(out) {
+            true
+        } else if let Some(p) = self.s.pomodoro.as_mut()
+            && p.card_open
+        {
+            p.card_open = false;
+            out.significant = true;
+            true
+        } else {
+            false
         }
     }
 
@@ -1658,6 +1697,7 @@ impl Engine {
             self.resolve_no_response(ctx, out);
         }
         self.settle_prompt(ctx, out);
+        self.settle_note(ctx, out);
         self.withdraw_held_pomodoro_card(ctx, out);
         // End of a quiet period: nothing is replayed.
         let quiet = self.quiet_hold(ctx);
@@ -1688,7 +1728,10 @@ impl Engine {
                 _ => {}
             }
         }
-        let slot_free = self.s.offer.is_none() && self.s.prompt.is_none() && self.s.guide.is_none();
+        let slot_free = self.s.offer.is_none()
+            && self.s.prompt.is_none()
+            && self.s.guide.is_none()
+            && self.s.note.is_none();
         let calm = now >= self.s.gap_until && now >= self.s.grace_until;
         let held = self.hold(ctx).is_some();
         if !slot_free || held || !self.visible(ctx) {
@@ -1964,6 +2007,10 @@ impl Engine {
                 _ => self.recovery_bubble(ctx, p)?,
             });
         }
+        // A note the user asked for comes before a Pomodoro card, which waits for it.
+        if let Some(n) = self.s.note {
+            return Some(n.bubble());
+        }
         let holds = self.holds_above_pomodoro(ctx);
         let p = self
             .s
@@ -2005,6 +2052,7 @@ impl Engine {
             active_routine: self.active_routine(),
             guide: self.guide_view(ctx),
             recovery: self.recovery_view(ctx),
+            water_entries: ctx.water_entries.clone(),
         }
     }
 
@@ -2043,6 +2091,7 @@ mod tests {
             zone: UserZone::KOLKATA,
             schedule: WorkSchedule::default(),
             water: WaterSnapshot::default(),
+            water_entries: Vec::new(),
             config: CoachConfig::default(),
         }
     }

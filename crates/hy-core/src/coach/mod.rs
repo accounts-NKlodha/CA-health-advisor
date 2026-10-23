@@ -8,7 +8,7 @@
 //!   sleep, wake, presentation state and the user's answers) and renders the returned
 //!   [`CoachView`]. The shell never shows a reminder on its own.
 //! - [`config`]: the user's coaching settings and the fixed timings.
-//! - [`water`]: the water pace model.
+//! - [`water`]: the water pace model, today's entries and the water panel's amounts.
 //! - [`movement`]: the guided movement routine's bundled content (provisional, pending
 //!   the content review).
 //! - [`recovery`]: the deadline day and the one pending recovery-day plan.
@@ -33,6 +33,7 @@ pub use recovery::{RecoveryAction, RecoveryPlan, RecoveryView, Reflection};
 pub use types::{
     ActiveRoutine, Bubble, CheckInAnswer, Chip, ChipStatus, CoachView, Confirmation, FocusEnd,
     GuideAction, GuideStage, GuideView, HiddenReason, Hold, Input, InputOutcome, Notice,
-    PauseLength, PetMode, PomodoroPause, PomodoroPhase, PomodoroView, ReminderReason, Response,
+    PauseLength, PetMode, PhoneInput, PomodoroPause, PomodoroPhase, PomodoroView, ReminderReason,
+    Response, WaterEdit, WaterInput,
 };
-pub use water::{WaterPace, WaterSnapshot};
+pub use water::{WaterEntry, WaterPace, WaterSnapshot};

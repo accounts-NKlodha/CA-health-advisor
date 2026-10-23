@@ -11,14 +11,15 @@ use std::time::Duration;
 use chrono::{NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
 use hy_core::clock::ManualClock;
 use hy_core::coach::movement::PROVISIONAL_NOTICE;
+use hy_core::coach::water::WaterPace;
 use hy_core::coach::{
     ActiveRoutine, Bubble as CoachBubble, CheckInAnswer, Chip, ChipStatus, CoachView, GuideAction,
-    GuideStage, GuideView, HiddenReason, Input, PauseLength, PetMode, PomodoroPause, PomodoroPhase,
-    PomodoroPreset, PomodoroView, RecoveryAction, RecoveryPlan, RecoveryView, Reflection,
-    ReminderReason, Response,
+    GuideStage, GuideView, HiddenReason, Input, PauseLength, PetMode, PhoneInput, PomodoroPause,
+    PomodoroPhase, PomodoroPreset, PomodoroView, RecoveryAction, RecoveryPlan, RecoveryView,
+    Reflection, ReminderReason, Response, WaterEdit, WaterEntry, WaterInput,
 };
 use hy_core::schema::{
-    Activity, EventPayload, GoalKind, ReminderOutcome, RoutineOutcome, RoutineVariant,
+    Activity, EventPayload, GoalKind, PhoneLabel, ReminderOutcome, RoutineOutcome, RoutineVariant,
     SessionState, StepOutcome,
 };
 use hy_core::store::Store;
@@ -26,7 +27,9 @@ use proptest::prelude::*;
 use uuid::Uuid;
 
 use super::present::{self, BubbleKind, action, menu_actions, pet_look};
-use super::route::{Command, RouteState, bubble_command, menu_command, route};
+use super::route::{
+    Command, EntryChange, RouteState, bubble_change, bubble_command, menu_command, route,
+};
 use super::{CoachLink, LinkSink};
 use crate::shell::{
     Bubble, BubbleOutcome, CloseCause, Effect, Handled, HideReason, MenuAction, Open, PetShell,
@@ -57,6 +60,7 @@ fn view(pet: PetMode) -> CoachView {
         session: SessionState::Active,
         hold: None,
         water: None,
+        water_entries: Vec::new(),
         pomodoro: None,
         focus_left: None,
         meeting: false,
@@ -192,7 +196,83 @@ fn all_bubbles() -> Vec<CoachBubble> {
         },
         CoachBubble::RecoveryWalk,
         CoachBubble::RecoveryReflection,
+        CoachBubble::WaterLogged {
+            entry: Some(entry_id(1)),
+            ml: 250,
+        },
+        CoachBubble::WaterLogged {
+            entry: None,
+            ml: 250,
+        },
+        CoachBubble::WaterPanel {
+            edit: None,
+            other_ml: 250,
+        },
+        CoachBubble::WaterPanel {
+            edit: Some(WaterEdit {
+                entry: entry_id(2),
+                ml: 300,
+            }),
+            other_ml: 2000,
+        },
+        CoachBubble::PhoneNote {
+            entry: Some(entry_id(3)),
+            at: NaiveTime::from_hms_opt(11, 52, 0).unwrap(),
+            label: None,
+        },
+        CoachBubble::PhoneNote {
+            entry: Some(entry_id(3)),
+            at: NaiveTime::from_hms_opt(11, 52, 0).unwrap(),
+            label: Some(PhoneLabel::Work),
+        },
+        CoachBubble::PhoneNote {
+            entry: None,
+            at: NaiveTime::from_hms_opt(11, 52, 0).unwrap(),
+            label: None,
+        },
     ]
+}
+
+fn entry_id(n: u128) -> Uuid {
+    Uuid::from_u128(0x0190_0000_0000_7000_8000_0000_0000_0000 + n)
+}
+
+/// Today's water entries `ml`, one every half hour from 09:00, ids `entry_id(1..)`.
+fn entries(ml: &[u32]) -> Vec<WaterEntry> {
+    ml.iter()
+        .zip(1u128..)
+        .map(|(ml, n)| WaterEntry {
+            id: entry_id(n),
+            time: NaiveTime::from_hms_opt(9, 0, 0).unwrap()
+                + chrono::Duration::minutes(30 * i64::try_from(n - 1).unwrap()),
+            amount_ml: *ml,
+        })
+        .collect()
+}
+
+/// A view with today's `entries` against a 2000 ml goal.
+fn with_water(ml: &[u32]) -> CoachView {
+    let mut v = view(PetMode::Idle);
+    v.water_entries = entries(ml);
+    let logged = ml.iter().sum();
+    v.water = Some(WaterPace {
+        logged_ml: logged,
+        goal_ml: 2000,
+        expected_ml: 500,
+        behind_ml: 0,
+        goal_reached: logged >= 2000,
+    });
+    v
+}
+
+/// Every action id on a shell bubble, in its rows and its own actions.
+fn all_actions(b: &Bubble) -> Vec<String> {
+    b.rows
+        .iter()
+        .flat_map(|r| r.actions.iter())
+        .chain(b.actions.iter())
+        .map(|a| a.id.clone())
+        .collect()
 }
 
 // ------------------------------------------------------------ view mapping
@@ -331,21 +411,31 @@ fn celebration_shows_only_over_idle() {
 
 #[test]
 fn every_engine_bubble_is_valid_and_every_action_routes() {
-    for b in all_bubbles() {
-        let mut v = view(PetMode::Idle);
-        v.bubble = Some(b);
-        let mut shell = present::bubble(&b, &v);
-        let kind = BubbleKind::of(&b);
-        shell.id = kind.id(42);
-        assert_eq!(shell.validate(), Ok(()), "{b:?}");
-        assert_eq!(BubbleKind::parse(&shell.id), Some(kind));
-        assert!(!shell.actions.is_empty());
-        for a in &shell.actions {
-            assert!(
-                bubble_command(kind, &a.id).is_some(),
-                "{b:?}: action {} routes nowhere",
-                a.id
-            );
+    let many: Vec<u32> = (0..30).map(|i| 50 + i * 10).collect();
+    for v0 in [
+        view(PetMode::Idle),
+        with_water(&[250, 300]),
+        with_water(&many),
+    ] {
+        for b in all_bubbles() {
+            let mut v = v0.clone();
+            v.bubble = Some(b);
+            let mut shell = present::bubble(&b, &v);
+            let kind = BubbleKind::of(&b);
+            shell.id = kind.id(42);
+            assert_eq!(shell.validate(), Ok(()), "{b:?}");
+            assert_eq!(BubbleKind::parse(&shell.id), Some(kind));
+            assert!(!shell.actions.is_empty());
+            for a in all_actions(&shell) {
+                assert!(
+                    bubble_command(kind, &a).is_some() || bubble_change(kind, &a).is_some(),
+                    "{b:?}: action {a} routes nowhere",
+                );
+                assert!(
+                    bubble_command(kind, &a).is_none() || bubble_change(kind, &a).is_none(),
+                    "{b:?}: action {a} routes twice",
+                );
+            }
         }
     }
 }
@@ -439,7 +529,10 @@ fn menu_follows_the_engine_state_and_every_entry_routes() {
     assert_eq!(
         ids(&m),
         [
+            "water_150",
             "water_250",
+            "water_500",
+            "water_panel",
             "movement_start",
             "break",
             "deadline_day",
@@ -448,6 +541,7 @@ fn menu_follows_the_engine_state_and_every_entry_routes() {
             "focus_90",
             "pomodoro_25",
             "pomodoro_50",
+            "phone_note",
             "meeting_on",
             "pause_30",
             "pause_60",
@@ -463,6 +557,33 @@ fn menu_follows_the_engine_state_and_every_entry_routes() {
         .map(|a| a.id.as_str())
         .collect();
     assert_eq!(tray, ["pause_30", "pause_60", "pause_today", "pause_on"]);
+    // Entries that open a card keep the keyboard panel open to show it; the rest close it.
+    let continuing: Vec<&str> = m
+        .iter()
+        .filter(|a| a.continues)
+        .map(|a| a.id.as_str())
+        .collect();
+    assert_eq!(
+        continuing,
+        [
+            "water_150",
+            "water_250",
+            "water_500",
+            "water_panel",
+            "phone_note"
+        ]
+    );
+    // The water entry gives today's total, against the goal when there is one.
+    assert!(
+        m.iter()
+            .any(|a| a.id == "water_panel" && a.label == "Water... (0 ml today)")
+    );
+    let watered = with_water(&[250, 500]);
+    assert!(
+        menu_actions(&watered)
+            .iter()
+            .any(|a| a.id == "water_panel" && a.label == "Water... (750 / 2000 ml)")
+    );
     views.push(idle);
 
     // Paused: resume in the menu and tray; a Pomodoro says it resumes coaching.
@@ -703,10 +824,17 @@ fn menu_entries_route_to_engine_inputs() {
         coach(Input::Pause(PauseLength::UntilResumed))
     );
     assert_eq!(menu_command("resume"), coach(Input::ResumeCoaching));
+    for ml in [150, 250, 500] {
+        assert_eq!(
+            menu_command(&format!("water_{ml}")),
+            Some(Command::LogWater { ml })
+        );
+    }
     assert_eq!(
-        menu_command("water_250"),
-        Some(Command::LogWater { ml: 250 })
+        menu_command("water_panel"),
+        coach(Input::Water(WaterInput::OpenPanel))
     );
+    assert_eq!(menu_command("phone_note"), Some(Command::NotePhone));
     assert_eq!(
         menu_command("focus_60"),
         coach(Input::StartFocus {
@@ -761,6 +889,10 @@ fn menu_entries_route_to_engine_inputs() {
         "pomodoro_30",
         "pomodoro_25_zz",
         "pomodoro_25_rc_rc",
+        "water_100",
+        "water_",
+        "water_2000",
+        "water_250x",
         "quit",
     ] {
         assert_eq!(menu_command(junk), None, "{junk}");
@@ -2160,6 +2292,559 @@ fn a_reminder_routine_under_a_later_hold_keeps_its_results_reachable() {
     assert_eq!(h.shell.state().0, PetState::Paused);
 }
 
+// ------------------------------------------- water and phone cards (B3, B8)
+
+#[test]
+fn water_cards_say_what_was_logged_against_the_users_goal() {
+    let id = entry_id(1);
+    let logged = CoachBubble::WaterLogged {
+        entry: Some(id),
+        ml: 250,
+    };
+    let mut v = with_water(&[500, 250]);
+    let card = present::bubble(&logged, &v);
+    assert_eq!(card.title, "Logged 250 ml, 750 / 2000 ml");
+    assert!(card.lines.is_empty());
+    let labels: Vec<&str> = card.actions.iter().map(|a| a.label.as_str()).collect();
+    assert_eq!(labels, ["Undo", "Details"]);
+    assert!(card.continues);
+    // Reaching the goal: reminders pause, logging stays; no praise past it.
+    let full = with_water(&[1000, 1000]);
+    let card = present::bubble(&logged, &full);
+    assert_eq!(card.title, "Logged 250 ml, 2000 / 2000 ml");
+    assert_eq!(card.lines, [present::GOAL_REACHED]);
+    // No goal: the total alone.
+    v.water = None;
+    assert_eq!(
+        present::bubble(&logged, &v).title,
+        "Logged 250 ml, 750 ml today"
+    );
+    // After Undo.
+    let undone = CoachBubble::WaterLogged {
+        entry: None,
+        ml: 250,
+    };
+    let card = present::bubble(&undone, &with_water(&[500]));
+    assert_eq!(card.title, "Removed 250 ml");
+    assert_eq!(card.lines, ["Today: 500 / 2000 ml (your goal)."]);
+    let ids: Vec<&str> = card.actions.iter().map(|a| a.id.as_str()).collect();
+    assert_eq!(ids, ["ok", "details"]);
+}
+
+#[test]
+fn the_water_panel_lists_todays_entries_with_edit_and_remove() {
+    let panel = |edit, other_ml| CoachBubble::WaterPanel { edit, other_ml };
+    // Empty: nothing logged is not zero water.
+    let v = with_water(&[]);
+    let card = present::bubble(&panel(None, 250), &v);
+    assert_eq!(card.title, "Water today");
+    assert_eq!(
+        card.lines,
+        [
+            "0 / 2000 ml (your goal)",
+            "No entries yet today. That means nothing logged, not zero water."
+        ]
+    );
+    let p = card.progress.as_ref().unwrap();
+    assert_eq!(
+        (p.value, p.max, p.label.as_str()),
+        (0, 2000, "0 of 2000 ml")
+    );
+    assert_eq!(card.rows.len(), 1);
+    assert_eq!(card.rows[0].text, "Other amount: 250 ml");
+    let labels: Vec<&str> = card.rows[0]
+        .actions
+        .iter()
+        .map(|a| a.label.as_str())
+        .collect();
+    assert_eq!(labels, ["\u{2212}50 ml", "+50 ml", "Add 250 ml"]);
+    let servings: Vec<(&str, &str)> = card
+        .actions
+        .iter()
+        .map(|a| (a.id.as_str(), a.label.as_str()))
+        .collect();
+    assert_eq!(
+        servings,
+        [
+            ("add_150", "+150 ml"),
+            ("add_250", "+250 ml"),
+            ("add_500", "+500 ml")
+        ]
+    );
+    // Entries, one being edited.
+    let v = with_water(&[250, 300]);
+    let card = present::bubble(
+        &panel(
+            Some(WaterEdit {
+                entry: entry_id(2),
+                ml: 350,
+            }),
+            400,
+        ),
+        &v,
+    );
+    let rows: Vec<&str> = card.rows.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(
+        rows,
+        [
+            "09:00, 250 ml",
+            "09:30, 300 ml, change to 350 ml",
+            "Other amount: 400 ml"
+        ]
+    );
+    let first: Vec<String> = card.rows[0].actions.iter().map(|a| a.id.clone()).collect();
+    assert_eq!(
+        first,
+        [
+            format!("entry_edit_{}", entry_id(1)),
+            format!("entry_remove_{}", entry_id(1))
+        ]
+    );
+    let editing: Vec<&str> = card.rows[1].actions.iter().map(|a| a.id.as_str()).collect();
+    assert_eq!(
+        editing,
+        ["edit_less", "edit_more", "edit_save", "edit_cancel"]
+    );
+    // Many entries: the latest twelve, and a line saying so.
+    let many: Vec<u32> = (1..=15).map(|i| i * 10).collect();
+    let card = present::bubble(&panel(None, 250), &with_water(&many));
+    assert_eq!(card.rows.len(), present::PANEL_ENTRIES + 1);
+    assert!(
+        card.rows[0].text.ends_with(", 40 ml"),
+        "{}",
+        card.rows[0].text
+    );
+    assert!(
+        card.lines
+            .contains(&"Showing the latest 12 of 15 entries.".to_owned())
+    );
+    // No goal: no progress bar, the total alone.
+    let mut v = with_water(&[250]);
+    v.water = None;
+    let card = present::bubble(&panel(None, 250), &v);
+    assert!(card.progress.is_none());
+    assert_eq!(card.lines[0], "250 ml today (no goal set)");
+}
+
+#[test]
+fn the_phone_note_offers_an_optional_label_and_undo() {
+    let at = NaiveTime::from_hms_opt(11, 52, 0).unwrap();
+    let note = |entry, label| CoachBubble::PhoneNote { entry, at, label };
+    let v = view(PetMode::Idle);
+    let card = present::bubble(&note(Some(entry_id(1)), None), &v);
+    assert_eq!(card.title, "Phone interruption noted, 11:52");
+    assert_eq!(card.lines, ["Optional: what was it?"]);
+    let labels: Vec<&str> = card.actions.iter().map(|a| a.label.as_str()).collect();
+    assert_eq!(labels, ["Work", "Personal", "Unsure", "Undo"]);
+    assert_eq!(
+        card.note.as_deref(),
+        Some("Self-reported. The app does not detect phone use.")
+    );
+    let card = present::bubble(&note(Some(entry_id(1)), Some(PhoneLabel::Personal)), &v);
+    assert_eq!(card.lines, ["Saved as personal."]);
+    let primary: Vec<&str> = card
+        .actions
+        .iter()
+        .filter(|a| a.style == crate::shell::ActionStyle::Primary)
+        .map(|a| a.id.as_str())
+        .collect();
+    assert_eq!(primary, ["label_personal"]);
+    let card = present::bubble(&note(None, None), &v);
+    assert_eq!(card.title, "Phone note removed");
+}
+
+#[test]
+fn water_and_phone_actions_route_only_from_their_own_cards() {
+    let id = entry_id(0xab);
+    let w = BubbleKind::WaterLogged;
+    let p = BubbleKind::WaterPanel;
+    let n = BubbleKind::PhoneNote;
+    assert_eq!(bubble_change(w, "undo"), Some(EntryChange::UndoWater));
+    assert_eq!(
+        bubble_command(w, "details"),
+        Some(Input::Water(WaterInput::OpenPanel))
+    );
+    assert_eq!(
+        bubble_change(p, "add_500"),
+        Some(EntryChange::LogWater { ml: 500 })
+    );
+    assert_eq!(bubble_change(p, "add_300"), None);
+    assert_eq!(bubble_change(p, "other_add"), Some(EntryChange::AddOther));
+    assert_eq!(bubble_change(p, "edit_save"), Some(EntryChange::SaveEdit));
+    assert_eq!(
+        bubble_change(p, &format!("entry_remove_{id}")),
+        Some(EntryChange::RemoveWater(id))
+    );
+    assert_eq!(
+        bubble_command(p, &format!("entry_edit_{id}")),
+        Some(Input::Water(WaterInput::Edit(id)))
+    );
+    assert_eq!(
+        bubble_command(p, "other_more"),
+        Some(Input::Water(WaterInput::StepOther { up: true }))
+    );
+    assert_eq!(
+        bubble_command(p, "edit_less"),
+        Some(Input::Water(WaterInput::StepEdit { up: false }))
+    );
+    // Ids must be in the form the card prints them.
+    let upper = id.to_string().to_uppercase();
+    assert_eq!(bubble_change(p, &format!("entry_remove_{upper}")), None);
+    assert_eq!(bubble_command(p, "entry_edit_x"), None);
+    assert_eq!(bubble_change(p, "undo"), None);
+    assert_eq!(
+        bubble_change(n, "label_work"),
+        Some(EntryChange::LabelPhone(PhoneLabel::Work))
+    );
+    assert_eq!(bubble_change(n, "label_unlabelled"), None);
+    assert_eq!(bubble_change(n, "undo"), Some(EntryChange::UndoPhone));
+    assert_eq!(bubble_change(BubbleKind::CheckIn, "undo"), None);
+    assert_eq!(bubble_change(w, "label_work"), None);
+    for k in [w, p, n] {
+        assert_eq!(BubbleKind::parse(&k.id(9)), Some(k));
+    }
+    // A change carries the card it was asked on, and only that card routes.
+    let shown = w.id(3);
+    let state = RouteState {
+        bubble_id: Some(shown.clone()),
+        click_reopens: false,
+    };
+    let undo = |bubble_id: &str| ShellEvent::BubbleAction {
+        bubble_id: bubble_id.into(),
+        action_id: "undo".into(),
+    };
+    assert_eq!(
+        route(&state, &undo(&shown)).command,
+        Some(Command::Change {
+            bubble_id: shown.clone(),
+            change: EntryChange::UndoWater
+        })
+    );
+    assert_eq!(route(&state, &undo(&w.id(2))).command, None);
+}
+
+fn with_goal(store: &Store) {
+    store
+        .set_goal(GoalKind::WaterDailyMl, 2000, today())
+        .unwrap();
+}
+
+impl H {
+    /// Today's current water entries' amounts, from the store.
+    fn water(&self) -> Vec<u32> {
+        self.link
+            .coach()
+            .store()
+            .water_entries_on(today())
+            .unwrap()
+            .into_iter()
+            .map(|e| e.amount_ml)
+            .collect()
+    }
+
+    fn type_count(&self, name: &str) -> usize {
+        self.events()
+            .iter()
+            .filter(|p| p.type_name() == name)
+            .count()
+    }
+
+    fn title(&self) -> Option<String> {
+        self.shell.open_bubble().map(|b| b.title)
+    }
+
+    /// The id of the action labelled `label` on the open card (rows included).
+    fn action_labelled(&self, label: &str) -> String {
+        let b = self.shell.open_bubble().expect("a card is open");
+        b.rows
+            .iter()
+            .flat_map(|r| r.actions.iter())
+            .chain(b.actions.iter())
+            .find(|a| a.label == label)
+            .map(|a| a.id.clone())
+            .unwrap_or_else(|| panic!("no {label} on {}", b.title))
+    }
+}
+
+#[test]
+fn a_quick_log_confirms_and_undo_removes_it_once() {
+    let mut h = H::with_store(with_goal);
+    h.menu("water_250");
+    assert_eq!(h.title().as_deref(), Some("Logged 250 ml, 250 / 2000 ml"));
+    assert_eq!(h.water(), [250]);
+    // Undo twice quickly: one retraction; the card says what was removed.
+    h.press_quickly(&[action::UNDO, action::UNDO]);
+    assert_eq!(h.type_count("entry.retracted"), 1);
+    assert_eq!(h.water(), Vec::<u32>::new());
+    assert_eq!(h.title().as_deref(), Some("Removed 250 ml"));
+    assert_eq!(h.link.view().water.unwrap().logged_ml, 0);
+    // OK closes it.
+    h.press(action::OK);
+    assert_eq!(h.shell.open(), Open::None);
+    // Another serving from the menu, and the total in the menu follows.
+    h.menu("water_500");
+    assert_eq!(h.title().as_deref(), Some("Logged 500 ml, 500 / 2000 ml"));
+    let menu = lock(&h.shell.model).menu_actions().to_vec();
+    assert!(menu.iter().any(|a| a.label == "Water... (500 / 2000 ml)"));
+    // It closes by itself after a minute.
+    h.work(65);
+    assert_eq!(h.shell.open(), Open::None);
+    assert_eq!(h.water(), [500]);
+}
+
+#[test]
+fn the_water_panel_logs_corrects_and_removes_entries() {
+    let mut h = H::with_store(with_goal);
+    h.menu("water_250");
+    h.press(action::DETAILS);
+    assert_eq!(h.title().as_deref(), Some("Water today"));
+    // Edit the entry: +50 twice, then Save twice quickly: one correction.
+    let edit = h.action_labelled("Edit");
+    h.press(&edit);
+    h.press(action::EDIT_MORE);
+    h.press(action::EDIT_MORE);
+    let b = h.shell.open_bubble().unwrap();
+    assert!(
+        b.rows[0].text.ends_with("change to 350 ml"),
+        "{}",
+        b.rows[0].text
+    );
+    h.press_quickly(&[action::EDIT_SAVE, action::EDIT_SAVE]);
+    assert_eq!(h.water(), [350]);
+    assert_eq!(
+        h.type_count("water.logged"),
+        2,
+        "the entry and its correction"
+    );
+    let all = h.link.coach().store().events_on(today()).unwrap();
+    let correction = all
+        .iter()
+        .find(|e| e.supersedes.is_some())
+        .expect("the correction supersedes the entry");
+    assert_eq!(
+        correction.payload,
+        EventPayload::WaterLogged { amount_ml: 350 }
+    );
+    let b = h.shell.open_bubble().unwrap();
+    assert!(b.rows[0].text.ends_with(", 350 ml"), "{}", b.rows[0].text);
+    // Edit then Cancel changes nothing.
+    let edit = h.action_labelled("Edit");
+    h.press(&edit);
+    h.press(action::EDIT_LESS);
+    h.press(action::EDIT_CANCEL);
+    assert_eq!(h.water(), [350]);
+    // A serving and the other amount (stepped to 350 ml) from the panel, which stays.
+    h.press("add_150");
+    h.press(action::OTHER_MORE);
+    h.press(action::OTHER_MORE);
+    let add = h.action_labelled("Add 350 ml");
+    h.press(&add);
+    assert_eq!(h.water(), [350, 150, 350]);
+    assert_eq!(h.title().as_deref(), Some("Water today"));
+    assert_eq!(h.link.view().water.unwrap().logged_ml, 850);
+    // Remove the first entry: a retraction; totals follow.
+    let remove = h.action_labelled("Remove");
+    h.press(&remove);
+    assert_eq!(h.water(), [150, 350]);
+    assert_eq!(h.type_count("entry.retracted"), 1);
+    let b = h.shell.open_bubble().unwrap();
+    assert_eq!(b.lines[0], "500 / 2000 ml (your goal)");
+    // Three minutes without an answer: the panel closes.
+    h.work(185);
+    assert_eq!(h.shell.open(), Open::None);
+}
+
+#[test]
+fn removing_every_entry_shows_the_empty_state() {
+    let mut h = H::with_store(with_goal);
+    h.menu("water_150");
+    h.press(action::DETAILS);
+    let remove = h.action_labelled("Remove");
+    h.press_quickly(&[&remove, &remove]);
+    assert_eq!(h.type_count("entry.retracted"), 1);
+    let b = h.shell.open_bubble().unwrap();
+    assert!(
+        b.lines.contains(
+            &"No entries yet today. That means nothing logged, not zero water.".to_owned()
+        )
+    );
+}
+
+#[test]
+fn reaching_the_goal_celebrates_once_and_pauses_hydration_reminders() {
+    let mut h = H::with_store(|s| {
+        s.set_goal(GoalKind::WaterDailyMl, 600, today()).unwrap();
+    });
+    h.menu("water_500");
+    assert_ne!(h.shell.state().0, PetState::Celebration);
+    h.menu("water_150");
+    assert_eq!(h.shell.state().0, PetState::Celebration);
+    let b = h.shell.open_bubble().unwrap();
+    assert_eq!(b.title, "Logged 150 ml, 650 / 600 ml");
+    assert_eq!(b.lines, [present::GOAL_REACHED]);
+    assert!(h.link.view().water.unwrap().goal_reached);
+    h.work(10);
+    h.menu("water_150");
+    assert_ne!(
+        h.shell.state().0,
+        PetState::Celebration,
+        "no praise past the goal"
+    );
+    // No water reminder for the rest of the morning.
+    h.work(90 * 60);
+    assert!(!h.events().iter().any(|p| matches!(
+        p,
+        EventPayload::ReminderOffered {
+            activity: Activity::Water,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn a_phone_note_takes_an_optional_label_and_undo() {
+    let mut h = H::new();
+    h.menu("phone_note");
+    assert_eq!(
+        h.title().as_deref(),
+        Some("Phone interruption noted, 10:00")
+    );
+    assert!(h.events().contains(&EventPayload::PhoneInterruption {
+        label: PhoneLabel::Unlabelled
+    }));
+    // "Work", then "Work" again (nothing new), then "Personal" and "Undo" quickly: the
+    // first of those applies.
+    h.press("label_work");
+    assert_eq!(h.shell.open_bubble().unwrap().lines, ["Saved as work."]);
+    h.press("label_work");
+    assert_eq!(h.type_count("phone.interruption"), 2);
+    h.press_quickly(&["label_personal", action::UNDO]);
+    assert_eq!(h.type_count("phone.interruption"), 3);
+    assert_eq!(h.type_count("entry.retracted"), 0);
+    let current: Vec<_> = h
+        .link
+        .coach()
+        .store()
+        .current_events_on(today())
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.payload.type_name() == "phone.interruption")
+        .map(|e| e.payload)
+        .collect();
+    assert_eq!(
+        current,
+        [EventPayload::PhoneInterruption {
+            label: PhoneLabel::Personal
+        }]
+    );
+    h.press(action::UNDO);
+    assert_eq!(h.type_count("entry.retracted"), 1);
+    assert_eq!(h.title().as_deref(), Some("Phone note removed"));
+    assert!(
+        h.link
+            .coach()
+            .store()
+            .current_events_on(today())
+            .unwrap()
+            .iter()
+            .all(|e| e.payload.type_name() != "phone.interruption")
+    );
+    // The note closes after a minute.
+    h.work(65);
+    assert_eq!(h.shell.open(), Open::None);
+}
+
+#[test]
+fn a_new_hold_or_hiding_the_pet_closes_a_note_and_nothing_returns() {
+    let mut h = H::with_store(with_goal);
+    h.menu("water_panel");
+    assert_eq!(h.title().as_deref(), Some("Water today"));
+    h.menu("meeting_on");
+    assert_eq!(h.shell.open(), Open::None);
+    h.menu("meeting_off");
+    h.work(30);
+    assert_eq!(h.shell.open(), Open::None);
+    // Opened under a meeting, the note stays while it lasts.
+    h.menu("meeting_on");
+    h.menu("phone_note");
+    assert!(h.title().is_some());
+    h.work(10);
+    assert!(h.title().is_some());
+    h.menu("meeting_off");
+    // A presentation closes it.
+    h.menu("water_250");
+    h.input(Input::PresentationChanged(true));
+    h.input(Input::PresentationChanged(false));
+    assert_eq!(h.shell.open(), Open::None);
+    // While the user hides the pet, logging still records and no card pops up later.
+    h.user_hide();
+    h.menu("water_250");
+    assert_eq!(h.water(), [250, 250]);
+    h.tray_show();
+    assert_eq!(h.shell.open(), Open::None);
+}
+
+#[test]
+fn a_note_replaces_a_reminder_which_then_waits_as_its_badge() {
+    let mut h = H::new();
+    let (offer, _) = h.work_until_reminder(25);
+    h.menu("phone_note");
+    assert!(h.title().unwrap().starts_with("Phone interruption noted"));
+    assert!(h.responses().is_empty(), "replacing is not an answer");
+    // The note closes; after the calm gap a click brings the reminder back.
+    h.press("label_unsure");
+    h.close_button();
+    assert_eq!(h.shell.open(), Open::None);
+    h.click_pet();
+    assert_eq!(
+        h.shell.open_bubble().map(|b| BubbleKind::parse(&b.id)),
+        Some(Some(BubbleKind::Reminder { offer }))
+    );
+}
+
+#[test]
+fn already_did_it_on_a_water_reminder_opens_the_panel() {
+    let mut h = H::with_store(with_goal);
+    let offer = loop {
+        let (offer, activity) = h.work_until_reminder(120);
+        if activity == Activity::Water {
+            break offer;
+        }
+        h.press(action::DONE);
+    };
+    h.press(action::DONE);
+    assert!(h.responses().contains(&(offer, ReminderOutcome::Done)));
+    assert_eq!(h.title().as_deref(), Some("Water today"));
+    h.press("add_500");
+    assert_eq!(h.water(), [500]);
+}
+
+#[test]
+fn a_change_queued_before_its_card_changed_writes_nothing() {
+    let mut h = H::with_store(with_goal);
+    h.menu("water_250");
+    h.shell.press(action::UNDO);
+    let stale = h.take_queued();
+    // Meanwhile the user logs another serving: a new confirmation.
+    h.menu("water_150");
+    for c in stale {
+        let out = h.link.command(c).unwrap();
+        assert!(matches!(
+            out.outcome,
+            hy_core::coach::InputOutcome::Ignored(_)
+        ));
+    }
+    h.check();
+    assert_eq!(h.water(), [250, 150]);
+    assert_eq!(h.type_count("entry.retracted"), 0);
+    // A phone note answered by the engine thread directly also ignores a stale input.
+    let out = h.link.input(Input::Phone(PhoneInput::Undone)).unwrap();
+    assert!(matches!(
+        out.outcome,
+        hy_core::coach::InputOutcome::Ignored(_)
+    ));
+}
+
 #[derive(Debug, Clone)]
 enum Step {
     Work(u64),
@@ -2180,12 +2865,12 @@ fn step() -> impl Strategy<Value = Step> {
         1 => (1u64..6).prop_map(|m| Step::Lock(m * 60)),
         1 => (1u64..120).prop_map(|m| Step::Sleep(m * 60)),
         1 => any::<bool>().prop_map(Step::Presentation),
-        3 => (0usize..4).prop_map(Step::Press),
+        4 => (0usize..32).prop_map(Step::Press),
         1 => Just(Step::Close),
         1 => Just(Step::Click),
         1 => Just(Step::UserHide),
         1 => Just(Step::TrayShow),
-        1 => (0usize..20).prop_map(Step::Menu),
+        2 => (0usize..24).prop_map(Step::Menu),
     ]
 }
 
@@ -2214,7 +2899,8 @@ proptest! {
                 Step::Presentation(on) => h.input(Input::PresentationChanged(on)),
                 Step::Press(i) => {
                     if let Some(b) = h.shell.open_bubble() {
-                        let a = b.actions[i % b.actions.len()].id.clone();
+                        let all = all_actions(&b);
+                        let a = all[i % all.len()].clone();
                         h.press(&a);
                     }
                 }

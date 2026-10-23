@@ -411,6 +411,63 @@ body {
   outline-offset: 2px;
 }
 
+/* ----------------------------------------- the water panel's bar and rows (B3) */
+
+.meter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 8px;
+}
+
+.meter progress {
+  flex: 1 1 auto;
+  min-width: 120px;
+  height: 10px;
+  accent-color: var(--accent);
+}
+
+.meter-label {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.entries {
+  list-style: none;
+  margin: 6px 0;
+  padding: 0;
+}
+
+.entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  padding: 3px 0;
+  border-top: 1px solid var(--line);
+}
+
+.entry:first-child {
+  border-top: 0;
+}
+
+.entry-text {
+  flex: 1 1 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.entry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.entry-actions .btn {
+  padding: 2px 8px;
+}
+
 /* --------------------------------------------------- high contrast: all solid */
 
 /* ------------------------------------------- the movement guide (wireframe B4) */
@@ -641,6 +698,13 @@ body {
   .close {
     color: LinkText;
   }
+  .entry {
+    border-color: CanvasText;
+  }
+  .meter progress {
+    forced-color-adjust: auto;
+    border: 1px solid CanvasText;
+  }
 }
 
 @media (prefers-contrast: more) {
@@ -651,5 +715,11 @@ body {
   .bubble {
     border-width: 2px;
     box-shadow: none;
+  }
+  .meter-label {
+    color: inherit;
+  }
+  .meter progress {
+    border: 1px solid currentColor;
   }
 }

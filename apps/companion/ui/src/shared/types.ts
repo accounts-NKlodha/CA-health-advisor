@@ -62,6 +62,8 @@ export interface MenuAction {
   id: string;
   label: string;
   in_tray: boolean;
+  /** The entry opens a card, so the keyboard panel stays open to show it. */
+  continues: boolean;
 }
 
 export interface MenuView {
@@ -85,6 +87,18 @@ export interface BubbleAction {
   style: 'normal' | 'primary' | 'link';
 }
 
+export interface BubbleRow {
+  text: string;
+  actions: BubbleAction[];
+}
+
+export interface BubbleProgress {
+  value: number;
+  max: number;
+  /** The value in words, shown beside the bar and given as its accessible name. */
+  label: string;
+}
+
 export interface BubbleFigure {
   id: string;
   label: string;
@@ -102,6 +116,10 @@ export interface Bubble {
   figure: BubbleFigure | null;
   /** A small note, for example that the content is provisional. */
   note: string | null;
+  /** A progress bar (today's water against the user's own goal). */
+  progress: BubbleProgress | null;
+  /** Rows with their own actions (today's water entries). */
+  rows: BubbleRow[];
   /** The card continues after an answer, so the keyboard panel stays open. */
   continues: boolean;
 }

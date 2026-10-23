@@ -229,7 +229,8 @@ impl Coach {
     }
 
     /// The store, for screens that log water or change settings. Call
-    /// [`Coach::handle`] with [`Input::Refresh`] afterwards to update the view.
+    /// [`Coach::handle`] afterwards to update the view: [`Input::Refresh`], or the
+    /// [`super::WaterInput`] or [`super::PhoneInput`] that shows the entry's card.
     pub fn store_mut(&mut self) -> &mut Store {
         &mut self.store
     }
@@ -264,15 +265,20 @@ fn context(store: &Store, wall: DateTime<Utc>, elapsed: Duration) -> Result<Cont
     if config.validate().is_err() {
         return Err(Error::invalid("stored coaching settings are invalid"));
     }
+    let water_entries = store.water_entries_on(today)?;
+    let logged_ml = water_entries
+        .iter()
+        .fold(0u32, |sum, e| sum.saturating_add(e.amount_ml));
     Ok(Context {
         wall,
         elapsed,
         zone,
         schedule: store.work_schedule()?,
         water: WaterSnapshot {
-            logged_ml: store.water_total_on(today)?,
+            logged_ml,
             goal_ml: store.goal_on(GoalKind::WaterDailyMl, today)?,
         },
+        water_entries,
         config,
     })
 }

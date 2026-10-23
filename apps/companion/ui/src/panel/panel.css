@@ -51,6 +51,10 @@ body {
   padding: 8px 12px;
 }
 
+#panel .entry-actions .btn {
+  padding: 6px 10px;
+}
+
 #panel :focus-visible {
   outline-width: 3px;
 }

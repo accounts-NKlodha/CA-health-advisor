@@ -3,10 +3,11 @@
 // the window that had it. Actions that open another window (Settings) leave focus there.
 // When the engine's bubble is open beside the pet (a reminder, a Pomodoro card, the
 // check-in), the panel shows the same bubble first so it can be answered by keyboard.
+import { renderProgress, renderRows } from '../shared/bubble';
 import { renderFigure } from '../shared/figures';
 import { call, on, report } from '../shared/ipc';
 import { renderMenu } from '../shared/menu';
-import type { Bubble, PanelView } from '../shared/types';
+import type { Bubble, BubbleAction, PanelView } from '../shared/types';
 
 const root = document.getElementById('panel') as HTMLElement;
 
@@ -22,6 +23,8 @@ function bubbleSection(b: Bubble): HTMLElement {
   h.id = 'panel-bubble-title';
   h.textContent = b.title;
   section.append(h);
+  const meter = renderProgress(b);
+  if (meter) section.append(meter);
   if (b.figure) {
     const fig = renderFigure(b.figure.id, b.figure.label);
     if (fig) section.append(fig);
@@ -52,24 +55,30 @@ function bubbleSection(b: Bubble): HTMLElement {
     }
     section.append(ul);
   }
-  const row = document.createElement('div');
-  row.className = 'row';
-  for (const a of b.actions) {
+  const action = (a: BubbleAction, describedBy: string | null): HTMLButtonElement => {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = a.style === 'primary' ? 'btn primary' : 'btn';
     btn.textContent = a.label;
+    // Focus returns to the same action after the card is redrawn.
+    btn.dataset.key = a.id;
+    if (describedBy) btn.setAttribute('aria-describedby', describedBy);
     btn.addEventListener('click', () => {
-      // A card that continues (the movement guide's next screen) keeps the panel open;
-      // the new card arrives as a fresh panel view.
+      // A card that continues (the movement guide's next screen, the water panel) keeps
+      // the panel open; the new card arrives as a fresh panel view.
       call('bubble_action', { bubbleId: b.id, actionId: a.id })
         .then(() => {
           if (!b.continues) close(true);
         })
         .catch(report);
     });
-    row.append(btn);
-  }
+    return btn;
+  };
+  const rows = renderRows(b, action);
+  if (rows) section.append(rows);
+  const row = document.createElement('div');
+  row.className = 'row';
+  for (const a of b.actions) row.append(action(a, null));
   const later = document.createElement('button');
   later.type = 'button';
   later.className = 'btn';
@@ -94,6 +103,7 @@ function draw(v: PanelView, keepFocus: boolean): void {
   // Remember which control had focus so a redraw (after a size change) keeps it.
   const active = document.activeElement;
   const focusLabel = active instanceof HTMLButtonElement ? active.getAttribute('aria-label') ?? active.textContent : null;
+  const focusKey = active instanceof HTMLButtonElement ? active.dataset.key ?? null : null;
 
   const state = document.createElement('p');
   state.className = 'panel-state';
@@ -102,8 +112,13 @@ function draw(v: PanelView, keepFocus: boolean): void {
     v.menu,
     {
       action: (id) => {
+        // An entry that opens a card (water, a phone note) keeps the panel open; the card
+        // arrives as a fresh panel view.
+        const continues = v.menu.actions.find((a) => a.id === id)?.continues ?? false;
         call('menu_action', { actionId: id })
-          .then(() => close(true))
+          .then(() => {
+            if (!continues) close(true);
+          })
           .catch(report);
       },
       size: (pct) => void call('pet_edit', { edit: { kind: 'size', pct } }).catch(report),
@@ -135,10 +150,13 @@ function draw(v: PanelView, keepFocus: boolean): void {
   }
 
   const buttons = Array.from(root.querySelectorAll<HTMLButtonElement>('button'));
+  const byKey =
+    keepFocus && focusKey ? buttons.find((b) => b.dataset.key === focusKey) : undefined;
   const again =
-    keepFocus && focusLabel
+    byKey ??
+    (keepFocus && focusLabel
       ? buttons.find((b) => (b.getAttribute('aria-label') ?? b.textContent) === focusLabel)
-      : undefined;
+      : undefined);
   (again ?? buttons[0])?.focus();
 }
 
