@@ -540,7 +540,7 @@ mod suggestions {
             .change_coach_config(CoachChange::EyeRest(false))
             .unwrap();
         env.store
-            .change_water(WaterChange::Goal(2200), date(10, 24))
+            .change_water(&WaterChange::Goal(2200), date(10, 24))
             .unwrap();
         let c = env.store.coach_config().unwrap();
         assert!(!c.categories.eye_rest);
@@ -557,7 +557,7 @@ mod suggestions {
         );
         // The page still shows 150/250/500: removing 150 keeps the 750 the review added.
         env.store
-            .change_water(WaterChange::RemoveServing(150), date(10, 24))
+            .change_water(&WaterChange::RemoveServing(150), date(10, 24))
             .unwrap();
         assert_eq!(env.store.water_servings().unwrap().ml(), &[250, 500, 750]);
         // Undo in the review restores its own field only; eye rest stays off.

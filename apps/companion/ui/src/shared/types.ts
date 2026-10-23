@@ -390,7 +390,11 @@ export type CoachChange =
   | { review: { day: WeekdayName; at: string } };
 
 /** One Water tab change (hy_core::settings::WaterChange). */
-export type WaterChange = { goal: number } | { add_serving: number } | { remove_serving: number };
+export type WaterChange =
+  | { goal: number }
+  | { add_serving: number }
+  | { remove_serving: number }
+  | { edit_servings: { add: number[]; remove: number[] } };
 
 /** The workweek fields a save changed; the others keep what is saved now. */
 export interface WorkweekChange {

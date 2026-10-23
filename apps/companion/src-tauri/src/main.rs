@@ -332,6 +332,7 @@ mod tests {
             serde_json::json!({ "goal": 2000 }),
             serde_json::json!({ "add_serving": 750 }),
             serde_json::json!({ "remove_serving": 150 }),
+            serde_json::json!({ "edit_servings": { "add": [200], "remove": [150] } }),
         ] {
             serde_json::from_value::<WaterChange>(sent).unwrap();
         }

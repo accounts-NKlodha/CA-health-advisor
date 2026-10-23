@@ -7,6 +7,7 @@ import { useEffect, useState } from 'preact/hooks';
 import { applyA11y, followA11y } from '../shared/a11y';
 import { call, report } from '../shared/ipc';
 import type { CoachConfig, Intensity, SettingsPage, WeekdayName } from '../shared/types';
+import { reminderChanges, servingEdit, workweekChange } from '../screens/changes';
 import { PetSettings } from '../screens/PetSettings';
 
 const STEPS = ['Welcome', 'Connect', 'Pet', 'Workweek', 'Water', 'Reminders', 'Sharing', 'Try a reminder'];
@@ -96,16 +97,21 @@ function App() {
   /** Save the current step's choices; resolves when it is safe to move on. */
   const saveStep = (): Promise<void> => {
     switch (step) {
+      // Each step sends only what it changed against what it showed, never a whole copy:
+      // Settings or the weekly review may have changed other fields meanwhile.
       case 3: {
         const ordered = DAYS.map(([d]) => d).filter((d) => draft.days.includes(d));
-        return call('save_workweek', {
-          schedule: { workdays: ordered, start: draft.start, end: draft.end },
-          zone: draft.zone,
-        })
+        const change = workweekChange(
+          { ...page.schedule, zone: page.zone },
+          { workdays: ordered, start: draft.start, end: draft.end, zone: draft.zone },
+        );
+        const review = page.coach.review;
+        const reviewChanged = draft.reviewDay !== review.day || draft.reviewAt !== review.at;
+        return (change ? call('save_workweek', { change }) : Promise.resolve(page))
           .then((p) =>
-            call('save_coach_settings', {
-              config: { ...p.coach, review: { day: draft.reviewDay, at: draft.reviewAt } },
-            }),
+            reviewChanged
+              ? call('save_coach_settings', { change: { review: { day: draft.reviewDay, at: draft.reviewAt } } })
+              : p,
           )
           .then(setPage);
       }
@@ -116,12 +122,20 @@ function App() {
         if (goal !== null && !Number.isInteger(goal)) {
           return Promise.reject(new Error('Write the goal as a whole number of ml, or leave it empty.'));
         }
-        return call('save_water_settings', { goalMl: goal, servings }).then(setPage);
+        const edit = servingEdit(page.servings, servings);
+        const goalSave =
+          goal !== null && goal !== page.water_goal_ml
+            ? call('save_water_settings', { change: { goal } })
+            : Promise.resolve(page);
+        return goalSave.then((p) => (edit ? call('save_water_settings', { change: edit }) : p)).then(setPage);
       }
       case 5:
-        return call('save_coach_settings', {
-          config: { ...page.coach, intensity: draft.coach.intensity, categories: draft.coach.categories },
-        }).then(setPage);
+        return reminderChanges(page.coach, draft.coach)
+          .reduce<Promise<SettingsPage>>(
+            (done, change) => done.then(() => call('save_coach_settings', { change })),
+            Promise.resolve(page),
+          )
+          .then(setPage);
       default:
         return Promise.resolve();
     }

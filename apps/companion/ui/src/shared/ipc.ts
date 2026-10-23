@@ -8,7 +8,6 @@ import type {
   BackupDone,
   BackupSummary,
   CoachChange,
-  CoachConfig,
   MonthReview,
   PanelView,
   PetEdit,

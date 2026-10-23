@@ -5,7 +5,7 @@
 // settings: another window (the weekly review's Apply or Undo) may have changed other
 // fields since the page loaded, and a whole copy would silently undo them. The shell
 // applies each change to what is saved now, one at a time on the engine's thread.
-import type { SettingsPage, WeekdayName, WorkweekChange } from '../shared/types';
+import type { CoachChange, CoachConfig, SettingsPage, WaterChange, WeekdayName, WorkweekChange } from '../shared/types';
 
 /** The saved workweek, and what the form shows now. */
 export interface WorkweekForm {
@@ -28,4 +28,22 @@ export function workweekChange(saved: WorkweekForm, form: WorkweekForm): Workwee
  *  page with the newest revision wins (an equal revision is a fresh read: it wins). */
 export function newer(shown: SettingsPage | null, next: SettingsPage): SettingsPage {
   return shown !== null && shown.revision > next.revision ? shown : next;
+}
+
+/** The setup wizard's serving list as one edit against the list it showed: what to add
+ *  and what to remove, so buttons another window changed meanwhile are kept. */
+export function servingEdit(shown: number[], wanted: number[]): WaterChange | null {
+  const add = wanted.filter((ml) => !shown.includes(ml));
+  const remove = shown.filter((ml) => !wanted.includes(ml));
+  return add.length + remove.length > 0 ? { edit_servings: { add, remove } } : null;
+}
+
+/** The wizard's reminder choices as one change per field that differs from what it showed. */
+export function reminderChanges(shown: CoachConfig, wanted: CoachConfig): CoachChange[] {
+  const out: CoachChange[] = [];
+  if (wanted.intensity !== shown.intensity) out.push({ intensity: wanted.intensity });
+  if (wanted.categories.movement !== shown.categories.movement) out.push({ movement: wanted.categories.movement });
+  if (wanted.categories.eye_rest !== shown.categories.eye_rest) out.push({ eye_rest: wanted.categories.eye_rest });
+  if (wanted.categories.water !== shown.categories.water) out.push({ water: wanted.categories.water });
+  return out;
 }

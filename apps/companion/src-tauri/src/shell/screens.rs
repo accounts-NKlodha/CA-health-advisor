@@ -159,7 +159,7 @@ impl Shell {
     pub fn save_water_settings(&self, change: WaterChange) -> Result<SettingsPage, String> {
         self.change_settings(move |s| {
             let today = s.today()?;
-            s.change_water(change, today)
+            s.change_water(&change, today)
         })?;
         self.settings_page()
     }

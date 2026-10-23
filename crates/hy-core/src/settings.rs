@@ -67,7 +67,7 @@ impl CoachChange {
 
 /// One change on the Water tab: the goal, or one serving button added or removed.
 /// Serialised as a single key, e.g. `{"add_serving": 750}`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum WaterChange {
     /// The daily goal in ml, from today.
@@ -76,6 +76,14 @@ pub enum WaterChange {
     AddServing(u32),
     /// Remove a serving button.
     RemoveServing(u32),
+    /// The setup wizard's list edit: remove some buttons and add others in one change,
+    /// against the buttons saved now (W1 step 5).
+    EditServings {
+        /// Amounts to add.
+        add: Vec<u32>,
+        /// Amounts to remove.
+        remove: Vec<u32>,
+    },
 }
 
 impl WaterChange {
@@ -86,23 +94,28 @@ impl WaterChange {
     ///
     /// # Errors
     /// [`Error::Invalid`] if the result breaks the serving rules.
-    pub fn servings_after(self, now: &Servings) -> Result<Option<Servings>> {
-        match self {
-            Self::Goal(_) => Ok(None),
-            Self::AddServing(ml) if now.contains(ml) => Ok(Some(now.clone())),
-            Self::AddServing(ml) => {
-                let mut v = now.ml().to_vec();
-                v.push(ml);
-                Servings::new(v).map(Some)
-            }
-            Self::RemoveServing(ml) => {
-                let v: Vec<u32> = now.ml().iter().copied().filter(|x| *x != ml).collect();
-                if v.is_empty() {
-                    return Err(Error::invalid("keep at least one serving button"));
-                }
-                Servings::new(v).map(Some)
+    pub fn servings_after(&self, now: &Servings) -> Result<Option<Servings>> {
+        let (add, remove): (&[u32], &[u32]) = match self {
+            Self::Goal(_) => return Ok(None),
+            Self::AddServing(ml) => (std::slice::from_ref(ml), &[]),
+            Self::RemoveServing(ml) => (&[], std::slice::from_ref(ml)),
+            Self::EditServings { add, remove } => (add, remove),
+        };
+        let mut v: Vec<u32> = now
+            .ml()
+            .iter()
+            .copied()
+            .filter(|x| !remove.contains(x))
+            .collect();
+        for ml in add {
+            if !v.contains(ml) {
+                v.push(*ml);
             }
         }
+        if v.is_empty() {
+            return Err(Error::invalid("keep at least one serving button"));
+        }
+        Servings::new(v).map(Some)
     }
 }
 
@@ -221,6 +234,28 @@ mod tests {
                 .is_err()
         );
         assert_eq!(WaterChange::Goal(2000).servings_after(&one).unwrap(), None);
+        // The wizard's list edit: 750 added elsewhere stays; 150 swapped for 200.
+        let edit = WaterChange::EditServings {
+            add: vec![200],
+            remove: vec![150],
+        };
+        assert_eq!(
+            edit.servings_after(&now).unwrap().unwrap().ml(),
+            [200, 250, 500, 750]
+        );
+        let all = WaterChange::EditServings {
+            add: vec![],
+            remove: vec![150, 250, 500, 750],
+        };
+        assert!(all.servings_after(&now).is_err());
+        let swap = WaterChange::EditServings {
+            add: vec![300],
+            remove: vec![250],
+        };
+        assert_eq!(
+            swap.servings_after(&one).unwrap().unwrap().ml(),
+            [300] // remove before add: never empty in between
+        );
     }
 
     #[test]

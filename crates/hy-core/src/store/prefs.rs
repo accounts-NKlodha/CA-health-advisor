@@ -56,9 +56,9 @@ impl Store {
     ///
     /// # Errors
     /// [`Error::Invalid`] if the result breaks a rule; nothing is written.
-    pub fn change_water(&self, change: WaterChange, today: NaiveDate) -> Result<()> {
+    pub fn change_water(&self, change: &WaterChange, today: NaiveDate) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        if let WaterChange::Goal(goal) = change {
+        if let WaterChange::Goal(goal) = *change {
             if self.goal_on(GoalKind::WaterDailyMl, today)? != Some(goal) {
                 self.set_goal(GoalKind::WaterDailyMl, goal, today)?;
             }
