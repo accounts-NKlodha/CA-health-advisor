@@ -153,6 +153,7 @@ impl Engine {
             stage,
             from_reminder: g.offer.is_some(),
             open: g.open,
+            default_variant: ctx.config.movement_version.variant(),
         })
     }
 

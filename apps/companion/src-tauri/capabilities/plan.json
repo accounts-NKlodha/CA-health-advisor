@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "plan",
+  "description": "The recovery-day plan window (created on open, destroyed on close): the pending plan, save, change date, cancel.",
+  "windows": [
+    "plan"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-plan-page",
+    "allow-plan-save",
+    "allow-plan-cancel"
+  ]
+}

@@ -23,7 +23,9 @@
 //! the work area with its entry rows), and an entry is logged, corrected and removed
 //! there; "Phone interruption" is noted, labelled and undone, each checked in the store.
 //! Then the review window (wireframes W13 and W14) opens under its own capability, its page
-//! loads this week's review, monthly progress reads, and the window closes.
+//! loads this week's review, monthly progress reads, and the window closes. Last, the
+//! settings window loads its V1-4 tabs, a larger text size is saved and reaches the pet's
+//! view, and the recovery-day plan window (W15) opens under its own capability and loads.
 //!
 //! A CI runner is not an office PC: focus checks that depend on an interactive desktop
 //! are recorded as informational, and real Windows acceptance of focus and DPI remains a
@@ -623,7 +625,11 @@ fn coach_end_to_end(
     // 6. The weekly review window (wireframes W13 and W14) from the tray or pet menu.
     review_window(r, shell);
 
-    // 7. The engine's state is saved (as on exit).
+    // 7. The settings tabs and the recovery-day plan window (slice V1-4).
+    settings_window(r, shell);
+    plan_window(r, shell);
+
+    // 8. The engine's state is saved (as on exit).
     let saved = runner.call(|l| l.flush().is_ok()) == Some(true);
     r.check("coach_state_saved", saved, "flush of the engine state");
 }
@@ -983,6 +989,7 @@ fn review_window(r: &mut Report, shell: &Arc<Shell>) {
         }) == Some(true)
     });
     let loaded = wait_until(Duration::from_secs(30), || shell.review_loaded());
+    let offer = offer_navigation(shell);
     let week = shell.review_week(None);
     let week_ok = week.as_ref().is_ok_and(|p| p.review.days.len() == 7);
     let month = shell.review_month(None);
@@ -1014,5 +1021,136 @@ fn review_window(r: &mut Report, shell: &Arc<Shell>) {
         format!(
             "opened {opened}; page loaded {loaded}; week {week_detail}; month {month_detail}; closed {closed}"
         ),
+    );
+    r.check(
+        "review_offer_week",
+        offer.0,
+        format!("open window, then a new one: {}", offer.1),
+    );
+}
+
+/// "Open" on the weekly review offer goes to its week: in the review window already open
+/// (told by an event, it asks for that week), then in a new window (whose first request
+/// is that week, never this week first). Leaves the review window open.
+fn offer_navigation(shell: &Arc<Shell>) -> (bool, String) {
+    use chrono::Days;
+    let Some(week) = shell
+        .review_week(None)
+        .ok()
+        .and_then(|p| p.review.start.checked_sub_days(Days::new(7)))
+    else {
+        return (false, "no week to offer".into());
+    };
+    let _ = shell.take_review_requests();
+    let _ = on_main(shell, move |s| s.open_review_on(week));
+    let open_ok = wait_until(Duration::from_secs(10), || {
+        let asked = shell.take_review_requests();
+        asked.contains(&Some(week))
+    });
+    let _ = on_main(shell, |s| {
+        use tauri::Manager;
+        if let Some(w) = s.app().get_webview_window(crate::shell::REVIEW) {
+            let _ = w.close();
+        }
+    });
+    let closed = wait_until(Duration::from_secs(10), || {
+        !window_open(shell, crate::shell::REVIEW)
+    });
+    let _ = shell.take_review_requests();
+    let _ = on_main(shell, move |s| s.open_review_on(week));
+    let mut first = None;
+    let new_ok = wait_until(Duration::from_secs(30), || {
+        if first.is_none() {
+            first = shell.take_review_requests().first().copied();
+        }
+        first.is_some()
+    }) && first == Some(Some(week));
+    let taken = shell.review_target().is_none();
+    (
+        open_ok && closed && new_ok && taken,
+        format!(
+            "offered {week}; open window asked for it {open_ok}; closed {closed}; new window's first request {first:?}; target taken {taken}"
+        ),
+    )
+}
+
+/// Whether the window `label` is open, asked on the main thread.
+fn window_open(shell: &Arc<Shell>, label: &'static str) -> bool {
+    use tauri::Manager;
+    on_main(shell, move |s| s.app().get_webview_window(label).is_some()) == Some(true)
+}
+
+/// Close the window `label`, if open, and wait for it to go.
+fn close_window(shell: &Arc<Shell>, label: &'static str) -> bool {
+    use tauri::Manager;
+    let _ = on_main(shell, move |s| {
+        if let Some(w) = s.app().get_webview_window(label) {
+            let _ = w.close();
+        }
+    });
+    wait_until(Duration::from_secs(10), || !window_open(shell, label))
+}
+
+/// Open the settings window, wait for its page to load the V1-4 tabs, save a larger
+/// text size and check the pet's view follows it, put it back, then close the window.
+fn settings_window(r: &mut Report, shell: &Arc<Shell>) {
+    use hy_core::prefs::Accessibility;
+    let _ = on_main(shell, |s| s.open_settings());
+    let opened = wait_until(Duration::from_secs(10), || {
+        window_open(shell, crate::shell::SCREENS)
+    });
+    let loaded = wait_until(Duration::from_secs(30), || shell.settings_loaded());
+    let page = shell.settings_page();
+    let page_ok = page
+        .as_ref()
+        .is_ok_and(|p| !p.zones.is_empty() && !p.programme.is_empty());
+    let larger = Accessibility {
+        text_pct: 125,
+        ..Accessibility::default()
+    };
+    let saved = on_main(shell, move |s| s.save_accessibility(larger).is_ok()) == Some(true);
+    let followed = shell.display_prefs().text_pct == 125;
+    let restored = on_main(shell, |s| {
+        s.save_accessibility(Accessibility::default()).is_ok()
+    }) == Some(true);
+    let closed = close_window(shell, crate::shell::SCREENS);
+    let detail = match &page {
+        Ok(p) => format!(
+            "{} zones, {} programme days",
+            p.zones.len(),
+            p.programme.len()
+        ),
+        Err(e) => e.clone(),
+    };
+    r.check(
+        "settings_window",
+        opened && loaded && page_ok && saved && followed && restored && closed,
+        format!(
+            "opened {opened}; page loaded {loaded}; {detail}; text size saved {saved}; pet followed {followed}; restored {restored}; closed {closed}"
+        ),
+    );
+}
+
+/// Open the recovery-day plan window, wait for its page to load, then close it.
+fn plan_window(r: &mut Report, shell: &Arc<Shell>) {
+    let _ = on_main(shell, |s| s.open_plan());
+    let opened = wait_until(Duration::from_secs(10), || {
+        window_open(shell, crate::shell::PLAN)
+    });
+    let loaded = wait_until(Duration::from_secs(30), || shell.plan_loaded());
+    let page = shell.plan_page();
+    let page_ok = page.as_ref().is_ok_and(|p| !p.dates.is_empty());
+    let _ = on_main(shell, |s| s.close_plan());
+    let closed = wait_until(Duration::from_secs(10), || {
+        !window_open(shell, crate::shell::PLAN)
+    });
+    let detail = match &page {
+        Ok(p) => format!("{} dates, draft for {}", p.dates.len(), p.draft.date),
+        Err(e) => e.clone(),
+    };
+    r.check(
+        "plan_window",
+        opened && loaded && page_ok && closed,
+        format!("opened {opened}; page loaded {loaded}; {detail}; closed {closed}"),
     );
 }

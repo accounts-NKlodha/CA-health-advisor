@@ -1,6 +1,7 @@
-//! The pet shell: the pet window, its bubble, the keyboard panel, the settings window and
-//! the review window, driven by the pure rules in `hy-pet` (and `hy_core::review` for the
-//! reviews).
+//! The pet shell: the pet window, its bubble, the keyboard panel, the settings window,
+//! the review window and the recovery-day plan window, driven by the pure rules in
+//! `hy-pet` (and `hy_core::review` for the reviews; the settings tabs and the plan window
+//! are in [`screens`]).
 //!
 //! Threading: every method of [`Shell`] runs on Tauri's main (UI) thread: synchronous
 //! commands, tray and window events run there already, and everything else is posted
@@ -17,12 +18,14 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use chrono::NaiveDate;
+use hy_core::prefs::Accessibility;
 use hy_core::review::{MonthReview, WeekReview};
 use hy_core::schema::{PetEdge, PhoneLabel};
 use hy_core::store::{MonthKey, PetProfile, Store};
 use hy_pet::frame::ShellCore;
 use hy_pet::geometry::{Monitor, Rect, layout_fingerprint};
 use hy_pet::hotkey::Hotkey;
+use hy_pet::link::present::action;
 use hy_pet::messages::{MessageId, bring_back_message, message};
 use hy_pet::pack::{Library, Pack};
 use hy_pet::placement::{
@@ -53,6 +56,11 @@ pub const PANEL: &str = "panel";
 pub const SCREENS: &str = "screens";
 /// The review window's label (wireframes W13 and W14).
 pub const REVIEW: &str = "review";
+/// The recovery-day plan window's label (wireframe W15).
+pub const PLAN: &str = "plan";
+
+mod screens;
+pub use screens::SuggestionAnswer;
 
 /// How long the "Your pet is back above the clock" notice stays.
 const NOTICE_MS: u64 = 2600;
@@ -69,6 +77,29 @@ struct Drag {
     origin: (i32, i32),
 }
 
+/// The week the review offer's "Open" named, kept until the review page takes it (once),
+/// so the page holds the week in its own state from then on. Opening the review any other
+/// way drops it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReviewTarget(Option<NaiveDate>);
+
+impl ReviewTarget {
+    /// "Open" on the offer for the week starting `week`.
+    pub const fn offer(&mut self, week: NaiveDate) {
+        self.0 = Some(week);
+    }
+
+    /// The review opened another way.
+    pub const fn clear(&mut self) {
+        self.0 = None;
+    }
+
+    /// The page takes the week (once).
+    pub const fn take(&mut self) -> Option<NaiveDate> {
+        self.0.take()
+    }
+}
+
 #[derive(Debug)]
 struct Inner {
     /// The shell's rules and the window frame (pet, monitor, open bubble layout, the
@@ -83,6 +114,18 @@ struct Inner {
     notice_seq: u64,
     page_ready: bool,
     review_loaded: bool,
+    /// The weeks the review page asked for, latest last (for the self-test).
+    review_requests: Vec<Option<NaiveDate>>,
+    /// Display preferences (Settings, Accessibility), kept here for every view.
+    a11y: Accessibility,
+    /// The week "Open" on the weekly review offer named, until the review page takes it.
+    review_target: ReviewTarget,
+    /// A settings page loaded its tabs (for the self-test).
+    settings_loaded: bool,
+    /// Settings changes made since start (see [`crate::view::SettingsPage::revision`]).
+    settings_revision: u64,
+    /// The plan window loaded (for the self-test).
+    plan_loaded: bool,
 }
 
 /// The pet shell.
@@ -179,6 +222,8 @@ impl Shell {
     ) -> Result<Arc<Self>, hy_core::error::Error> {
         let profile = profile::current_profile(&store, &library)?;
         let hotkey = profile::panel_hotkey(&store)?;
+        // Unreadable preferences fall back to the defaults rather than stop the app.
+        let a11y = store.accessibility().unwrap_or_default();
         Ok(Arc::new(Self {
             app,
             store: Mutex::new(store),
@@ -194,6 +239,12 @@ impl Shell {
                 notice_seq: 0,
                 page_ready: false,
                 review_loaded: false,
+                review_requests: Vec::new(),
+                a11y,
+                review_target: ReviewTarget::default(),
+                settings_loaded: false,
+                settings_revision: 0,
+                plan_loaded: false,
             }),
             sink: Mutex::new(None),
             system: Mutex::new(None),
@@ -485,7 +536,8 @@ impl Shell {
             pose: pose_for(pack, look.base),
             accessible_name: look.accessible_name(&i.profile.display_name),
             look,
-            motion: i.profile.motion,
+            motion: i.profile.motion && !i.a11y.reduced_motion,
+            a11y: i.a11y,
             pet_px: pet_window_logical(i.profile.scale_pct),
             open: open_view(i.core.model.open(), token, || self.menu_for(i)),
             layout,
@@ -662,8 +714,24 @@ impl Shell {
     }
 
     /// An action in the engine's bubble.
+    ///
+    /// Two answers also open a window: "Edit plan" on the planned recovery day (the plan
+    /// window, W15) and "Open" on the weekly review offer (the review on that week, W13).
+    /// The engine closes the card either way.
     pub fn bubble_action(self: &Arc<Self>, bubble_id: &str, action_id: &str) {
+        let offered = matches!(
+            lock(&self.inner).core.model.open(),
+            Open::Bubble { bubble } if bubble.id == bubble_id && bubble.has_action(action_id)
+        );
         self.run(|i, _| i.core.model.bubble_action(bubble_id, action_id));
+        if !offered {
+            return;
+        }
+        if action_id == action::EDIT_PLAN {
+            self.open_plan();
+        } else if let Some(week) = hy_pet::link::review_week(action_id) {
+            self.open_review_on(week);
+        }
     }
 
     /// An engine action from the pet menu, panel or tray.
@@ -840,6 +908,7 @@ impl Shell {
             ),
             accessible_name: StateLook::of(i.core.model.state().0, i.core.model.state().1)
                 .accessible_name(&i.profile.display_name),
+            a11y: i.a11y,
         }
     }
 
@@ -920,31 +989,57 @@ impl Shell {
 
     // ------------------------------------------------------------------ reviews
 
-    /// Open the review window (or focus it).
+    /// Open the review window (or focus it) as it is: from the tray, the pet menu, the
+    /// panel or Settings. A week the review offer named and no page took is dropped.
     pub fn open_review(self: &Arc<Self>) {
+        lock(&self.inner).review_target.clear();
+        self.show_review();
+    }
+
+    /// "Open" on the weekly review offer: the review on that week, in a new window (its
+    /// page takes the week when it loads) or in the one already open, whatever week or
+    /// tab it shows (told by `hy://review-target`, it takes the week now).
+    pub fn open_review_on(self: &Arc<Self>, week: NaiveDate) {
+        lock(&self.inner).review_target.offer(week);
+        self.show_review();
+        let _ = self.app.emit_to(REVIEW, "hy://review-target", week);
+    }
+
+    /// The week the review page should go to, once ("Open" on the review offer).
+    pub fn review_target(&self) -> Option<NaiveDate> {
+        lock(&self.inner).review_target.take()
+    }
+
+    fn show_review(self: &Arc<Self>) {
         let monitor = lock(&self.inner).core.monitor().cloned();
         if let Err(e) = windows::open_review(&self.app, monitor.as_ref()) {
             eprintln!("HealthierYou: could not open the review: {e}");
         }
     }
 
-    /// The motion setting the review pages follow, and note that a review page loaded.
-    fn review_motion(&self) -> bool {
+    /// The motion setting and display preferences the review pages follow, and note
+    /// that a review page loaded.
+    fn review_motion(&self) -> (bool, Accessibility) {
         let mut i = lock(&self.inner);
         i.review_loaded = true;
-        i.profile.motion
+        (i.profile.motion && !i.a11y.reduced_motion, i.a11y)
     }
 
-    /// The weekly review of the week containing `day` (default this week).
+    /// The weekly review of the week containing `day` (default this week). The page keeps
+    /// the week it shows and always names it, so a refresh never changes the week.
     ///
     /// # Errors
     /// A store read failure, worded for the page.
     pub fn review_week(&self, day: Option<NaiveDate>) -> Result<ReviewPage<WeekReview>, String> {
-        let motion = self.review_motion();
+        let (motion, a11y) = self.review_motion();
         let review = lock(&self.store)
             .week_review(day)
             .map_err(|e| format!("The review could not be read: {e}"))?;
-        Ok(ReviewPage { review, motion })
+        Ok(ReviewPage {
+            review,
+            motion,
+            a11y,
+        })
     }
 
     /// Monthly progress for `month` (default this month).
@@ -952,11 +1047,15 @@ impl Shell {
     /// # Errors
     /// A store read failure, worded for the page.
     pub fn review_month(&self, month: Option<MonthKey>) -> Result<ReviewPage<MonthReview>, String> {
-        let motion = self.review_motion();
+        let (motion, a11y) = self.review_motion();
         let review = lock(&self.store)
             .month_review(month)
             .map_err(|e| format!("The review could not be read: {e}"))?;
-        Ok(ReviewPage { review, motion })
+        Ok(ReviewPage {
+            review,
+            motion,
+            a11y,
+        })
     }
 
     /// Change a past phone report's label from the weekly review (a correction that
@@ -982,6 +1081,21 @@ impl Shell {
     /// Whether a review page has loaded (for the self-test).
     pub fn review_loaded(&self) -> bool {
         lock(&self.inner).review_loaded
+    }
+
+    /// Note the week the review page asked for (the last 16 are kept, for the self-test).
+    pub fn note_review_request(&self, day: Option<NaiveDate>) {
+        let mut i = lock(&self.inner);
+        if i.review_requests.len() >= 16 {
+            i.review_requests.remove(0);
+        }
+        i.review_requests.push(day);
+    }
+
+    /// The weeks the review page asked for since the last call, oldest first (for the
+    /// self-test).
+    pub fn take_review_requests(&self) -> Vec<Option<NaiveDate>> {
+        std::mem::take(&mut lock(&self.inner).review_requests)
     }
 
     // ---------------------------------------------------------- engine plumbing

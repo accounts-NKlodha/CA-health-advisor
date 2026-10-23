@@ -53,7 +53,7 @@ use hy_core::schema::{EventPayload, NewEvent, PhoneLabel};
 use hy_core::store::Store;
 use uuid::Uuid;
 
-pub use route::{Command, EntryChange, RouteState, Routed, route};
+pub use route::{Command, EntryChange, RouteState, Routed, review_week, route};
 
 use self::present::BubbleKind;
 use crate::shell::{
@@ -330,6 +330,18 @@ impl CoachLink {
             _ => return Ok(None),
         };
         Ok(Some(input))
+    }
+
+    /// Change settings through the engine's store connection (a settings screen, or a
+    /// suggestion applied from the weekly review), then refresh so the engine and the pet
+    /// follow them at once. Nothing is refreshed if `f` fails.
+    ///
+    /// # Errors
+    /// What `f` returns, or a store error from the refresh.
+    pub fn change_settings<T>(&mut self, f: impl FnOnce(&mut Store) -> Result<T>) -> Result<T> {
+        let out = f(self.coach.store_mut())?;
+        self.input(Input::Refresh)?;
+        Ok(out)
     }
 
     /// Save anything not yet saved (on exit).

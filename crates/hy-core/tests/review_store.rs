@@ -415,3 +415,326 @@ fn day_facts_refuses_unreasonable_ranges() {
         31
     );
 }
+
+// ------------------------------------------------------- suggestions (V1-4)
+
+mod suggestions {
+    use super::*;
+    use hy_core::coach::{Intensity, MovementVersion, Servings};
+    use hy_core::review::suggest::{SuggestionKind, SuggestionState};
+    use hy_core::settings::{CoachChange, WaterChange, WorkweekChange};
+
+    /// A store first used on Monday 12 Oct, now Saturday 24 Oct 17:30, every workday of
+    /// this week recorded, with 750 ml logged three times and three seated routines.
+    fn week() -> Env {
+        let mut env = Env::new(ist(10, 12, 9, 0), ist(10, 24, 17, 30));
+        for d in 19..=24 {
+            env.track(date(10, d));
+        }
+        for d in [19, 20, 21] {
+            env.water(ist(10, d, 11, 0), 750);
+            env.routine(ist(10, d, 12, 0), RoutineOutcome::Done);
+            env.reminder(ist(10, d, 15, 0), Activity::Movement, ReminderOutcome::Done);
+        }
+        env
+    }
+
+    fn kinds(env: &Env) -> Vec<(SuggestionKind, SuggestionState)> {
+        env.store
+            .week_review(None)
+            .unwrap()
+            .suggestions
+            .into_iter()
+            .map(|s| (s.kind, s.state))
+            .collect()
+    }
+
+    #[test]
+    fn suggestions_come_from_the_weeks_own_records() {
+        let env = week();
+        assert_eq!(
+            kinds(&env),
+            vec![
+                (SuggestionKind::Serving, SuggestionState::Open),
+                (SuggestionKind::Seated, SuggestionState::Open),
+            ]
+        );
+        // Older weeks get none.
+        let old = env.store.week_review(Some(date(10, 12))).unwrap();
+        assert!(old.suggestions.is_empty());
+    }
+
+    #[test]
+    fn apply_changes_the_setting_and_undo_restores_it_exactly() {
+        let mut env = week();
+        let monday = date(10, 19);
+        env.store
+            .apply_suggestion(monday, SuggestionKind::Serving)
+            .unwrap();
+        assert_eq!(
+            env.store.water_servings().unwrap().ml(),
+            &[150, 250, 500, 750]
+        );
+        let shown = env.store.week_review(None).unwrap().suggestions;
+        assert_eq!(
+            shown[0].state,
+            SuggestionState::Applied {
+                now: "serving buttons 150, 250, 500, 750 ml".into(),
+                was: "serving buttons 150, 250, 500 ml".into(),
+            }
+        );
+        assert!(
+            env.store
+                .apply_suggestion(monday, SuggestionKind::Serving)
+                .is_err()
+        );
+        env.store
+            .apply_suggestion(monday, SuggestionKind::Seated)
+            .unwrap();
+        assert_eq!(
+            env.store.coach_config().unwrap().movement_version,
+            MovementVersion::Seated
+        );
+        env.store
+            .undo_suggestion(monday, SuggestionKind::Serving)
+            .unwrap();
+        assert_eq!(env.store.water_servings().unwrap(), Servings::default());
+        env.store
+            .undo_suggestion(monday, SuggestionKind::Seated)
+            .unwrap();
+        assert_eq!(
+            env.store.coach_config().unwrap().movement_version,
+            MovementVersion::Ask
+        );
+        assert_eq!(
+            kinds(&env),
+            vec![
+                (SuggestionKind::Serving, SuggestionState::Open),
+                (SuggestionKind::Seated, SuggestionState::Open),
+            ]
+        );
+        assert!(
+            env.store
+                .undo_suggestion(monday, SuggestionKind::Seated)
+                .is_err()
+        );
+    }
+
+    /// Codex repro on #13: Settings is open (it loaded the settings earlier); the weekly
+    /// review applies the seated default and the 750 ml button; back in Settings the user
+    /// switches eye rest off and saves a water goal. The page sends only those fields, so
+    /// what the review applied is kept, and Undo still restores its own prior value.
+    #[test]
+    fn a_stale_settings_page_keeps_what_the_review_applied() {
+        let mut env = week();
+        let monday = date(10, 19);
+        let page_coach = env.store.coach_config().unwrap();
+        env.store
+            .apply_suggestion(monday, SuggestionKind::Seated)
+            .unwrap();
+        env.store
+            .apply_suggestion(monday, SuggestionKind::Serving)
+            .unwrap();
+        assert!(page_coach.categories.eye_rest);
+        env.store
+            .change_coach_config(CoachChange::EyeRest(false))
+            .unwrap();
+        env.store
+            .change_water(WaterChange::Goal(2200), date(10, 24))
+            .unwrap();
+        let c = env.store.coach_config().unwrap();
+        assert!(!c.categories.eye_rest);
+        assert_eq!(c.movement_version, MovementVersion::Seated);
+        assert_eq!(
+            env.store.water_servings().unwrap().ml(),
+            &[150, 250, 500, 750]
+        );
+        assert_eq!(
+            env.store
+                .goal_on(GoalKind::WaterDailyMl, date(10, 24))
+                .unwrap(),
+            Some(2200)
+        );
+        // The page still shows 150/250/500: removing 150 keeps the 750 the review added.
+        env.store
+            .change_water(WaterChange::RemoveServing(150), date(10, 24))
+            .unwrap();
+        assert_eq!(env.store.water_servings().unwrap().ml(), &[250, 500, 750]);
+        // Undo in the review restores its own field only; eye rest stays off.
+        env.store
+            .undo_suggestion(monday, SuggestionKind::Seated)
+            .unwrap();
+        let c = env.store.coach_config().unwrap();
+        assert_eq!(c.movement_version, MovementVersion::Ask);
+        assert!(!c.categories.eye_rest);
+    }
+
+    /// Two changes sent from the same page before either answered (each built from the
+    /// same loaded copy) both stay; so do Light reminders applied from the review.
+    #[test]
+    fn rapid_successive_changes_from_one_page_all_stay() {
+        let mut env = Env::new(ist(10, 12, 9, 0), ist(10, 24, 17, 30));
+        for d in 19..=24 {
+            env.track(date(10, d));
+            env.reminder(
+                ist(10, d, 10, 0),
+                Activity::Movement,
+                ReminderOutcome::Dismissed,
+            );
+            env.reminder(
+                ist(10, d, 11, 0),
+                Activity::EyeRest,
+                ReminderOutcome::NoResponse,
+            );
+        }
+        env.store
+            .apply_suggestion(date(10, 19), SuggestionKind::Lighter)
+            .unwrap();
+        for change in [
+            CoachChange::EyeRest(false),
+            CoachChange::PomodoroAutoStart(true),
+            CoachChange::LongDayHours(10),
+            CoachChange::Water(false),
+        ] {
+            env.store.change_coach_config(change).unwrap();
+        }
+        let c = env.store.coach_config().unwrap();
+        assert_eq!(c.intensity, Intensity::Light);
+        assert!(!c.categories.eye_rest && !c.categories.water && c.categories.movement);
+        assert!(c.pomodoro_auto_start);
+        assert_eq!(c.long_day_check_in.hours, 10);
+        // A refused change writes nothing.
+        assert!(
+            env.store
+                .change_coach_config(CoachChange::LongDayHours(12))
+                .is_err()
+        );
+        assert_eq!(env.store.coach_config().unwrap(), c);
+        // Workweek: a save that changed only the hours keeps workdays and zone.
+        let days = hy_core::time::WeekdaySet::default()
+            .with(chrono::Weekday::Mon)
+            .with(chrono::Weekday::Tue);
+        env.store
+            .change_workweek(&WorkweekChange {
+                workdays: Some(days),
+                ..WorkweekChange::default()
+            })
+            .unwrap();
+        let hours: WorkweekChange =
+            serde_json::from_str(r#"{"hours":{"start":"08:00","end":"16:00"}}"#).unwrap();
+        env.store.change_workweek(&hours).unwrap();
+        let s = env.store.work_schedule().unwrap();
+        assert_eq!(s.workdays, days);
+        assert_eq!(s.start.to_string(), "08:00:00");
+        assert!(
+            env.store
+                .change_workweek(&WorkweekChange {
+                    zone: Some("Nowhere/City".into()),
+                    workdays: Some(hy_core::time::WeekdaySet::MON_TO_SAT),
+                    hours: None,
+                })
+                .is_err()
+        );
+        assert_eq!(env.store.work_schedule().unwrap().workdays, days);
+    }
+
+    #[test]
+    fn not_for_me_hides_it_for_that_week() {
+        let mut env = week();
+        env.store
+            .hide_suggestion(date(10, 19), SuggestionKind::Seated)
+            .unwrap();
+        assert_eq!(
+            kinds(&env),
+            vec![
+                (SuggestionKind::Serving, SuggestionState::Open),
+                (SuggestionKind::Seated, SuggestionState::Hidden),
+            ]
+        );
+        assert!(
+            env.store
+                .hide_suggestion(date(10, 19), SuggestionKind::Lighter)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn many_set_aside_breaks_suggest_one_step_lighter() {
+        let mut env = Env::new(ist(10, 12, 9, 0), ist(10, 24, 17, 30));
+        for d in 19..=24 {
+            env.track(date(10, d));
+            env.reminder(
+                ist(10, d, 10, 0),
+                Activity::Movement,
+                ReminderOutcome::Dismissed,
+            );
+            env.reminder(
+                ist(10, d, 11, 0),
+                Activity::EyeRest,
+                ReminderOutcome::NoResponse,
+            );
+        }
+        let s = env.store.week_review(None).unwrap().suggestions;
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].kind, SuggestionKind::Lighter);
+        assert_eq!(
+            s[0].text,
+            "12 of 12 breaks were set aside. Try fewer reminders next week?"
+        );
+        env.store
+            .apply_suggestion(date(10, 19), SuggestionKind::Lighter)
+            .unwrap();
+        assert_eq!(
+            env.store.coach_config().unwrap().intensity,
+            Intensity::Light
+        );
+    }
+
+    #[test]
+    fn a_strong_week_says_no_change_is_needed() {
+        let mut env = Env::new(ist(10, 12, 9, 0), ist(10, 24, 17, 30));
+        for d in 19..=24 {
+            env.track(date(10, d));
+            env.reminder(ist(10, d, 10, 0), Activity::Movement, ReminderOutcome::Done);
+        }
+        let s = env.store.week_review(None).unwrap().suggestions;
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].kind, SuggestionKind::Keep);
+        assert_eq!(s[0].state, SuggestionState::Info);
+        assert!(
+            env.store
+                .apply_suggestion(date(10, 19), SuggestionKind::Keep)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn not_enough_data_gives_no_suggestions() {
+        let mut env = Env::new(ist(10, 12, 9, 0), ist(10, 24, 17, 30));
+        env.track(date(10, 19));
+        for _ in 0..3 {
+            env.water(ist(10, 19, 11, 0), 750);
+        }
+        assert!(env.store.week_review(None).unwrap().suggestions.is_empty());
+    }
+
+    #[test]
+    fn settings_round_trip() {
+        let env = week();
+        let a = hy_core::prefs::Accessibility {
+            text_pct: 125,
+            reduced_motion: true,
+            high_contrast: true,
+        };
+        env.store.set_accessibility(&a).unwrap();
+        assert_eq!(env.store.accessibility().unwrap(), a);
+        assert!(
+            env.store
+                .set_accessibility(&hy_core::prefs::Accessibility { text_pct: 90, ..a })
+                .is_err()
+        );
+        let mut c = env.store.coach_config().unwrap();
+        c.long_day_check_in.hours = 11;
+        assert!(env.store.set_coach_config(&c).is_err());
+    }
+}

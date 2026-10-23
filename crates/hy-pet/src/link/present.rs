@@ -12,12 +12,12 @@ use chrono::{NaiveDate, NaiveTime, Weekday};
 use hy_core::coach::movement::{
     INTRO_SAFETY, PROVISIONAL, PROVISIONAL_NOTICE, STEP_SAFETY, routine_for,
 };
-use hy_core::coach::water::{WATER_DEFAULT_SERVING_ML, WATER_SERVINGS_ML, WATER_STEP_ML};
+use hy_core::coach::water::{WATER_DEFAULT_SERVING_ML, WATER_STEP_ML};
 use hy_core::coach::{
     Bubble as CoachBubble, Chip, ChipStatus, CoachView, GuideStage, GuideView, PetMode,
     PomodoroPause, PomodoroPhase, PomodoroView, RecoveryPlan, ReminderReason, WaterEdit,
 };
-use hy_core::schema::{Activity, PhoneLabel, RoutineOutcome, SessionState};
+use hy_core::schema::{Activity, PhoneLabel, RoutineOutcome, RoutineVariant, SessionState};
 use uuid::Uuid;
 
 use crate::shell::{
@@ -148,6 +148,17 @@ pub mod action {
     pub const EDIT_CANCEL: &str = "edit_cancel";
     /// Prefix of a phone label: `label_work`, `label_personal`, `label_unsure`.
     pub const LABEL_PREFIX: &str = "label_";
+    /// "Edit plan" on the planned recovery day: closes the card; the companion opens the
+    /// plan window (wireframe W15).
+    pub const EDIT_PLAN: &str = "edit_plan";
+    // Weekly review offer (B9).
+    /// Prefix of "Open", followed by the week's Monday: `review_open_2026-10-19`. Closes
+    /// the card; the companion opens the review window on that week.
+    pub const REVIEW_OPEN_PREFIX: &str = "review_open_";
+    /// "Later" (offered once more on the next workday).
+    pub const REVIEW_LATER: &str = "review_later";
+    /// "Skip this week".
+    pub const REVIEW_SKIP: &str = "review_skip";
 
     // Pet menu, keyboard panel and tray (B1, B5, B6, T1).
     /// "Show waiting reminder" or "Show Pomodoro card".
@@ -250,6 +261,8 @@ pub enum BubbleKind {
     WaterPanel,
     /// The phone interruption note.
     PhoneNote,
+    /// The weekly review offer.
+    ReviewOffer,
 }
 
 impl BubbleKind {
@@ -274,11 +287,12 @@ impl BubbleKind {
             CoachBubble::WaterLogged { .. } => Self::WaterLogged,
             CoachBubble::WaterPanel { .. } => Self::WaterPanel,
             CoachBubble::PhoneNote { .. } => Self::PhoneNote,
+            CoachBubble::ReviewOffer { .. } => Self::ReviewOffer,
         }
     }
 
     /// The fixed keys (every kind but a reminder, whose key carries its offer).
-    const FIXED: [(Self, &'static str); 16] = [
+    const FIXED: [(Self, &'static str); 17] = [
         (Self::PomodoroBreak, "pomodoro-break"),
         (Self::PomodoroRoundDone, "pomodoro-round"),
         (Self::PomodoroPaused, "pomodoro-paused"),
@@ -295,6 +309,7 @@ impl BubbleKind {
         (Self::WaterLogged, "water-logged"),
         (Self::WaterPanel, "water-panel"),
         (Self::PhoneNote, "phone-note"),
+        (Self::ReviewOffer, "review-offer"),
     ];
 
     fn key(self) -> String {
@@ -614,9 +629,25 @@ fn guide_card(g: &GuideView) -> Bubble {
                 })
                 .collect();
             b.lines.push(INTRO_SAFETY.to_owned());
+            // With a default version (wireframe W6) the first button starts it and the
+            // other version is offered instead of asking.
+            let (first, second) = match g.default_variant {
+                Some(RoutineVariant::Seated) => (
+                    act(action::SEATED, "Start (seated)", Primary),
+                    act(action::STANDING, "Standing instead", Normal),
+                ),
+                Some(RoutineVariant::Standing) => (
+                    act(action::STANDING, "Start (standing)", Primary),
+                    act(action::SEATED, "Seated instead", Normal),
+                ),
+                None => (
+                    act(action::SEATED, "Seated", Primary),
+                    act(action::STANDING, "Standing", Normal),
+                ),
+            };
             b.actions = vec![
-                act(action::SEATED, "Seated", Primary),
-                act(action::STANDING, "Standing", Normal),
+                first,
+                second,
                 act(action::LATER, "Later", Normal),
                 act(action::OTHER_DAY, "Other day", Normal),
                 act(action::SKIP_TODAY, "Skip today", Link),
@@ -899,7 +930,9 @@ fn water_panel_card(edit: Option<WaterEdit>, other_ml: u32, view: &CoachView) ->
             label: format!("{logged} of {g} ml"),
         }),
         rows,
-        actions: WATER_SERVINGS_ML
+        actions: view
+            .servings
+            .ml()
             .iter()
             .map(|ml| {
                 act(
@@ -1084,6 +1117,7 @@ pub fn bubble(b: &CoachBubble, view: &CoachView) -> Bubble {
                 lines,
                 vec![
                     act(action::OK, "OK", Primary),
+                    act(action::EDIT_PLAN, "Edit plan", Normal),
                     act(action::CHOOSE_DATE, "Reschedule", Normal),
                     act(action::CANCEL_PLAN, "Cancel plan", Link),
                 ],
@@ -1126,6 +1160,22 @@ pub fn bubble(b: &CoachBubble, view: &CoachView) -> Bubble {
         CoachBubble::WaterLogged { entry, ml } => water_logged_card(entry, ml, view),
         CoachBubble::WaterPanel { edit, other_ml } => water_panel_card(edit, other_ml, view),
         CoachBubble::PhoneNote { entry, at, label } => phone_note_card(entry, at, label),
+        CoachBubble::ReviewOffer { week, later } => {
+            let mut actions = vec![act(
+                &format!("{}{}", action::REVIEW_OPEN_PREFIX, week.format("%Y-%m-%d")),
+                "Open",
+                Primary,
+            )];
+            if later {
+                actions.push(act(action::REVIEW_LATER, "Later", Normal));
+            }
+            actions.push(act(action::REVIEW_SKIP, "Skip this week", Link));
+            card(
+                "Your week in review is ready",
+                vec!["About a minute. Optional.".to_owned()],
+                actions,
+            )
+        }
     }
 }
 
@@ -1205,7 +1255,7 @@ pub fn menu_actions(view: &CoachView) -> Vec<MenuAction> {
     }
     // Water (B1, B3): the serving buttons and the panel, with today's total against the
     // user's own goal. Each opens its card, which the keyboard panel then shows.
-    for ml in WATER_SERVINGS_ML {
+    for ml in view.servings.ml() {
         m.push(menu_card(
             &format!("{}{ml}", a::WATER_PREFIX),
             &format!("+{ml} ml water"),

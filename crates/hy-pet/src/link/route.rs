@@ -8,10 +8,10 @@
 //! the engine or the store; the resulting [`Command`] is applied by the link afterwards.
 
 use chrono::{NaiveDate, Weekday};
-use hy_core::coach::water::WATER_SERVINGS_ML;
+use hy_core::coach::water::WATER_PANEL_RANGE_ML;
 use hy_core::coach::{
     CheckInAnswer, GuideAction, Input, PauseLength, PomodoroPreset, RecoveryAction, Reflection,
-    Response, WaterInput,
+    Response, ReviewAnswer, WaterInput,
 };
 use hy_core::schema::{PhoneLabel, RoutineOutcome, RoutineVariant};
 use uuid::Uuid;
@@ -192,9 +192,7 @@ pub fn bubble_change(kind: BubbleKind, action_id: &str) -> Option<EntryChange> {
             a::EDIT_SAVE => Some(EntryChange::SaveEdit),
             other => {
                 if let Some(ml) = other.strip_prefix(a::ADD_PREFIX) {
-                    let ml = WATER_SERVINGS_ML
-                        .into_iter()
-                        .find(|s| s.to_string() == ml)?;
+                    let ml = parse_serving(ml)?;
                     return Some(EntryChange::LogWater { ml });
                 }
                 Some(EntryChange::RemoveWater(parse_id(
@@ -298,7 +296,8 @@ pub fn bubble_command(kind: BubbleKind, action_id: &str) -> Option<Input> {
             })
         }
         BubbleKind::RecoveryPlanned => Input::Recovery(match action_id {
-            a::OK => RecoveryAction::Ok,
+            // "Edit plan" closes the card like OK; the companion opens the plan window.
+            a::OK | a::EDIT_PLAN => RecoveryAction::Ok,
             a::CHOOSE_DATE => RecoveryAction::ChooseDate,
             a::CANCEL_PLAN => RecoveryAction::CancelPlan,
             _ => return None,
@@ -339,8 +338,32 @@ pub fn bubble_command(kind: BubbleKind, action_id: &str) -> Option<Input> {
             a::OK => Input::CloseBubble,
             _ => return None,
         },
+        BubbleKind::ReviewOffer => Input::Review(match action_id {
+            a::REVIEW_LATER => ReviewAnswer::Later,
+            a::REVIEW_SKIP => ReviewAnswer::Skip,
+            other => {
+                review_week(other)?;
+                ReviewAnswer::Open
+            }
+        }),
     };
     Some(input)
+}
+
+/// The week named by "Open" on the weekly review offer (`review_open_2026-10-19`), for
+/// the companion, which opens the review window on it.
+#[must_use]
+pub fn review_week(action_id: &str) -> Option<NaiveDate> {
+    parse_date(action_id.strip_prefix(action::REVIEW_OPEN_PREFIX)?)
+}
+
+/// A serving amount in an action suffix (`250`). The shell only passes on actions of the
+/// card or menu it shows, which offer the user's serving buttons; this checks the form
+/// and the range the store accepts.
+fn parse_serving(text: &str) -> Option<u32> {
+    let ml: u32 = text.parse().ok()?;
+    (ml.to_string() == text && WATER_PANEL_RANGE_ML.contains(&ml) && ml.is_multiple_of(10))
+        .then_some(ml)
 }
 
 /// The weekday named by a `day_` action suffix (Monday to Saturday).
@@ -418,10 +441,7 @@ pub fn menu_command(id: &str) -> Option<Command> {
         a::RESUME_COACHING => coach(Input::ResumeCoaching),
         _ => {
             if let Some(ml) = id.strip_prefix(a::WATER_PREFIX) {
-                return WATER_SERVINGS_ML
-                    .into_iter()
-                    .find(|s| s.to_string() == ml)
-                    .map(|ml| Command::LogWater { ml });
+                return parse_serving(ml).map(|ml| Command::LogWater { ml });
             }
             if let Some(rest) = id.strip_prefix(a::FOCUS_PREFIX) {
                 let (minutes, flags) = number_and_flags(rest, &[a::REPLACES_POMODORO])?;

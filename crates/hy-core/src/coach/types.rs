@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use super::config::PomodoroPreset;
 use super::recovery::{RecoveryAction, RecoveryPlan, RecoveryView};
-use super::water::{WaterEntry, WaterPace};
+use super::water::{Servings, WaterEntry, WaterPace};
 use crate::schema::{Activity, PhoneLabel, RoutineOutcome, RoutineVariant, SessionState};
 
 /// How long the user paused coaching for (wireframe B5).
@@ -278,6 +278,20 @@ pub enum Input {
     Water(WaterInput),
     /// The phone interruption note (wireframe B8).
     Phone(PhoneInput),
+    /// An answer on the weekly review offer (wireframe B9).
+    Review(ReviewAnswer),
+}
+
+/// An answer on the weekly review offer (wireframe B9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewAnswer {
+    /// "Open": the shell opens the review window on the offered week.
+    Open,
+    /// "Later": offered once more on the next workday.
+    Later,
+    /// "Skip this week".
+    Skip,
 }
 
 impl Input {
@@ -534,6 +548,14 @@ pub enum Bubble {
         /// The label chosen, if any.
         label: Option<PhoneLabel>,
     },
+    /// "Your week in review is ready" (wireframe B9): Open, Later (only on the first
+    /// offer) or Skip this week.
+    ReviewOffer {
+        /// The week offered (its Monday).
+        week: NaiveDate,
+        /// "Later" is offered (the first offer of the week).
+        later: bool,
+    },
 }
 
 /// Where the movement guide is (wireframe B4, flow 3).
@@ -584,6 +606,10 @@ pub struct GuideView {
     pub from_reminder: bool,
     /// The card is open; when false it waits behind the pet (a click reopens it).
     pub open: bool,
+    /// The user's default version (wireframe W6): the first screen starts it and offers
+    /// the other one instead of asking. `None`: ask each time.
+    #[serde(default)]
+    pub default_variant: Option<RoutineVariant>,
 }
 
 /// Why the pet is hidden.
@@ -686,6 +712,9 @@ pub struct CoachView {
     /// for the water panel.
     #[serde(default)]
     pub water_entries: Vec<WaterEntry>,
+    /// The user's serving buttons (wireframe W5).
+    #[serde(default)]
+    pub servings: Servings,
 }
 
 /// A movement routine or eye rest in progress (precedence level 3).

@@ -33,6 +33,7 @@ use crate::schema::{
 use crate::time::{UserZone, WorkSchedule};
 
 mod coach;
+mod prefs;
 mod review;
 #[cfg(test)]
 mod tests;

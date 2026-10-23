@@ -5,15 +5,19 @@
 use std::sync::Arc;
 
 use chrono::NaiveDate;
+use hy_core::coach::RecoveryPlan;
+use hy_core::prefs::Accessibility;
+use hy_core::review::suggest::SuggestionKind;
 use hy_core::review::{MonthReview, WeekReview};
 use hy_core::schema::PhoneLabel;
+use hy_core::settings::{CoachChange, WaterChange, WorkweekChange};
 use hy_core::store::MonthKey;
 use hy_pet::profile::PetEdit;
 use tauri::State;
 use uuid::Uuid;
 
-use crate::shell::Shell;
-use crate::view::{PanelView, PetView, ReviewPage, SettingsView};
+use crate::shell::{Shell, SuggestionAnswer};
+use crate::view::{PanelView, PetView, PlanPage, ReviewPage, SettingsPage, SettingsView};
 
 type ShellState<'a> = State<'a, Arc<Shell>>;
 
@@ -116,6 +120,12 @@ pub fn open_review(shell: ShellState<'_>) {
     shell.open_review();
 }
 
+/// The week the review page should go to ("Open" on the weekly review offer), once.
+#[tauri::command]
+pub fn review_target(shell: ShellState<'_>) -> Option<NaiveDate> {
+    shell.review_target()
+}
+
 // ----------------------------------------------------------------------- panel
 
 /// The panel page's first view.
@@ -159,6 +169,7 @@ pub fn review_week(
     shell: ShellState<'_>,
     day: Option<NaiveDate>,
 ) -> Result<ReviewPage<WeekReview>, String> {
+    shell.note_review_request(day);
     shell.review_week(day)
 }
 
@@ -186,4 +197,108 @@ pub fn review_phone_label(
     label: PhoneLabel,
 ) -> Result<ReviewPage<WeekReview>, String> {
     shell.review_phone_label(week, entry, label)
+}
+
+/// Apply, undo or hide one of the week's suggestions ("Try next week"); answers with
+/// the week again.
+///
+/// # Errors
+/// The refusal, worded for the user; nothing was changed.
+#[tauri::command]
+pub fn review_suggestion(
+    shell: ShellState<'_>,
+    week: NaiveDate,
+    kind: SuggestionKind,
+    answer: SuggestionAnswer,
+) -> Result<ReviewPage<WeekReview>, String> {
+    shell.review_suggestion(week, kind, answer)
+}
+
+// ------------------------------------------------------------ settings tabs
+
+/// The settings window's Reminders, Water and workweek, Movement programme, Focus and
+/// Pomodoro and Accessibility tabs.
+///
+/// # Errors
+/// A read failure, worded for the user.
+#[tauri::command]
+pub fn settings_page(shell: ShellState<'_>) -> Result<SettingsPage, String> {
+    shell.settings_page()
+}
+
+/// Change one coaching setting (reminders, movement version, Pomodoro, review time).
+///
+/// # Errors
+/// The refusal, worded for the user; nothing was changed.
+#[tauri::command]
+pub fn save_coach_settings(
+    shell: ShellState<'_>,
+    change: CoachChange,
+) -> Result<SettingsPage, String> {
+    shell.save_coach_settings(change)
+}
+
+/// Change the water goal (from today), or add or remove one serving button.
+///
+/// # Errors
+/// The refusal, worded for the user; nothing was changed.
+#[tauri::command]
+pub fn save_water_settings(
+    shell: ShellState<'_>,
+    change: WaterChange,
+) -> Result<SettingsPage, String> {
+    shell.save_water_settings(change)
+}
+
+/// Change the workdays, hours or time zone (only the fields sent).
+///
+/// # Errors
+/// The refusal, worded for the user; nothing was changed.
+#[tauri::command]
+pub fn save_workweek(
+    shell: ShellState<'_>,
+    change: WorkweekChange,
+) -> Result<SettingsPage, String> {
+    shell.save_workweek(change)
+}
+
+/// Save the display preferences.
+///
+/// # Errors
+/// The refusal, worded for the user; nothing was changed.
+#[tauri::command]
+pub fn save_accessibility(
+    shell: ShellState<'_>,
+    a11y: Accessibility,
+) -> Result<SettingsPage, String> {
+    shell.save_accessibility(a11y)
+}
+
+// ------------------------------------------------------------------- plan
+
+/// The recovery-day plan window's data.
+///
+/// # Errors
+/// A read failure, worded for the user.
+#[tauri::command]
+pub fn plan_page(shell: ShellState<'_>) -> Result<PlanPage, String> {
+    shell.plan_page()
+}
+
+/// "Save plan".
+///
+/// # Errors
+/// The refusal, worded for the user; nothing was changed.
+#[tauri::command]
+pub fn plan_save(shell: ShellState<'_>, plan: RecoveryPlan) -> Result<PlanPage, String> {
+    shell.save_plan(plan)
+}
+
+/// "Cancel plan".
+///
+/// # Errors
+/// The refusal, worded for the user; nothing was changed.
+#[tauri::command]
+pub fn plan_cancel(shell: ShellState<'_>) -> Result<PlanPage, String> {
+    shell.cancel_plan()
 }

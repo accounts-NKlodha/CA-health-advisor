@@ -4,14 +4,23 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
+  Accessibility,
+  CoachChange,
   MonthReview,
   PanelView,
   PetEdit,
   PetView,
   PhoneLabel,
+  PlanPage,
+  RecoveryPlan,
   ReviewPage,
+  SettingsPage,
   SettingsView,
+  SuggestionAnswer,
+  SuggestionKind,
+  WaterChange,
   WeekReview,
+  WorkweekChange,
 } from './types';
 
 interface Commands {
@@ -36,10 +45,23 @@ interface Commands {
   open_review: { args: undefined; result: void };
   review_week: { args: { day: string | null }; result: ReviewPage<WeekReview> };
   review_month: { args: { month: string | null }; result: ReviewPage<MonthReview> };
+  review_target: { args: undefined; result: string | null };
   review_phone_label: {
     args: { week: string | null; entry: string; label: PhoneLabel };
     result: ReviewPage<WeekReview>;
   };
+  review_suggestion: {
+    args: { week: string; kind: SuggestionKind; answer: SuggestionAnswer };
+    result: ReviewPage<WeekReview>;
+  };
+  settings_page: { args: undefined; result: SettingsPage };
+  save_coach_settings: { args: { change: CoachChange }; result: SettingsPage };
+  save_water_settings: { args: { change: WaterChange }; result: SettingsPage };
+  save_workweek: { args: { change: WorkweekChange }; result: SettingsPage };
+  save_accessibility: { args: { a11y: Accessibility }; result: SettingsPage };
+  plan_page: { args: undefined; result: PlanPage };
+  plan_save: { args: { plan: RecoveryPlan }; result: PlanPage };
+  plan_cancel: { args: undefined; result: PlanPage };
 }
 
 type Name = keyof Commands;
@@ -56,6 +78,10 @@ interface Events {
   'pet://view': PetView;
   'panel://view': PanelView;
   'settings://changed': SettingsView;
+  /** A settings change was saved (from any window); the payload is its revision. */
+  'hy://settings': number;
+  /** "Open" on the weekly review offer named a week; fetch it with review_target. */
+  'hy://review-target': string;
 }
 
 /** Listen for a view the shell pushes to this window. */

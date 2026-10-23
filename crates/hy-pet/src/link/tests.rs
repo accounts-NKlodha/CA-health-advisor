@@ -16,7 +16,7 @@ use hy_core::coach::{
     ActiveRoutine, Bubble as CoachBubble, CheckInAnswer, Chip, ChipStatus, CoachView, GuideAction,
     GuideStage, GuideView, HiddenReason, Input, PauseLength, PetMode, PhoneInput, PomodoroPause,
     PomodoroPhase, PomodoroPreset, PomodoroView, RecoveryAction, RecoveryPlan, RecoveryView,
-    Reflection, ReminderReason, Response, WaterEdit, WaterEntry, WaterInput,
+    Reflection, ReminderReason, Response, Servings, WaterEdit, WaterEntry, WaterInput,
 };
 use hy_core::schema::{
     Activity, EventPayload, GoalKind, PhoneLabel, ReminderOutcome, RoutineOutcome, RoutineVariant,
@@ -61,6 +61,7 @@ fn view(pet: PetMode) -> CoachView {
         hold: None,
         water: None,
         water_entries: Vec::new(),
+        servings: Servings::default(),
         pomodoro: None,
         focus_left: None,
         meeting: false,
@@ -88,6 +89,7 @@ fn guide(stage: GuideStage, variant: Option<RoutineVariant>) -> GuideView {
         stage,
         from_reminder: true,
         open: true,
+        default_variant: None,
     }
 }
 
@@ -889,9 +891,11 @@ fn menu_entries_route_to_engine_inputs() {
         "pomodoro_30",
         "pomodoro_25_zz",
         "pomodoro_25_rc_rc",
-        "water_100",
+        "water_40",
         "water_",
-        "water_2000",
+        "water_2010",
+        "water_255",
+        "water_0250",
         "water_250x",
         "quit",
     ] {
@@ -2468,7 +2472,14 @@ fn water_and_phone_actions_route_only_from_their_own_cards() {
         bubble_change(p, "add_500"),
         Some(EntryChange::LogWater { ml: 500 })
     );
-    assert_eq!(bubble_change(p, "add_300"), None);
+    // Any serving button the user set up routes (the shell passes on only the card's own
+    // actions); malformed amounts do not.
+    assert_eq!(
+        bubble_change(p, "add_750"),
+        Some(EntryChange::LogWater { ml: 750 })
+    );
+    assert_eq!(bubble_change(p, "add_305"), None);
+    assert_eq!(bubble_change(p, "add_0300"), None);
     assert_eq!(bubble_change(p, "other_add"), Some(EntryChange::AddOther));
     assert_eq!(bubble_change(p, "edit_save"), Some(EntryChange::SaveEdit));
     assert_eq!(
@@ -2926,4 +2937,167 @@ proptest! {
             }
         }
     }
+}
+
+// ------------------------------------------------------------------ V1-4
+
+#[test]
+fn panel_and_menu_use_the_users_serving_buttons() {
+    let mut v = view(PetMode::Idle);
+    v.servings = Servings::new(vec![200, 750]).unwrap();
+    let ids: Vec<String> = present::menu_actions(&v)
+        .into_iter()
+        .map(|a| a.id)
+        .filter(|id| id.starts_with("water_") && id != "water_panel")
+        .collect();
+    assert_eq!(ids, vec!["water_200", "water_750"]);
+    v.bubble = Some(CoachBubble::WaterPanel {
+        edit: None,
+        other_ml: 250,
+    });
+    let b = present::bubble(v.bubble.as_ref().unwrap(), &v);
+    let adds: Vec<&str> = b
+        .actions
+        .iter()
+        .map(|a| a.id.as_str())
+        .filter(|id| id.starts_with("add_"))
+        .collect();
+    assert_eq!(adds, vec!["add_200", "add_750"]);
+    for id in adds {
+        assert!(bubble_change(BubbleKind::WaterPanel, id).is_some());
+    }
+}
+
+#[test]
+fn a_default_movement_version_starts_that_version() {
+    let mut v = view(PetMode::Exercise);
+    let mut g = guide(GuideStage::Intro, None);
+    g.default_variant = Some(RoutineVariant::Standing);
+    v.bubble = Some(CoachBubble::MovementGuide(g));
+    let b = present::bubble(v.bubble.as_ref().unwrap(), &v);
+    let first: Vec<(&str, &str)> = b
+        .actions
+        .iter()
+        .take(2)
+        .map(|a| (a.id.as_str(), a.label.as_str()))
+        .collect();
+    assert_eq!(
+        first,
+        vec![
+            ("standing", "Start (standing)"),
+            ("seated", "Seated instead")
+        ]
+    );
+    assert_eq!(b.actions[0].style, crate::shell::ActionStyle::Primary);
+    assert_eq!(
+        bubble_command(BubbleKind::MovementGuide, "standing"),
+        Some(Input::Guide(GuideAction::Variant(RoutineVariant::Standing)))
+    );
+}
+
+#[test]
+fn the_review_offer_routes_its_three_answers() {
+    let mut v = view(PetMode::Idle);
+    v.bubble = Some(CoachBubble::ReviewOffer {
+        week: oct(19),
+        later: true,
+    });
+    let b = present::bubble(v.bubble.as_ref().unwrap(), &v);
+    assert_eq!(b.title, "Your week in review is ready");
+    let ids: Vec<&str> = b.actions.iter().map(|a| a.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["review_open_2026-10-19", "review_later", "review_skip"]
+    );
+    let k = BubbleKind::ReviewOffer;
+    assert_eq!(BubbleKind::parse(&k.id(3)), Some(k));
+    assert_eq!(
+        bubble_command(k, "review_open_2026-10-19"),
+        Some(Input::Review(hy_core::coach::ReviewAnswer::Open))
+    );
+    assert_eq!(
+        bubble_command(k, "review_later"),
+        Some(Input::Review(hy_core::coach::ReviewAnswer::Later))
+    );
+    assert_eq!(
+        bubble_command(k, "review_skip"),
+        Some(Input::Review(hy_core::coach::ReviewAnswer::Skip))
+    );
+    assert_eq!(bubble_command(k, "review_open_soon"), None);
+    assert_eq!(super::review_week("review_open_2026-10-19"), Some(oct(19)));
+    assert_eq!(super::review_week("review_later"), None);
+    // The second offer of the week has no Later.
+    v.bubble = Some(CoachBubble::ReviewOffer {
+        week: oct(19),
+        later: false,
+    });
+    let b = present::bubble(v.bubble.as_ref().unwrap(), &v);
+    assert!(b.actions.iter().all(|a| a.id != "review_later"));
+}
+
+#[test]
+fn edit_plan_closes_the_planned_card() {
+    assert_eq!(
+        bubble_command(BubbleKind::RecoveryPlanned, "edit_plan"),
+        Some(Input::Recovery(RecoveryAction::Ok))
+    );
+}
+
+#[test]
+fn settings_changed_through_the_link_reach_the_engine_at_once() {
+    let mut h = H::new();
+    assert_eq!(h.link.view().servings.ml(), &[150, 250, 500]);
+    let servings = hy_core::coach::Servings::new(vec![200, 750]).unwrap();
+    h.link
+        .change_settings(|s| s.set_water_servings(&servings))
+        .unwrap();
+    // No step needed: the change refreshes the engine's view.
+    assert_eq!(h.link.view().servings.ml(), &[200, 750]);
+    // A refused change leaves everything as it was.
+    let refused = h.link.change_settings(|s| {
+        s.set_work_schedule(&hy_core::time::WorkSchedule {
+            start: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            end: chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+            ..hy_core::time::WorkSchedule::default()
+        })
+    });
+    assert!(refused.is_err());
+    assert_eq!(h.link.view().servings.ml(), &[200, 750]);
+    h.pump();
+}
+
+#[test]
+fn field_changes_from_two_windows_both_reach_the_engine() {
+    use hy_core::settings::{CoachChange, WaterChange};
+    let mut h = H::new();
+    // Settings shows 150/250/500. The review adds 750 (another window); then Settings
+    // removes 150 from its older copy: only that button goes.
+    h.link
+        .change_settings(|s| {
+            let today = s.today()?;
+            s.change_water(WaterChange::AddServing(750), today)
+        })
+        .unwrap();
+    h.link
+        .change_settings(|s| {
+            let today = s.today()?;
+            s.change_water(WaterChange::RemoveServing(150), today)
+        })
+        .unwrap();
+    assert_eq!(h.link.view().servings.ml(), &[250, 500, 750]);
+    let seated = h
+        .link
+        .change_settings(|s| {
+            s.change_coach_config(CoachChange::MovementVersion(
+                hy_core::coach::MovementVersion::Seated,
+            ))
+        })
+        .unwrap();
+    let after = h
+        .link
+        .change_settings(|s| s.change_coach_config(CoachChange::EyeRest(false)))
+        .unwrap();
+    assert_eq!(after.movement_version, seated.movement_version);
+    assert!(!after.categories.eye_rest);
+    h.pump();
 }

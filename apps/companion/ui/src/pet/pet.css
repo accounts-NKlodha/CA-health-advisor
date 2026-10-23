@@ -241,6 +241,7 @@ body {
 .bubble {
   position: absolute;
   box-sizing: border-box;
+  font-size: calc(14px * var(--ts, 1));
   width: max-content;
   min-width: 200px;
   overflow: auto;
@@ -260,7 +261,7 @@ body {
 
 .bubble h2 {
   margin: 0 0 6px;
-  font-size: 15px;
+  font-size: calc(15px * var(--ts, 1));
   font-weight: 600;
 }
 
@@ -283,7 +284,7 @@ body {
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 2px 8px;
-  font-size: 12px;
+  font-size: calc(12px * var(--ts, 1));
 }
 
 .chip.on {
@@ -403,7 +404,7 @@ body {
 
 .hint {
   margin: 8px 0 0;
-  font-size: 12px;
+  font-size: calc(12px * var(--ts, 1));
 }
 
 :focus-visible {
@@ -429,7 +430,7 @@ body {
 
 .meter-label {
   color: var(--muted);
-  font-size: 12px;
+  font-size: calc(12px * var(--ts, 1));
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
@@ -498,7 +499,7 @@ body {
 
 .fig figcaption {
   color: #44525c;
-  font-size: 10.5px;
+  font-size: calc(10.5px * var(--ts, 1));
   line-height: 1.25;
 }
 
@@ -515,7 +516,7 @@ body {
 .note {
   margin: 8px 0 0;
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--ts, 1));
   font-style: italic;
 }
 
@@ -722,4 +723,28 @@ body {
   .meter progress {
     border: 1px solid currentColor;
   }
+}
+
+/* Settings, Accessibility (wireframe W12): the same higher contrast on request, still
+   motion, and bubble text at 125 or 150% (--ts). The pet itself keeps its size. */
+:root.more-contrast {
+  --art-opacity: 1;
+  --line: currentColor;
+  --muted: currentColor;
+}
+:root.more-contrast .dim .art {
+  opacity: 1;
+}
+:root.more-contrast .bubble {
+  border-width: 2px;
+  box-shadow: none;
+}
+:root.more-contrast .meter progress {
+  border: 1px solid currentColor;
+}
+:root.reduce-motion *,
+:root.reduce-motion *::before,
+:root.reduce-motion *::after {
+  animation: none !important;
+  transition: none !important;
 }

@@ -7,19 +7,27 @@
 //! logging stays available and nothing encourages drinking past the goal (WAT-01).
 //!
 //! The water panel (wireframe B3) lists today's [`WaterEntry`]s and logs, corrects and
-//! removes them. Its buttons use the fixed serving sizes and steps below.
+//! removes them. Its buttons use the user's [`Servings`] (wireframe W5) and the steps
+//! below.
 
 use chrono::{DateTime, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::config::WATER_BEHIND_ML;
+use crate::error::{Error, Result};
 use crate::schema::MAX_WATER_ENTRY_ML;
 use crate::time::{UserZone, WorkSchedule};
 
-/// The serving buttons (wireframe B3; the prototype's defaults). Choosing other sizes is
-/// part of the Water settings window (W5), a later slice.
+/// The default serving buttons (wireframe B3; the prototype's defaults). The user can
+/// change them in Settings, Water and workweek (W5): [`Servings`].
 pub const WATER_SERVINGS_ML: [u32; 3] = [150, 250, 500];
+
+/// Settings key under which [`Servings`] is stored.
+pub const SERVINGS_KEY: &str = "water_servings";
+
+/// At most this many serving buttons (they share one row in the bubble; D).
+pub const MAX_SERVINGS: usize = 4;
 
 /// The serving logged by "Log 250 ml" on a water reminder and "+250 ml water" on the pet
 /// menu, and where the panel's other amount starts.
@@ -31,6 +39,72 @@ pub const WATER_STEP_ML: u32 = 50;
 /// The amounts the panel's buttons can set (D). The pet window never takes keyboard focus,
 /// so amounts are chosen with buttons; the store accepts any amount from 1 to 2000 ml.
 pub const WATER_PANEL_RANGE_ML: std::ops::RangeInclusive<u32> = WATER_STEP_ML..=MAX_WATER_ENTRY_ML;
+
+/// The user's serving buttons (wireframe W5): 1 to [`MAX_SERVINGS`] distinct amounts
+/// inside [`WATER_PANEL_RANGE_ML`], in steps of 10 ml, kept in ascending order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<u32>", into = "Vec<u32>")]
+pub struct Servings(Vec<u32>);
+
+impl Servings {
+    /// Check and sort a list of serving sizes.
+    ///
+    /// # Errors
+    /// [`Error::Invalid`] naming the broken rule.
+    pub fn new(mut ml: Vec<u32>) -> Result<Self> {
+        if ml.is_empty() || ml.len() > MAX_SERVINGS {
+            return Err(Error::invalid(format!(
+                "choose 1 to {MAX_SERVINGS} serving buttons"
+            )));
+        }
+        for m in &ml {
+            if !WATER_PANEL_RANGE_ML.contains(m) || !m.is_multiple_of(10) {
+                return Err(Error::invalid(format!(
+                    "a serving is {} to {} ml in steps of 10 ml",
+                    WATER_PANEL_RANGE_ML.start(),
+                    WATER_PANEL_RANGE_ML.end()
+                )));
+            }
+        }
+        ml.sort_unstable();
+        if ml.windows(2).any(|w| w[0] == w[1]) {
+            return Err(Error::invalid("each serving button needs its own amount"));
+        }
+        Ok(Self(ml))
+    }
+
+    /// The amounts, smallest first.
+    #[must_use]
+    pub fn ml(&self) -> &[u32] {
+        &self.0
+    }
+
+    /// Whether `ml` is one of the buttons.
+    #[must_use]
+    pub fn contains(&self, ml: u32) -> bool {
+        self.0.contains(&ml)
+    }
+}
+
+impl Default for Servings {
+    fn default() -> Self {
+        Self(WATER_SERVINGS_ML.to_vec())
+    }
+}
+
+impl TryFrom<Vec<u32>> for Servings {
+    type Error = Error;
+
+    fn try_from(ml: Vec<u32>) -> Result<Self> {
+        Self::new(ml)
+    }
+}
+
+impl From<Servings> for Vec<u32> {
+    fn from(s: Servings) -> Self {
+        s.0
+    }
+}
 
 /// `ml` one step up or down, kept inside [`WATER_PANEL_RANGE_ML`].
 #[must_use]
@@ -173,6 +247,24 @@ mod tests {
                 .all(|s| WATER_PANEL_RANGE_ML.contains(s))
         );
         assert!(WATER_SERVINGS_ML.contains(&WATER_DEFAULT_SERVING_ML));
+    }
+
+    #[test]
+    fn servings_follow_their_rules() {
+        assert_eq!(Servings::default().ml(), &WATER_SERVINGS_ML);
+        let s = Servings::new(vec![750, 150, 250, 500]).unwrap();
+        assert_eq!(s.ml(), &[150, 250, 500, 750]);
+        assert!(s.contains(750));
+        assert!(Servings::new(vec![]).is_err());
+        assert!(Servings::new(vec![100, 200, 300, 400, 500]).is_err());
+        assert!(Servings::new(vec![40]).is_err());
+        assert!(Servings::new(vec![2010]).is_err());
+        assert!(Servings::new(vec![255]).is_err());
+        assert!(Servings::new(vec![250, 250]).is_err());
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, "[150,250,500,750]");
+        assert_eq!(serde_json::from_str::<Servings>(&json).unwrap(), s);
+        assert!(serde_json::from_str::<Servings>("[250,250]").is_err());
     }
 
     #[test]

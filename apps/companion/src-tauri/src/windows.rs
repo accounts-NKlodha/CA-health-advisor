@@ -8,7 +8,7 @@ use hy_pet::geometry::{Monitor, Rect};
 use hy_pet::placement::screens_window_logical;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
-use crate::shell::{PANEL, PET, REVIEW, SCREENS, Shell, set_window_rect};
+use crate::shell::{PANEL, PET, PLAN, REVIEW, SCREENS, Shell, set_window_rect};
 
 /// The same WebView2 arguments for every window: windows sharing one WebView2
 /// environment must use identical options. These switch off Edge features that would
@@ -116,6 +116,21 @@ pub fn open_review(app: &AppHandle, monitor: Option<&Monitor>) -> tauri::Result<
         REVIEW,
         "review.html",
         "HealthierYou - Weekly review",
+        monitor,
+    )
+}
+
+/// Open the recovery-day plan window (wireframe W15), or focus it if open. Sized like the
+/// settings window.
+///
+/// # Errors
+/// A Tauri window-creation error.
+pub fn open_plan(app: &AppHandle, monitor: Option<&Monitor>) -> tauri::Result<()> {
+    open_screen(
+        app,
+        PLAN,
+        "plan.html",
+        "HealthierYou - Recovery-day plan",
         monitor,
     )
 }

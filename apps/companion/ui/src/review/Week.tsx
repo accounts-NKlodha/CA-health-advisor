@@ -1,10 +1,21 @@
 // The weekly review (wireframe W13, redesigned as a visual review): a hero band with the
 // week and its coverage, three rings (one segment per workday), a day strip, up to three
-// highlights, the phone self-reports with editable labels, and "Show as table" for a
+// highlights, up to three suggestions for next week (Apply really changes the setting and
+// Undo restores the exact prior value), the phone self-reports with editable labels, and
+// "Show as table" for a
 // plain view of every figure. Missing days are drawn hatched with a dash, a measured zero
 // as an outline with "0"; neither is ever counted as the other.
 import type { ComponentChildren } from 'preact';
-import type { DayMark, MetricRow, PhoneEntry, PhoneLabel, Ratio, WeekReview } from '../shared/types';
+import type {
+  DayMark,
+  MetricRow,
+  PhoneEntry,
+  PhoneLabel,
+  Ratio,
+  Suggestion,
+  SuggestionAnswer,
+  WeekReview,
+} from '../shared/types';
 import {
   clock,
   dayMonth,
@@ -296,18 +307,69 @@ function coverageLine(w: WeekReview): string {
   return `Recorded on ${c.recorded} of ${c.workdays} workdays${tail}`;
 }
 
+function NextWeek({
+  w,
+  onSuggestion,
+}: {
+  w: WeekReview;
+  onSuggestion: (s: Suggestion, answer: SuggestionAnswer) => void;
+}) {
+  return (
+    <section aria-labelledby="next-h">
+      <h3 id="next-h">Try next week</h3>
+      <ul class="suggestions">
+        {w.suggestions.map((s) => (
+          <li class={`suggestion ${s.state}`} key={s.kind}>
+            {s.state === 'applied' ? (
+              <>
+                <span>
+                  <strong>Applied:</strong> {s.now} <span class="muted">(was {s.was})</span>
+                </span>
+                <button type="button" class="btn" onClick={() => onSuggestion(s, 'undo')}>
+                  Undo
+                </button>
+              </>
+            ) : s.state === 'hidden' ? (
+              <span class="muted">Not for you this week: {s.text}</span>
+            ) : (
+              <>
+                <span>{s.text}</span>
+                {s.state === 'open' ? (
+                  <span class="suggestion-actions">
+                    <button type="button" class="btn" onClick={() => onSuggestion(s, 'apply')}>
+                      Apply
+                    </button>
+                    <button type="button" class="btn link" onClick={() => onSuggestion(s, 'hide')}>
+                      Not for me
+                    </button>
+                  </span>
+                ) : (
+                  <span class="muted">No change needed</span>
+                )}
+              </>
+            )}
+          </li>
+        ))}
+      </ul>
+      <p class="note">Suggestions only change your own settings, and you can undo them here.</p>
+    </section>
+  );
+}
+
 export function WeekView({
   w,
   plain,
   onPlain,
   onWeek,
   onLabel,
+  onSuggestion,
 }: {
   w: WeekReview;
   plain: boolean;
   onPlain: () => void;
   onWeek: (day: string | null) => void;
   onLabel: (e: PhoneEntry, label: PhoneLabel) => void;
+  onSuggestion: (s: Suggestion, answer: SuggestionAnswer) => void;
 }) {
   const cmp = w.comparison;
   const last = (r: MetricRow): Ratio | null => (cmp ? cmp[r.metric] : null);
@@ -385,6 +447,8 @@ export function WeekView({
           ) : null}
         </section>
       ) : null}
+
+      {w.suggestions.length > 0 ? <NextWeek w={w} onSuggestion={onSuggestion} /> : null}
 
       {w.phone.show ? <Phone w={w} onLabel={onLabel} /> : null}
 

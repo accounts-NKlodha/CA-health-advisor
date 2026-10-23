@@ -60,6 +60,16 @@ impl UserZone {
         self.0.name()
     }
 
+    /// Every zone name in the bundled IANA database, sorted (for the time zone choice in
+    /// Settings, wireframe W5).
+    #[must_use]
+    pub fn names() -> Vec<&'static str> {
+        let mut names: Vec<&'static str> =
+            chrono_tz::TZ_VARIANTS.iter().map(|z| z.name()).collect();
+        names.sort_unstable();
+        names
+    }
+
     /// The underlying `chrono-tz` zone.
     #[must_use]
     pub fn tz(&self) -> Tz {
@@ -330,6 +340,28 @@ impl fmt::Debug for WeekdaySet {
     }
 }
 
+/// Serde for one weekday as its short lowercase name (`"sat"`).
+pub(crate) mod weekday_name {
+    use chrono::Weekday;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::WEEKDAY_NAMES;
+
+    pub fn serialize<S: Serializer>(d: &Weekday, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(WEEKDAY_NAMES[d.num_days_from_monday() as usize])
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Weekday, D::Error> {
+        let name = String::deserialize(d)?;
+        let index = WEEKDAY_NAMES
+            .iter()
+            .position(|n| *n == name)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown weekday {name:?}")))?;
+        Weekday::try_from(u8::try_from(index).unwrap_or(0))
+            .map_err(|_| serde::de::Error::custom("bad weekday index"))
+    }
+}
+
 impl Serialize for WeekdaySet {
     fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         s.collect_seq(
@@ -361,7 +393,8 @@ impl<'de> Deserialize<'de> for WeekdaySet {
     }
 }
 
-mod hhmm {
+/// Serde for a minute-precision local time as `"HH:MM"`.
+pub(crate) mod hhmm {
     use chrono::{NaiveTime, Timelike};
     use serde::{Deserialize, Deserializer, Serializer};
 
