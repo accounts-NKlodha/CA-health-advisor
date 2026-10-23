@@ -398,6 +398,21 @@ impl Engine {
         }
     }
 
+    /// The outcome a report in one go ([`crate::coach::Input::RoutineFinished`]) stands for.
+    /// Skipping today is offered only before the first movement is answered; once one is,
+    /// a reported skip is a stop with none recorded, as skipping every movement or stopping
+    /// on the first one is: not a dismissal, and the movement timer is not restarted.
+    pub(super) fn reported_outcome(&self, outcome: RoutineOutcome) -> RoutineOutcome {
+        match self.s.guide {
+            Some(g)
+                if outcome == RoutineOutcome::Skipped && g.running() && g.done + g.skipped > 0 =>
+            {
+                RoutineOutcome::None
+            }
+            _ => outcome,
+        }
+    }
+
     /// A result reported in one go from the menu or tray ([`crate::coach::Input::RoutineFinished`])
     /// while the guide runs: the routine's result is recorded from the report, with the
     /// movements already answered as far as the report allows, and the guide closes. A

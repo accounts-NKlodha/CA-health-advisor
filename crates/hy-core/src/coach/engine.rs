@@ -1389,6 +1389,7 @@ impl Engine {
             }
             Input::Guide(action) => self.guide_input(ctx, action, out),
             Input::RoutineFinished { offer, outcome } => {
+                let outcome = self.reported_outcome(outcome);
                 let r = self.routine_finished(ctx, offer, outcome, out);
                 if r == Applied {
                     // A report in one go answers the guide too.

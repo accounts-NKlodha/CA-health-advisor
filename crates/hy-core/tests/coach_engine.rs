@@ -1309,6 +1309,81 @@ fn guide_answered_in_one_go_from_the_menu_records_the_report() {
 }
 
 #[test]
+fn guide_reported_skipped_after_an_answer_is_none() {
+    // The shrunk trace from `engine_invariants_hold_for_any_trace`: a menu routine, seated,
+    // the first movement done, then "skipped" reported in one go. Skip today is over once
+    // a movement is answered, so this is recorded as none, never as a skip with answers.
+    let mut h = H::at(
+        ist(20, 9, 40),
+        CoachConfig::default(),
+        WaterSnapshot {
+            logged_ml: 0,
+            goal_ml: None,
+        },
+    );
+    h.input(Input::RoutineStarted);
+    h.g(GuideAction::Variant(RoutineVariant::Seated));
+    h.g(GuideAction::Done);
+    let report = |h: &mut H| {
+        h.input(Input::RoutineFinished {
+            offer: None,
+            outcome: RoutineOutcome::Skipped,
+        })
+        .outcome
+    };
+    assert_eq!(report(&mut h), InputOutcome::Applied);
+    assert_eq!(h.view().guide, None);
+    let steps = h.steps();
+    assert_eq!(steps.len(), 1);
+    let s = h.sessions();
+    assert_eq!(
+        s,
+        vec![(
+            steps[0].0,
+            steps[0].1.clone(),
+            Some(RoutineVariant::Seated),
+            RoutineOutcome::None,
+            0,
+            0
+        )]
+    );
+
+    // From the menu after a skipped movement: none, and the movement timer keeps running.
+    let mut m = H::only(true, false, false);
+    m.wait(mins(20));
+    m.input(Input::RoutineStarted);
+    m.g(GuideAction::Variant(RoutineVariant::Standing));
+    m.g(GuideAction::Skip);
+    assert_eq!(report(&mut m), InputOutcome::Applied);
+    let s = m.sessions();
+    assert_eq!((s[0].3, s[0].4, s[0].5), (RoutineOutcome::None, 0, 1));
+    assert_eq!(m.accum(Activity::Movement), mins(20));
+    assert_eq!(m.status(Activity::Movement), ChipStatus::NotDue);
+
+    // From a reminder: none recorded, not a dismissal, the timer kept and movement
+    // rescheduled a full cycle later.
+    let mut r = guided(RoutineVariant::Seated);
+    r.g(GuideAction::Done);
+    r.g(GuideAction::Skip);
+    assert_eq!(report(&mut r), InputOutcome::Applied);
+    let s = r.sessions();
+    assert_eq!((s[0].3, s[0].4, s[0].5), (RoutineOutcome::None, 0, 1));
+    assert_eq!(r.status(Activity::Movement), ChipStatus::NoneRecorded);
+    assert_eq!(r.dismissals(), 0);
+    assert!(r.accum(Activity::Movement) >= mins(45));
+    assert_eq!(r.count_notices(|n| matches!(n, Notice::Celebrate(_))), 0);
+    assert_eq!(next_movement(&mut r).0, hm(11, 30));
+
+    // Before any answer a reported skip is still skip today.
+    let mut k = guided(RoutineVariant::Seated);
+    assert_eq!(report(&mut k), InputOutcome::Applied);
+    let s = k.sessions();
+    assert_eq!((s[0].3, s[0].4, s[0].5), (RoutineOutcome::Skipped, 0, 0));
+    assert_eq!(k.status(Activity::Movement), ChipStatus::Skipped);
+    assert_eq!(k.dismissals(), 1);
+}
+
+#[test]
 fn guide_actions_without_a_guide_or_on_the_wrong_screen_change_nothing() {
     let mut h = H::only(true, false, false);
     assert_eq!(

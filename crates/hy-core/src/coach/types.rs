@@ -143,7 +143,8 @@ pub enum Input {
     RoutineFinished {
         /// The reminder that started the routine, if any.
         offer: Option<Uuid>,
-        /// Done (all steps), partial (some), none (zero) or skipped (skip today).
+        /// Done (all steps), partial (some), none (zero) or skipped (skip today). Skipped
+        /// after a movement in the guide was answered is taken as none.
         outcome: RoutineOutcome,
     },
     /// "Later" in a movement guide started from a reminder: snoozes movement.
