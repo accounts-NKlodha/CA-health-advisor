@@ -1,8 +1,8 @@
 // Settings > Reminders (W4), Movement programme (W6) and Focus and Pomodoro (W7). Each
-// change is saved at once as a whole coaching configuration; the engine follows on its
-// next step.
+// change is saved at once as that one field (never the page's cached copy, which another
+// window may have made stale); the engine follows at once.
 import { call } from '../shared/ipc';
-import type { CoachConfig, Intensity, MovementVersion, SettingsPage } from '../shared/types';
+import type { CoachChange, Intensity, MovementVersion, SettingsPage } from '../shared/types';
 import type { Save } from './main';
 
 interface TabProps {
@@ -10,9 +10,8 @@ interface TabProps {
   save: Save;
 }
 
-function useCoach({ page, save }: TabProps) {
-  return (change: Partial<CoachConfig>, done: string) =>
-    save(call('save_coach_settings', { config: { ...page.coach, ...change } }), done);
+function useCoach({ save }: TabProps) {
+  return (change: CoachChange, done: string) => save(call('save_coach_settings', { change }), done);
 }
 
 function Switch({
@@ -78,7 +77,7 @@ export function RemindersTab(props: TabProps) {
         <Switch
           checked={c.categories.movement}
           onChange={(on) =>
-            coach({ categories: { ...c.categories, movement: on } }, on ? 'Movement breaks on.' : 'Movement breaks off.')
+            coach({ movement: on }, on ? 'Movement breaks on.' : 'Movement breaks off.')
           }
         >
           Movement breaks
@@ -86,7 +85,7 @@ export function RemindersTab(props: TabProps) {
         <Switch
           checked={c.categories.eye_rest}
           onChange={(on) =>
-            coach({ categories: { ...c.categories, eye_rest: on } }, on ? 'Eye rest on.' : 'Eye rest off.')
+            coach({ eye_rest: on }, on ? 'Eye rest on.' : 'Eye rest off.')
           }
         >
           Eye rest (look away)
@@ -94,7 +93,7 @@ export function RemindersTab(props: TabProps) {
         <Switch
           checked={c.categories.water}
           onChange={(on) =>
-            coach({ categories: { ...c.categories, water: on } }, on ? 'Water pacing on.' : 'Water pacing off.')
+            coach({ water: on }, on ? 'Water pacing on.' : 'Water pacing off.')
           }
         >
           Water pacing
@@ -142,7 +141,7 @@ export function RemindersTab(props: TabProps) {
           checked={c.long_day_check_in.enabled}
           onChange={(on) =>
             coach(
-              { long_day_check_in: { ...c.long_day_check_in, enabled: on } },
+              { long_day_check_in: on },
               on ? 'Long-day check-in on.' : 'Long-day check-in off.',
             )
           }
@@ -156,7 +155,7 @@ export function RemindersTab(props: TabProps) {
             disabled={!c.long_day_check_in.enabled}
             onChange={(e) => {
               const hours = Number(e.currentTarget.value);
-              coach({ long_day_check_in: { ...c.long_day_check_in, hours } }, `Check-in after about ${hours} hours.`);
+              coach({ long_day_hours: hours }, `Check-in after about ${hours} hours.`);
             }}
           >
             {[8, 9, 10].map((h) => (

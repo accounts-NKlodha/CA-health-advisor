@@ -3065,3 +3065,39 @@ fn settings_changed_through_the_link_reach_the_engine_at_once() {
     assert_eq!(h.link.view().servings.ml(), &[200, 750]);
     h.pump();
 }
+
+#[test]
+fn field_changes_from_two_windows_both_reach_the_engine() {
+    use hy_core::settings::{CoachChange, WaterChange};
+    let mut h = H::new();
+    // Settings shows 150/250/500. The review adds 750 (another window); then Settings
+    // removes 150 from its older copy: only that button goes.
+    h.link
+        .change_settings(|s| {
+            let today = s.today()?;
+            s.change_water(WaterChange::AddServing(750), today)
+        })
+        .unwrap();
+    h.link
+        .change_settings(|s| {
+            let today = s.today()?;
+            s.change_water(WaterChange::RemoveServing(150), today)
+        })
+        .unwrap();
+    assert_eq!(h.link.view().servings.ml(), &[250, 500, 750]);
+    let seated = h
+        .link
+        .change_settings(|s| {
+            s.change_coach_config(CoachChange::MovementVersion(
+                hy_core::coach::MovementVersion::Seated,
+            ))
+        })
+        .unwrap();
+    let after = h
+        .link
+        .change_settings(|s| s.change_coach_config(CoachChange::EyeRest(false)))
+        .unwrap();
+    assert_eq!(after.movement_version, seated.movement_version);
+    assert!(!after.categories.eye_rest);
+    h.pump();
+}

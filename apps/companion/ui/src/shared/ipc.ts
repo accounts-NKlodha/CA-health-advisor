@@ -7,6 +7,7 @@ import type {
   Accessibility,
   BackupDone,
   BackupSummary,
+  CoachChange,
   CoachConfig,
   MonthReview,
   PanelView,
@@ -20,8 +21,9 @@ import type {
   SettingsView,
   SuggestionAnswer,
   SuggestionKind,
+  WaterChange,
   WeekReview,
-  WorkSchedule,
+  WorkweekChange,
 } from './types';
 
 interface Commands {
@@ -46,6 +48,7 @@ interface Commands {
   open_review: { args: undefined; result: void };
   review_week: { args: { day: string | null }; result: ReviewPage<WeekReview> };
   review_month: { args: { month: string | null }; result: ReviewPage<MonthReview> };
+  review_target: { args: undefined; result: string | null };
   review_phone_label: {
     args: { week: string | null; entry: string; label: PhoneLabel };
     result: ReviewPage<WeekReview>;
@@ -55,9 +58,9 @@ interface Commands {
     result: ReviewPage<WeekReview>;
   };
   settings_page: { args: undefined; result: SettingsPage };
-  save_coach_settings: { args: { config: CoachConfig }; result: SettingsPage };
-  save_water_settings: { args: { goalMl: number | null; servings: number[] }; result: SettingsPage };
-  save_workweek: { args: { schedule: WorkSchedule; zone: string }; result: SettingsPage };
+  save_coach_settings: { args: { change: CoachChange }; result: SettingsPage };
+  save_water_settings: { args: { change: WaterChange }; result: SettingsPage };
+  save_workweek: { args: { change: WorkweekChange }; result: SettingsPage };
   save_accessibility: { args: { a11y: Accessibility }; result: SettingsPage };
   plan_page: { args: undefined; result: PlanPage };
   plan_save: { args: { plan: RecoveryPlan }; result: PlanPage };
@@ -89,6 +92,10 @@ interface Events {
   'pet://view': PetView;
   'panel://view': PanelView;
   'settings://changed': SettingsView;
+  /** A settings change was saved (from any window); the payload is its revision. */
+  'hy://settings': number;
+  /** "Open" on the weekly review offer named a week; fetch it with review_target. */
+  'hy://review-target': string;
 }
 
 /** Listen for a view the shell pushes to this window. */

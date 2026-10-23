@@ -422,6 +422,7 @@ mod suggestions {
     use super::*;
     use hy_core::coach::{Intensity, MovementVersion, Servings};
     use hy_core::review::suggest::{SuggestionKind, SuggestionState};
+    use hy_core::settings::{CoachChange, WaterChange, WorkweekChange};
 
     /// A store first used on Monday 12 Oct, now Saturday 24 Oct 17:30, every workday of
     /// this week recorded, with 750 ml logged three times and three seated routines.
@@ -517,6 +518,124 @@ mod suggestions {
                 .undo_suggestion(monday, SuggestionKind::Seated)
                 .is_err()
         );
+    }
+
+    /// Codex repro on #13: Settings is open (it loaded the settings earlier); the weekly
+    /// review applies the seated default and the 750 ml button; back in Settings the user
+    /// switches eye rest off and saves a water goal. The page sends only those fields, so
+    /// what the review applied is kept, and Undo still restores its own prior value.
+    #[test]
+    fn a_stale_settings_page_keeps_what_the_review_applied() {
+        let mut env = week();
+        let monday = date(10, 19);
+        let page_coach = env.store.coach_config().unwrap();
+        env.store
+            .apply_suggestion(monday, SuggestionKind::Seated)
+            .unwrap();
+        env.store
+            .apply_suggestion(monday, SuggestionKind::Serving)
+            .unwrap();
+        assert!(page_coach.categories.eye_rest);
+        env.store
+            .change_coach_config(CoachChange::EyeRest(false))
+            .unwrap();
+        env.store
+            .change_water(WaterChange::Goal(2200), date(10, 24))
+            .unwrap();
+        let c = env.store.coach_config().unwrap();
+        assert!(!c.categories.eye_rest);
+        assert_eq!(c.movement_version, MovementVersion::Seated);
+        assert_eq!(
+            env.store.water_servings().unwrap().ml(),
+            &[150, 250, 500, 750]
+        );
+        assert_eq!(
+            env.store
+                .goal_on(GoalKind::WaterDailyMl, date(10, 24))
+                .unwrap(),
+            Some(2200)
+        );
+        // The page still shows 150/250/500: removing 150 keeps the 750 the review added.
+        env.store
+            .change_water(WaterChange::RemoveServing(150), date(10, 24))
+            .unwrap();
+        assert_eq!(env.store.water_servings().unwrap().ml(), &[250, 500, 750]);
+        // Undo in the review restores its own field only; eye rest stays off.
+        env.store
+            .undo_suggestion(monday, SuggestionKind::Seated)
+            .unwrap();
+        let c = env.store.coach_config().unwrap();
+        assert_eq!(c.movement_version, MovementVersion::Ask);
+        assert!(!c.categories.eye_rest);
+    }
+
+    /// Two changes sent from the same page before either answered (each built from the
+    /// same loaded copy) both stay; so do Light reminders applied from the review.
+    #[test]
+    fn rapid_successive_changes_from_one_page_all_stay() {
+        let mut env = Env::new(ist(10, 12, 9, 0), ist(10, 24, 17, 30));
+        for d in 19..=24 {
+            env.track(date(10, d));
+            env.reminder(
+                ist(10, d, 10, 0),
+                Activity::Movement,
+                ReminderOutcome::Dismissed,
+            );
+            env.reminder(
+                ist(10, d, 11, 0),
+                Activity::EyeRest,
+                ReminderOutcome::NoResponse,
+            );
+        }
+        env.store
+            .apply_suggestion(date(10, 19), SuggestionKind::Lighter)
+            .unwrap();
+        for change in [
+            CoachChange::EyeRest(false),
+            CoachChange::PomodoroAutoStart(true),
+            CoachChange::LongDayHours(10),
+            CoachChange::Water(false),
+        ] {
+            env.store.change_coach_config(change).unwrap();
+        }
+        let c = env.store.coach_config().unwrap();
+        assert_eq!(c.intensity, Intensity::Light);
+        assert!(!c.categories.eye_rest && !c.categories.water && c.categories.movement);
+        assert!(c.pomodoro_auto_start);
+        assert_eq!(c.long_day_check_in.hours, 10);
+        // A refused change writes nothing.
+        assert!(
+            env.store
+                .change_coach_config(CoachChange::LongDayHours(12))
+                .is_err()
+        );
+        assert_eq!(env.store.coach_config().unwrap(), c);
+        // Workweek: a save that changed only the hours keeps workdays and zone.
+        let days = hy_core::time::WeekdaySet::default()
+            .with(chrono::Weekday::Mon)
+            .with(chrono::Weekday::Tue);
+        env.store
+            .change_workweek(&WorkweekChange {
+                workdays: Some(days),
+                ..WorkweekChange::default()
+            })
+            .unwrap();
+        let hours: WorkweekChange =
+            serde_json::from_str(r#"{"hours":{"start":"08:00","end":"16:00"}}"#).unwrap();
+        env.store.change_workweek(&hours).unwrap();
+        let s = env.store.work_schedule().unwrap();
+        assert_eq!(s.workdays, days);
+        assert_eq!(s.start.to_string(), "08:00:00");
+        assert!(
+            env.store
+                .change_workweek(&WorkweekChange {
+                    zone: Some("Nowhere/City".into()),
+                    workdays: Some(hy_core::time::WeekdaySet::MON_TO_SAT),
+                    hours: None,
+                })
+                .is_err()
+        );
+        assert_eq!(env.store.work_schedule().unwrap().workdays, days);
     }
 
     #[test]

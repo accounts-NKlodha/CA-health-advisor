@@ -81,6 +81,29 @@ struct Drag {
     origin: (i32, i32),
 }
 
+/// The week the review offer's "Open" named, kept until the review page takes it (once),
+/// so the page holds the week in its own state from then on. Opening the review any other
+/// way drops it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReviewTarget(Option<NaiveDate>);
+
+impl ReviewTarget {
+    /// "Open" on the offer for the week starting `week`.
+    pub const fn offer(&mut self, week: NaiveDate) {
+        self.0 = Some(week);
+    }
+
+    /// The review opened another way.
+    pub const fn clear(&mut self) {
+        self.0 = None;
+    }
+
+    /// The page takes the week (once).
+    pub const fn take(&mut self) -> Option<NaiveDate> {
+        self.0.take()
+    }
+}
+
 #[derive(Debug)]
 struct Inner {
     /// The shell's rules and the window frame (pet, monitor, open bubble layout, the
@@ -95,12 +118,16 @@ struct Inner {
     notice_seq: u64,
     page_ready: bool,
     review_loaded: bool,
+    /// The weeks the review page asked for, latest last (for the self-test).
+    review_requests: Vec<Option<NaiveDate>>,
     /// Display preferences (Settings, Accessibility), kept here for every view.
     a11y: Accessibility,
-    /// The week the review window opens on next ("Open" on the weekly review offer).
-    review_hint: Option<NaiveDate>,
+    /// The week "Open" on the weekly review offer named, until the review page takes it.
+    review_target: ReviewTarget,
     /// A settings page loaded its tabs (for the self-test).
     settings_loaded: bool,
+    /// Settings changes made since start (see [`crate::view::SettingsPage::revision`]).
+    settings_revision: u64,
     /// The plan window loaded (for the self-test).
     plan_loaded: bool,
     /// The setup wizard loaded (for the self-test).
@@ -220,9 +247,11 @@ impl Shell {
                 notice_seq: 0,
                 page_ready: false,
                 review_loaded: false,
+                review_requests: Vec::new(),
                 a11y,
-                review_hint: None,
+                review_target: ReviewTarget::default(),
                 settings_loaded: false,
+                settings_revision: 0,
                 plan_loaded: false,
                 setup_loaded: false,
                 staged_backup: None,
@@ -711,8 +740,7 @@ impl Shell {
         if action_id == action::EDIT_PLAN {
             self.open_plan();
         } else if let Some(week) = hy_pet::link::review_week(action_id) {
-            lock(&self.inner).review_hint = Some(week);
-            self.open_review();
+            self.open_review_on(week);
         }
     }
 
@@ -971,8 +999,28 @@ impl Shell {
 
     // ------------------------------------------------------------------ reviews
 
-    /// Open the review window (or focus it).
+    /// Open the review window (or focus it) as it is: from the tray, the pet menu, the
+    /// panel or Settings. A week the review offer named and no page took is dropped.
     pub fn open_review(self: &Arc<Self>) {
+        lock(&self.inner).review_target.clear();
+        self.show_review();
+    }
+
+    /// "Open" on the weekly review offer: the review on that week, in a new window (its
+    /// page takes the week when it loads) or in the one already open, whatever week or
+    /// tab it shows (told by `hy://review-target`, it takes the week now).
+    pub fn open_review_on(self: &Arc<Self>, week: NaiveDate) {
+        lock(&self.inner).review_target.offer(week);
+        self.show_review();
+        let _ = self.app.emit_to(REVIEW, "hy://review-target", week);
+    }
+
+    /// The week the review page should go to, once ("Open" on the review offer).
+    pub fn review_target(&self) -> Option<NaiveDate> {
+        lock(&self.inner).review_target.take()
+    }
+
+    fn show_review(self: &Arc<Self>) {
         let monitor = lock(&self.inner).core.monitor().cloned();
         if let Err(e) = windows::open_review(&self.app, monitor.as_ref()) {
             eprintln!("HealthierYou: could not open the review: {e}");
@@ -987,14 +1035,13 @@ impl Shell {
         (i.profile.motion && !i.a11y.reduced_motion, i.a11y)
     }
 
-    /// The weekly review of the week containing `day` (default this week, or the week
-    /// the review offer's "Open" asked for).
+    /// The weekly review of the week containing `day` (default this week). The page keeps
+    /// the week it shows and always names it, so a refresh never changes the week.
     ///
     /// # Errors
     /// A store read failure, worded for the page.
     pub fn review_week(&self, day: Option<NaiveDate>) -> Result<ReviewPage<WeekReview>, String> {
         let (motion, a11y) = self.review_motion();
-        let day = day.or_else(|| lock(&self.inner).review_hint.take());
         let review = lock(&self.store)
             .week_review(day)
             .map_err(|e| format!("The review could not be read: {e}"))?;
@@ -1044,6 +1091,21 @@ impl Shell {
     /// Whether a review page has loaded (for the self-test).
     pub fn review_loaded(&self) -> bool {
         lock(&self.inner).review_loaded
+    }
+
+    /// Note the week the review page asked for (the last 16 are kept, for the self-test).
+    pub fn note_review_request(&self, day: Option<NaiveDate>) {
+        let mut i = lock(&self.inner);
+        if i.review_requests.len() >= 16 {
+            i.review_requests.remove(0);
+        }
+        i.review_requests.push(day);
+    }
+
+    /// The weeks the review page asked for since the last call, oldest first (for the
+    /// self-test).
+    pub fn take_review_requests(&self) -> Vec<Option<NaiveDate>> {
+        std::mem::take(&mut lock(&self.inner).review_requests)
     }
 
     // ---------------------------------------------------------- engine plumbing

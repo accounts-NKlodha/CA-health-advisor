@@ -4,9 +4,9 @@
 // events, and changes nothing except the label of a past phone report and the settings a
 // suggestion applies (or undoes).
 import { render } from 'preact';
-import { useCallback, useEffect, useState } from 'preact/hooks';
+import { useCallback, useEffect, useReducer, useState } from 'preact/hooks';
 import { applyA11y, followA11y } from '../shared/a11y';
-import { call, report } from '../shared/ipc';
+import { call, on, report } from '../shared/ipc';
 import type {
   Metric,
   MonthReview,
@@ -19,14 +19,15 @@ import type {
 } from '../shared/types';
 import { mayAnimate } from './marks';
 import { MonthView } from './Month';
+import { START, navigate, request } from './nav';
 import { WeekView } from './Week';
 
-type Tab = 'week' | 'month';
-
 function App() {
-  const [tab, setTab] = useState<Tab>('week');
-  const [day, setDay] = useState<string | null>(null);
-  const [month, setMonth] = useState<string | null>(null);
+  // The tab, week and month shown, kept here: every load asks for exactly this.
+  const [nav, go] = useReducer(navigate, START);
+  const { tab, day } = nav;
+  // The first load waits until the shell said whether the review offer named a week.
+  const [ready, setReady] = useState(false);
   const [week, setWeek] = useState<ReviewPage<WeekReview> | null>(null);
   const [monthly, setMonthly] = useState<ReviewPage<MonthReview> | null>(null);
   const [metric, setMetric] = useState<Metric>('water');
@@ -55,22 +56,43 @@ function App() {
       .catch((e: unknown) => setError(String(e)));
   }, []);
 
+  const load = useCallback(() => {
+    const r = request(nav);
+    if (r.command === 'review_week') loadWeek(r.day);
+    else loadMonth(r.month);
+  }, [nav, loadWeek, loadMonth]);
+
   useEffect(() => {
-    if (tab === 'week') loadWeek(day);
-    else loadMonth(month);
-  }, [tab, day, month, loadWeek, loadMonth]);
+    if (ready) load();
+  }, [ready, load]);
+
+  // "Open" on the weekly review offer names a week. The shell keeps it until this page
+  // takes it: on load (a new window), and when told (a window already open, on any week
+  // or on Monthly progress).
+  useEffect(() => {
+    const target = () =>
+      call('review_target')
+        .then((week) => {
+          if (week) {
+            go({ type: 'target', week });
+            setStatus('');
+          }
+        })
+        .catch(report);
+    target().finally(() => setReady(true));
+    on('hy://review-target', () => {
+      void target();
+    }).catch(report);
+  }, []);
 
   useEffect(() => followA11y(), []);
 
-  // Coming back to the window shows anything logged meanwhile.
+  // Coming back to the window shows anything logged meanwhile, on the same week or month.
   useEffect(() => {
-    const again = () => {
-      if (tab === 'week') loadWeek(day);
-      else loadMonth(month);
-    };
-    window.addEventListener('focus', again);
-    return () => window.removeEventListener('focus', again);
-  }, [tab, day, month, loadWeek, loadMonth]);
+    if (!ready) return undefined;
+    window.addEventListener('focus', load);
+    return () => window.removeEventListener('focus', load);
+  }, [ready, load]);
 
   const relabel = (e: PhoneEntry, label: PhoneLabel) => {
     call('review_phone_label', { week: week?.review.start ?? day, entry: e.id, label })
@@ -117,7 +139,7 @@ function App() {
             class="seg-btn"
             aria-pressed={tab === 'week'}
             onClick={() => {
-              setTab('week');
+              go({ type: 'tab', tab: 'week' });
               setStatus('');
             }}
           >
@@ -128,7 +150,7 @@ function App() {
             class="seg-btn"
             aria-pressed={tab === 'month'}
             onClick={() => {
-              setTab('month');
+              go({ type: 'tab', tab: 'month' });
               setStatus('');
             }}
           >
@@ -148,7 +170,7 @@ function App() {
             plain={plain}
             onPlain={() => setPlain(!plain)}
             onWeek={(d) => {
-              setDay(d);
+              go({ type: 'week', day: d });
               setStatus('');
             }}
             onLabel={relabel}
@@ -164,7 +186,7 @@ function App() {
             onMetric={setMetric}
             onPlain={() => setPlain(!plain)}
             onBaseline={() => setBaseline(!baseline)}
-            onMonth={setMonth}
+            onMonth={(m) => go({ type: 'month', month: m })}
           />
         ) : null}
       </main>

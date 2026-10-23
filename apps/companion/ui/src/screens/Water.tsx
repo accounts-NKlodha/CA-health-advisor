@@ -4,7 +4,8 @@
 // values whenever the tab opens; edits are kept only when saved.
 import { useEffect, useState } from 'preact/hooks';
 import { call } from '../shared/ipc';
-import type { SettingsPage, WeekdayName } from '../shared/types';
+import type { SettingsPage, WaterChange, WeekdayName } from '../shared/types';
+import { workweekChange } from './changes';
 import type { Save } from './main';
 
 const DAYS: [WeekdayName, string][] = [
@@ -24,8 +25,7 @@ function Water({ page, save }: { page: SettingsPage; save: Save }) {
     setGoal(page.water_goal_ml === null ? '' : String(page.water_goal_ml));
   }, [page.water_goal_ml]);
 
-  const servings = (list: number[], done: string) =>
-    save(call('save_water_settings', { goalMl: null, servings: list }), done);
+  const water = (change: WaterChange, done: string) => save(call('save_water_settings', { change }), done);
   const goalNumber = Number(goal);
   const goalValid =
     goal !== '' && Number.isInteger(goalNumber) && goalNumber >= page.goal_min_ml && goalNumber <= page.goal_max_ml;
@@ -48,10 +48,7 @@ function Water({ page, save }: { page: SettingsPage; save: Save }) {
         onSubmit={(e) => {
           e.preventDefault();
           if (!goalValid) return;
-          save(
-            call('save_water_settings', { goalMl: goalNumber, servings: page.servings }),
-            `Daily goal ${goalNumber} ml, from today.`,
-          );
+          water({ goal: goalNumber }, `Daily goal ${goalNumber} ml, from today.`);
         }}
       >
         <label class="inline" for="goal">
@@ -88,12 +85,7 @@ function Water({ page, save }: { page: SettingsPage; save: Save }) {
                 class="btn link"
                 aria-label={`Remove the ${ml} ml button`}
                 disabled={page.servings.length <= 1}
-                onClick={() =>
-                  servings(
-                    page.servings.filter((x) => x !== ml),
-                    `${ml} ml button removed.`,
-                  )
-                }
+                onClick={() => water({ remove_serving: ml }, `${ml} ml button removed.`)}
               >
                 Remove
               </button>
@@ -105,10 +97,7 @@ function Water({ page, save }: { page: SettingsPage; save: Save }) {
           onSubmit={(e) => {
             e.preventDefault();
             if (!addValid || full) return;
-            servings(
-              [...page.servings, addNumber].sort((a, b) => a - b),
-              `${addNumber} ml button added.`,
-            );
+            water({ add_serving: addNumber }, `${addNumber} ml button added.`);
             setAdd('');
           }}
         >
@@ -140,12 +129,7 @@ function Water({ page, save }: { page: SettingsPage; save: Save }) {
           checked={page.coach.categories.water}
           onChange={(e) => {
             const on = e.currentTarget.checked;
-            save(
-              call('save_coach_settings', {
-                config: { ...page.coach, categories: { ...page.coach.categories, water: on } },
-              }),
-              on ? 'Water pacing on.' : 'Water pacing off.',
-            );
+            save(call('save_coach_settings', { change: { water: on } }), on ? 'Water pacing on.' : 'Water pacing off.');
           }}
         />
         <span>Water pacing reminders within work hours (also under Reminders)</span>
@@ -169,27 +153,29 @@ function Workweek({ page, save }: { page: SettingsPage; save: Save }) {
     setReviewDay(page.coach.review.day);
     setReviewAt(page.coach.review.at);
   };
-  useEffect(reset, [page]);
+  // Reset to the saved values when they change (not on every refresh of the page, which
+  // would drop edits not yet saved).
+  useEffect(reset, [
+    page.schedule.workdays.join(),
+    page.schedule.start,
+    page.schedule.end,
+    page.zone,
+    page.coach.review.day,
+    page.coach.review.at,
+  ]);
 
   const reviewChanged = reviewDay !== page.coach.review.day || reviewAt !== page.coach.review.at;
-  const scheduleChanged =
-    start !== page.schedule.start ||
-    end !== page.schedule.end ||
-    zone !== page.zone ||
-    days.join() !== page.schedule.workdays.join();
+  const ordered = DAYS.map(([d]) => d).filter((d) => days.includes(d));
+  const change = workweekChange({ ...page.schedule, zone: page.zone }, { workdays: ordered, start, end, zone });
   const valid = start !== '' && end !== '' && start !== end && reviewAt !== '';
 
   const submit = () => {
     if (!valid) return;
-    const ordered = DAYS.map(([d]) => d).filter((d) => days.includes(d));
-    const work = scheduleChanged
-      ? call('save_workweek', { schedule: { workdays: ordered, start, end }, zone })
-      : Promise.resolve(page);
+    // Only the fields changed here are sent; the rest keep what is saved now.
+    const work = change ? call('save_workweek', { change }) : Promise.resolve(page);
     save(
       work.then((p) =>
-        reviewChanged
-          ? call('save_coach_settings', { config: { ...p.coach, review: { day: reviewDay, at: reviewAt } } })
-          : p,
+        reviewChanged ? call('save_coach_settings', { change: { review: { day: reviewDay, at: reviewAt } } }) : p,
       ),
       'Workweek saved.',
     );
@@ -257,10 +243,10 @@ function Workweek({ page, save }: { page: SettingsPage; save: Save }) {
           </select>
         </label>
         <div class="actions">
-          <button type="submit" class="btn primary" disabled={!valid || (!scheduleChanged && !reviewChanged)}>
+          <button type="submit" class="btn primary" disabled={!valid || (change === null && !reviewChanged)}>
             Save workweek
           </button>
-          <button type="button" class="btn" disabled={!scheduleChanged && !reviewChanged} onClick={reset}>
+          <button type="button" class="btn" disabled={change === null && !reviewChanged} onClick={reset}>
             Discard changes
           </button>
         </div>

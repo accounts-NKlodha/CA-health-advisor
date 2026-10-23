@@ -30,6 +30,7 @@ pub mod migrations;
 pub mod prefs;
 pub mod review;
 pub mod schema;
+pub mod settings;
 pub mod store;
 pub mod time;
 

@@ -53,6 +53,9 @@ pub struct LibraryMovement {
 /// (wireframes W4 to W7 and W12). The Pet tab keeps its own view ([`SettingsView`]).
 #[derive(Debug, Clone, Serialize)]
 pub struct SettingsPage {
+    /// Counts the settings changes made since the app started; a page keeps the newest
+    /// answer it has seen when answers to quick successive changes arrive out of order.
+    pub revision: u64,
     /// Reminders, movement version, Pomodoro and the review time.
     pub coach: CoachConfig,
     /// Workdays and hours.

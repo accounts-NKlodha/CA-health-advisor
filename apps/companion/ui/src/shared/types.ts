@@ -296,6 +296,9 @@ export interface WeekReview {
   next_week: string | null;
 }
 
+/** How a monthly bar is drawn: decided by the engine from the metric's own count. */
+export type BarKind = 'no_data' | 'nothing_to_count' | 'zero' | 'measured';
+
 export interface MonthBar {
   month: string;
   in_progress: boolean;
@@ -303,6 +306,7 @@ export interface MonthBar {
   movement: Ratio;
   breaks: Ratio;
   water: Ratio;
+  kind: Record<Metric, BarKind>;
 }
 
 export interface MonthDay {
@@ -370,7 +374,35 @@ export interface WorkSchedule {
   end: string;
 }
 
+/** One coaching setting, as a page changes it (hy_core::settings::CoachChange). A page
+ *  never sends its whole cached copy: another window may have changed other fields. */
+export type CoachChange =
+  | { intensity: Intensity }
+  | { movement: boolean }
+  | { eye_rest: boolean }
+  | { water: boolean }
+  | { hide_during_presentation: boolean }
+  | { media_in_use_hint: boolean }
+  | { long_day_check_in: boolean }
+  | { long_day_hours: number }
+  | { pomodoro_auto_start: boolean }
+  | { movement_version: MovementVersion }
+  | { review: { day: WeekdayName; at: string } };
+
+/** One Water tab change (hy_core::settings::WaterChange). */
+export type WaterChange = { goal: number } | { add_serving: number } | { remove_serving: number };
+
+/** The workweek fields a save changed; the others keep what is saved now. */
+export interface WorkweekChange {
+  workdays?: WeekdayName[];
+  /** "HH:MM". */
+  hours?: { start: string; end: string };
+  zone?: string;
+}
+
 export interface SettingsPage {
+  /** Settings changes counted since the app started; the newest answer wins. */
+  revision: number;
   coach: CoachConfig;
   schedule: WorkSchedule;
   zone: string;

@@ -993,6 +993,7 @@ fn review_window(r: &mut Report, shell: &Arc<Shell>) {
         }) == Some(true)
     });
     let loaded = wait_until(Duration::from_secs(30), || shell.review_loaded());
+    let offer = offer_navigation(shell);
     let week = shell.review_week(None);
     let week_ok = week.as_ref().is_ok_and(|p| p.review.days.len() == 7);
     let month = shell.review_month(None);
@@ -1025,6 +1026,56 @@ fn review_window(r: &mut Report, shell: &Arc<Shell>) {
             "opened {opened}; page loaded {loaded}; week {week_detail}; month {month_detail}; closed {closed}"
         ),
     );
+    r.check(
+        "review_offer_week",
+        offer.0,
+        format!("open window, then a new one: {}", offer.1),
+    );
+}
+
+/// "Open" on the weekly review offer goes to its week: in the review window already open
+/// (told by an event, it asks for that week), then in a new window (whose first request
+/// is that week, never this week first). Leaves the review window open.
+fn offer_navigation(shell: &Arc<Shell>) -> (bool, String) {
+    use chrono::Days;
+    let Some(week) = shell
+        .review_week(None)
+        .ok()
+        .and_then(|p| p.review.start.checked_sub_days(Days::new(7)))
+    else {
+        return (false, "no week to offer".into());
+    };
+    let _ = shell.take_review_requests();
+    let _ = on_main(shell, move |s| s.open_review_on(week));
+    let open_ok = wait_until(Duration::from_secs(10), || {
+        let asked = shell.take_review_requests();
+        asked.contains(&Some(week))
+    });
+    let _ = on_main(shell, |s| {
+        use tauri::Manager;
+        if let Some(w) = s.app().get_webview_window(crate::shell::REVIEW) {
+            let _ = w.close();
+        }
+    });
+    let closed = wait_until(Duration::from_secs(10), || {
+        !window_open(shell, crate::shell::REVIEW)
+    });
+    let _ = shell.take_review_requests();
+    let _ = on_main(shell, move |s| s.open_review_on(week));
+    let mut first = None;
+    let new_ok = wait_until(Duration::from_secs(30), || {
+        if first.is_none() {
+            first = shell.take_review_requests().first().copied();
+        }
+        first.is_some()
+    }) && first == Some(Some(week));
+    let taken = shell.review_target().is_none();
+    (
+        open_ok && closed && new_ok && taken,
+        format!(
+            "offered {week}; open window asked for it {open_ok}; closed {closed}; new window's first request {first:?}; target taken {taken}"
+        ),
+    )
 }
 
 /// Whether the window `label` is open, asked on the main thread.

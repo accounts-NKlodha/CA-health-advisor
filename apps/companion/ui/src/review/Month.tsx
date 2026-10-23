@@ -3,7 +3,7 @@
 // baseline, and the selected month day by day. A measured zero is an outline at 0%, a
 // month with no data a hatched full-height bar marked "no data", and the month in
 // progress a dashed outline. "Show as table" gives every figure as text.
-import type { Metric, MonthBar, MonthReview, Ratio } from '../shared/types';
+import type { BarKind, Metric, MonthBar, MonthReview, Ratio } from '../shared/types';
 import { Legend } from './Week';
 import { METRICS, dayMonth, info, monthName, monthShort, percent, symbol, weekdayIndex, words } from './marks';
 
@@ -17,14 +17,21 @@ function detail(metric: Metric, r: Ratio): string {
   return `${r.num} of ${r.den} ${r.den === 1 ? 'day' : 'days'}`;
 }
 
-function barKind(b: MonthBar, r: Ratio): 'none' | 'empty' | 'zero' | 'measured' {
-  if (b.coverage.recorded === 0) return 'none';
-  if (r.den === 0) return 'empty';
-  return r.num === 0 ? 'zero' : 'measured';
+// The engine classifies each bar from the metric's own count first (an off day with
+// something done counts even when no workday was recorded), then from coverage.
+const KIND_CLASS: Record<BarKind, 'none' | 'empty' | 'zero' | 'measured'> = {
+  no_data: 'none',
+  nothing_to_count: 'empty',
+  zero: 'zero',
+  measured: 'measured',
+};
+
+function barKind(b: MonthBar, metric: Metric): 'none' | 'empty' | 'zero' | 'measured' {
+  return KIND_CLASS[b.kind[metric]];
 }
 
-function barValue(b: MonthBar, r: Ratio): string {
-  switch (barKind(b, r)) {
+function barValue(metric: Metric, b: MonthBar, r: Ratio): string {
+  switch (barKind(b, metric)) {
     case 'none':
       return '–';
     case 'empty':
@@ -35,7 +42,7 @@ function barValue(b: MonthBar, r: Ratio): string {
 }
 
 function barCaption(metric: Metric, b: MonthBar, r: Ratio): string {
-  switch (barKind(b, r)) {
+  switch (barKind(b, metric)) {
     case 'none':
       return 'no data';
     case 'empty':
@@ -66,17 +73,17 @@ function Chart({ m, metric, showBaseline }: { m: MonthReview; metric: Metric; sh
       <line class="axis" x1="12" y1={TOP + H} x2={width - 4} y2={TOP + H} />
       {m.bars.map((b, n) => {
         const r = b[metric];
-        const kind = barKind(b, r);
+        const kind = barKind(b, metric);
         const x = 20 + n * STEP;
         const h = kind === 'measured' ? Math.max(2, ((r.pct ?? 0) * H) / 100) : kind === 'zero' ? 2 : H;
         const cls = `bar ${kind}${b.in_progress ? ' part' : ''}`;
         return (
           <g key={b.month}>
             <rect class={cls} x={x} y={TOP + H - h} width={BAR} height={h}>
-              <title>{`${monthName(b.month)}: ${barValue(b, r)}, ${barCaption(metric, b, r)}${b.in_progress ? ' (month in progress)' : ''}`}</title>
+              <title>{`${monthName(b.month)}: ${barValue(metric, b, r)}, ${barCaption(metric, b, r)}${b.in_progress ? ' (month in progress)' : ''}`}</title>
             </rect>
             <text class="bar-num" x={x + BAR / 2} y={TOP + H - h - 6} text-anchor="middle">
-              {barValue(b, r)}
+              {barValue(metric, b, r)}
             </text>
             <text class="bar-lab" x={x + BAR / 2} y={TOP + H + 18} text-anchor="middle">
               {monthShort(b.month)}
@@ -115,7 +122,7 @@ function Table({ m, metric }: { m: MonthReview; metric: Metric }) {
       <tbody>
         {m.bars.map((b) => {
           const r = b[metric];
-          const kind = barKind(b, r);
+          const kind = barKind(b, metric);
           return (
             <tr key={b.month}>
               <th scope="row">{monthName(b.month)}</th>

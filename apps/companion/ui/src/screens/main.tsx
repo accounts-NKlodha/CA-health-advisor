@@ -9,9 +9,10 @@
 import { render } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { applyA11y, followA11y } from '../shared/a11y';
-import { call, report } from '../shared/ipc';
+import { call, on, report } from '../shared/ipc';
 import type { SettingsPage } from '../shared/types';
 import { AccessibilityTab } from './Accessibility';
+import { newer } from './changes';
 import { FocusTab, MovementTab, RemindersTab } from './Coaching';
 import { BackupTab, SharingTab } from './Data';
 import { PetSettings } from './PetSettings';
@@ -39,25 +40,37 @@ function App() {
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
 
+  // Every answer goes through `newer`: answers to quick successive saves can arrive out
+  // of order, and the page with the newest settings revision wins.
+  const show = (v: SettingsPage) => setPage((p) => newer(p, v));
+  const reload = () => {
+    call('settings_page').then(show).catch(report);
+  };
+
   useEffect(() => {
     call('settings_page')
       .then((p) => {
-        setPage(p);
+        show(p);
         applyA11y(p.a11y);
       })
       .catch((e: unknown) => setError(String(e)));
     followA11y((a) => setPage((p) => (p ? { ...p, a11y: a } : p)));
+    // A change saved from another window (the weekly review's Apply or Undo) shows here
+    // at once. Saves send only the changed field, so a page that is still stale never
+    // writes back what it shows.
+    on('hy://settings', reload).catch(report);
+    window.addEventListener('focus', reload);
   }, []);
 
   const save: Save = (p, done) => {
     p.then((v) => {
-      setPage(v);
+      show(v);
       applyA11y(v.a11y);
       setStatus(done);
     }).catch((e: unknown) => {
       setStatus(String(e));
       // Show what is saved, not what was refused.
-      call('settings_page').then(setPage).catch(report);
+      reload();
     });
   };
 
