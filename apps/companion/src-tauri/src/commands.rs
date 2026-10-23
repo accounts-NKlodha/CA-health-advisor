@@ -5,7 +5,6 @@
 use std::sync::Arc;
 
 use chrono::NaiveDate;
-use hy_core::backup::Summary;
 use hy_core::coach::RecoveryPlan;
 use hy_core::prefs::Accessibility;
 use hy_core::review::suggest::SuggestionKind;
@@ -17,7 +16,7 @@ use hy_pet::profile::PetEdit;
 use tauri::State;
 use uuid::Uuid;
 
-use crate::shell::{BackupDone, Shell, SuggestionAnswer};
+use crate::shell::{BackupDone, ImportOutcome, Shell, SuggestionAnswer};
 use crate::view::{PanelView, PetView, PlanPage, ReviewPage, SettingsPage, SettingsView};
 
 type ShellState<'a> = State<'a, Arc<Shell>>;
@@ -362,11 +361,12 @@ pub fn backup_stage(
     }
 }
 
-/// "Import": replace this PC's data with the staged backup's, then restart.
+/// "Import": replace this PC's data with the staged backup's, then restart; or, after the
+/// wait, "still running" (the outcome follows as `hy://backup-import`).
 ///
 /// # Errors
-/// The refusal, worded for the user; nothing was changed.
+/// The refusal, worded for the user.
 #[tauri::command]
-pub fn backup_import(shell: ShellState<'_>, password: String) -> Result<Summary, String> {
+pub fn backup_import(shell: ShellState<'_>, password: String) -> Result<ImportOutcome, String> {
     shell.import_backup(password)
 }

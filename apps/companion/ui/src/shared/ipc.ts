@@ -6,8 +6,9 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   Accessibility,
   BackupDone,
-  BackupSummary,
   CoachChange,
+  ImportFinished,
+  ImportOutcome,
   MonthReview,
   PanelView,
   PetEdit,
@@ -69,7 +70,7 @@ interface Commands {
   setup_sample: { args: undefined; result: void };
   setup_finish: { args: undefined; result: void };
   backup_export: { args: { password: string }; result: BackupDone };
-  backup_import: { args: { password: string }; result: BackupSummary };
+  backup_import: { args: { password: string }; result: ImportOutcome };
 }
 
 type Name = keyof Commands;
@@ -95,6 +96,8 @@ interface Events {
   'hy://settings': number;
   /** "Open" on the weekly review offer named a week; fetch it with review_target. */
   'hy://review-target': string;
+  /** An import finished (also one the page stopped waiting for). */
+  'hy://backup-import': ImportFinished;
 }
 
 /** Listen for a view the shell pushes to this window. */

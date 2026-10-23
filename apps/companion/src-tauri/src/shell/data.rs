@@ -9,7 +9,11 @@
 //! - **Export** writes one encrypted `.hybackup` file to the user's Documents folder.
 //! - **Import** decrypts a file the page staged, replaces this PC's data on the engine's
 //!   own store connection (so nothing is written in between), then restarts the app so
-//!   every part starts from the imported data.
+//!   every part starts from the imported data. The replacement and the engine stop are
+//!   one operation on the engine thread ([`CoachRunner::replace_and_stop`]): a slow
+//!   import that outlasts the page's wait is reported as still running, and when it
+//!   finishes the engine thread itself stops the engine, restarts the app and tells the
+//!   page, so a late success is never left with the old engine running.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,9 +24,10 @@ use hy_core::schema::Category;
 use hy_pet::link::CoachLink;
 use hy_pet::shell::Bubble;
 use serde::Serialize;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 use super::{SETUP, Shell, lock};
+use crate::coach::{CALL_WAIT, CallError, CoachRunner};
 use crate::view::SharingRow;
 use crate::windows;
 
@@ -39,6 +44,32 @@ pub struct BackupDone {
     pub path: String,
     /// What it holds.
     pub summary: Summary,
+}
+
+/// What "Import" answers.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ImportOutcome {
+    /// Replaced; the app restarts.
+    Done {
+        /// What the file held.
+        summary: Summary,
+    },
+    /// Still running after the wait (a slow key derivation or a large file). The page
+    /// hears the outcome as [`ImportFinished`]; nothing is claimed either way until then.
+    Pending,
+}
+
+/// The outcome of an import, sent to the pages as `hy://backup-import` by the engine
+/// thread when it finishes (also when the page had stopped waiting).
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportFinished {
+    /// Replaced (the app restarts), or refused with nothing changed.
+    pub ok: bool,
+    /// What the file held, when replaced.
+    pub summary: Option<Summary>,
+    /// Why it was refused.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -246,26 +277,54 @@ impl Shell {
     ///
     /// # Errors
     /// No file staged, a wrong password, a damaged or newer file, or a refused row,
-    /// worded for the page; nothing was changed.
-    pub fn import_backup(self: &Arc<Self>, password: String) -> Result<Summary, String> {
+    /// worded for the page; nothing was changed. An import still running after the wait
+    /// is [`ImportOutcome::Pending`], never an error.
+    pub fn import_backup(self: &Arc<Self>, password: String) -> Result<ImportOutcome, String> {
         let file = lock(&self.inner)
             .staged_backup
             .clone()
             .ok_or_else(|| "Choose a backup file first.".to_owned())?;
-        let result = match self.runner() {
-            Some(runner) => runner
-                .call(move |link: &mut CoachLink| {
-                    link.replace_data(|s| s.import_backup(&file, &password))
-                })
-                .ok_or_else(|| "The app did not answer in time. Nothing was changed.".to_owned())?,
-            None => lock(&self.store).import_backup(&file, &password),
+        let Some(runner) = self.runner() else {
+            // No engine (it failed to start): the shell's connection is the only writer.
+            let summary = lock(&self.store)
+                .import_backup(&file, &password)
+                .map_err(|e| format!("Nothing was changed: {e}"))?;
+            self.imported();
+            return Ok(ImportOutcome::Done { summary });
         };
-        let summary = result.map_err(|e| format!("Nothing was changed: {e}"))?;
+        let me = Arc::clone(self);
+        import_on_engine(
+            &runner,
+            move |link| link.replace_data(|s| s.import_backup(&file, &password)),
+            move |out| me.import_finished(out),
+            CALL_WAIT,
+        )
+    }
+
+    /// The engine thread finished an import (whether or not the page still waits).
+    fn import_finished(self: &Arc<Self>, out: &hy_core::Result<Summary>) {
+        let finished = match out {
+            Ok(summary) => {
+                self.imported();
+                ImportFinished {
+                    ok: true,
+                    summary: Some(summary.clone()),
+                    error: None,
+                }
+            }
+            Err(e) => ImportFinished {
+                ok: false,
+                summary: None,
+                error: Some(format!("Nothing was changed: {e}")),
+            },
+        };
+        let _ = self.app.emit("hy://backup-import", finished);
+    }
+
+    /// The data was replaced and the engine stopped: restart so every part starts from
+    /// the imported data.
+    fn imported(&self) {
         lock(&self.inner).staged_backup = None;
-        // The engine's saved state went with the old data: stop it before it steps again.
-        if let Some(runner) = self.runner() {
-            runner.shutdown(RESTART_AFTER);
-        }
         let app = self.app.clone();
         let _ = std::thread::Builder::new()
             .name("hy-restart".into())
@@ -273,7 +332,35 @@ impl Shell {
                 std::thread::sleep(RESTART_AFTER);
                 app.restart();
             });
-        Ok(summary)
+    }
+}
+
+/// Run an import on the engine thread ([`CoachRunner::replace_and_stop`]) and word the
+/// answer for the page. A wait that runs out is [`ImportOutcome::Pending`]: the engine
+/// thread completes the import (engine stop, restart, report) through `after`.
+///
+/// # Errors
+/// The import was refused (nothing changed), the engine was not running (nothing ran),
+/// or the engine thread ended without an answer (outcome unknown, worded so).
+fn import_on_engine(
+    runner: &CoachRunner,
+    f: impl FnOnce(&mut CoachLink) -> hy_core::Result<Summary> + Send + 'static,
+    after: impl FnOnce(&hy_core::Result<Summary>) + Send + 'static,
+    wait: Duration,
+) -> Result<ImportOutcome, String> {
+    match runner.replace_and_stop(f, after, wait) {
+        Ok(Ok(summary)) => Ok(ImportOutcome::Done { summary }),
+        Ok(Err(e)) => Err(format!("Nothing was changed: {e}")),
+        Err(CallError::Pending) => Ok(ImportOutcome::Pending),
+        Err(CallError::NotRunning) => Err(
+            "Nothing was changed: the coaching engine is not running. Restart HealthierYou and try again."
+                .to_owned(),
+        ),
+        Err(CallError::Lost) => Err(
+            "The import's outcome is not known: the coaching engine stopped before answering. \
+             Restart HealthierYou to see which data it has."
+                .to_owned(),
+        ),
     }
 }
 

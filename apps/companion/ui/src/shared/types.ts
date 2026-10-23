@@ -439,6 +439,16 @@ export interface BackupSummary {
   to: string | null;
 }
 
+/** "Import": done (the app restarts), or still running after the wait. */
+export type ImportOutcome = { state: 'done'; summary: BackupSummary } | { state: 'pending' };
+
+/** An import's outcome, sent by the engine thread when it finishes ("hy://backup-import"). */
+export interface ImportFinished {
+  ok: boolean;
+  summary: BackupSummary | null;
+  error: string | null;
+}
+
 export interface BackupDone {
   path: string;
   summary: BackupSummary;

@@ -63,7 +63,7 @@ pub const SETUP: &str = "setup";
 
 mod data;
 mod screens;
-pub use data::BackupDone;
+pub use data::{BackupDone, ImportOutcome};
 pub use screens::SuggestionAnswer;
 
 /// How long the "Your pet is back above the clock" notice stays.

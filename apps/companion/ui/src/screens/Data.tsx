@@ -4,9 +4,9 @@
 // Backup: "Export my data" writes one encrypted file to the Documents folder; "Import a
 // backup" replaces all HealthierYou data on this PC with a file's (never merges), keeps
 // every deletion from both sides, and restarts the app.
-import { useState } from 'preact/hooks';
-import { call, stageBackup } from '../shared/ipc';
-import type { BackupSummary, SettingsPage } from '../shared/types';
+import { useEffect, useState } from 'preact/hooks';
+import { call, on, report, stageBackup } from '../shared/ipc';
+import type { BackupSummary, ImportFinished, SettingsPage } from '../shared/types';
 
 const MIN_PASSWORD = 8;
 
@@ -128,7 +128,21 @@ function Import() {
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState(false);
   const [status, setStatus] = useState('');
+  // A slow import (a costly key or a large file) can outlast the wait. Its outcome is
+  // not known until the engine thread reports it here: until then nothing is claimed.
+  useEffect(() => {
+    on('hy://backup-import', (f: ImportFinished) => {
+      if (f.ok && f.summary) {
+        setStatus(`Imported ${held(f.summary)}. HealthierYou is restarting...`);
+      } else {
+        setStatus(f.error ?? 'The import was refused. Nothing was changed.');
+        setBusy(false);
+      }
+      setPending(false);
+    }).catch(report);
+  }, []);
   return (
     <section aria-labelledby="import-h">
       <h3 id="import-h">Import a backup</h3>
@@ -144,8 +158,15 @@ function Import() {
           setBusy(true);
           setStatus('Checking the backup...');
           call('backup_import', { password })
-            .then((s) => {
-              setStatus(`Imported ${held(s)}. HealthierYou is restarting...`);
+            .then((o) => {
+              if (o.state === 'done') {
+                setStatus(`Imported ${held(o.summary)}. HealthierYou is restarting...`);
+              } else {
+                setPending(true);
+                setStatus(
+                  'Still importing. Keep HealthierYou open: it restarts by itself when the import is done, or says here if the file was refused.',
+                );
+              }
             })
             .catch((err: unknown) => {
               setStatus(String(err));
@@ -189,7 +210,7 @@ function Import() {
           Import
         </button>
       </form>
-      <p class="status" role="status">
+      <p class="status" role="status" aria-busy={pending}>
         {status}
       </p>
     </section>
