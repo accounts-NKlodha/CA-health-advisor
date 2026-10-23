@@ -26,7 +26,7 @@ pub mod recovery;
 pub mod types;
 pub mod water;
 
-pub use config::{CoachConfig, Intensity, PomodoroPreset};
+pub use config::{CoachConfig, Intensity, MovementVersion, PomodoroPreset, ReviewTime};
 pub use driver::Coach;
 pub use engine::{ActivityState, Context, DayTally, Engine, EngineState, StepOutput};
 pub use recovery::{RecoveryAction, RecoveryPlan, RecoveryView, Reflection};
@@ -34,6 +34,6 @@ pub use types::{
     ActiveRoutine, Bubble, CheckInAnswer, Chip, ChipStatus, CoachView, Confirmation, FocusEnd,
     GuideAction, GuideStage, GuideView, HiddenReason, Hold, Input, InputOutcome, Notice,
     PauseLength, PetMode, PhoneInput, PomodoroPause, PomodoroPhase, PomodoroView, ReminderReason,
-    Response, WaterEdit, WaterInput,
+    Response, ReviewAnswer, WaterEdit, WaterInput,
 };
-pub use water::{WaterEntry, WaterPace, WaterSnapshot};
+pub use water::{Servings, WaterEntry, WaterPace, WaterSnapshot};

@@ -268,7 +268,8 @@ impl Store {
     }
 
     /// The weekly review of the week containing `day` (default today), kept between the
-    /// earliest week with detailed events and this week.
+    /// earliest week with detailed events and this week, with its suggestions (this week
+    /// and the previous one).
     ///
     /// # Errors
     /// A read failure.
@@ -285,7 +286,9 @@ impl Store {
             counts: review::phone_counts(days),
             entries: self.phone_entries(start, end)?,
         };
-        Ok(review::week(&cal, days, previous, phone))
+        let mut review = review::week(&cal, days, previous, phone);
+        self.add_suggestions(&mut review)?;
+        Ok(review)
     }
 
     /// Monthly progress for `month` (default this month), kept between the month of

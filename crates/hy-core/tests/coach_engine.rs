@@ -72,6 +72,7 @@ impl H {
             water,
             water_entries: Vec::new(),
             config,
+            servings: Servings::default(),
         };
         let last = e.step(&ctx, Input::Refresh);
         let events = last.events.clone();
@@ -119,6 +120,7 @@ impl H {
             water: self.water,
             water_entries: self.entries.clone(),
             config: self.config,
+            servings: Servings::default(),
         }
     }
 
@@ -4620,4 +4622,128 @@ mod property {
             }
         }
     }
+}
+
+// ------------------------------------------------------- weekly review offer (V1-4)
+
+fn review_offer(v: &CoachView) -> Option<(NaiveDate, bool)> {
+    match v.bubble {
+        Some(Bubble::ReviewOffer { week, later }) => Some((week, later)),
+        _ => None,
+    }
+}
+
+/// Only the weekly review offer can open (no reminders), Saturday 24 Oct at `h:m`.
+fn review_harness(h: u32, m: u32) -> H {
+    H::at(
+        ist(24, h, m),
+        cats(false, false, false),
+        WaterSnapshot::default(),
+    )
+}
+
+#[test]
+fn review_offer_opens_once_at_the_review_time() {
+    let mut h = review_harness(16, 50);
+    h.wait(mins(5));
+    assert_eq!(review_offer(h.view()), None, "not before 17:00");
+    h.wait_until(mins(6), |v| review_offer(v).is_some());
+    assert_eq!(h.local(), hm(17, 0));
+    let monday = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+    assert_eq!(review_offer(h.view()), Some((monday, true)));
+    assert_eq!(
+        h.input(Input::Review(ReviewAnswer::Open)).outcome,
+        InputOutcome::Applied
+    );
+    assert_eq!(h.view().bubble, None);
+    h.wait(mins(30));
+    assert_eq!(review_offer(h.view()), None, "never twice in a week");
+    assert_eq!(
+        h.input(Input::Review(ReviewAnswer::Skip)).outcome,
+        InputOutcome::Ignored("no review offer open")
+    );
+}
+
+#[test]
+fn review_offer_needs_recorded_activity_this_week() {
+    // Started for the first time after the review time: nothing recorded yet this week,
+    // so nothing is offered until this PC has recorded some time.
+    let mut h = review_harness(17, 30);
+    assert_eq!(review_offer(h.view()), None);
+    h.wait_until(mins(1), |v| review_offer(v).is_some());
+}
+
+#[test]
+fn review_offer_later_comes_back_once_on_the_next_workday() {
+    let mut h = review_harness(16, 55);
+    h.wait_until(mins(6), |v| review_offer(v).is_some());
+    h.input(Input::Review(ReviewAnswer::Later));
+    assert_eq!(h.view().bubble, None);
+    // Sunday is not a workday; Monday 26 Oct is.
+    h.wall = ist(25, 12, 0);
+    h.wait(mins(10));
+    assert_eq!(review_offer(h.view()), None);
+    h.wall = ist(26, 9, 40);
+    h.wait_until(mins(6), |v| review_offer(v).is_some());
+    assert_eq!(h.today(), NaiveDate::from_ymd_opt(2026, 10, 26).unwrap());
+    let monday = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+    assert_eq!(
+        review_offer(h.view()),
+        Some((monday, false)),
+        "no second Later"
+    );
+    assert_eq!(
+        h.input(Input::Review(ReviewAnswer::Later)).outcome,
+        InputOutcome::Ignored("Later was already used for this week")
+    );
+    h.input(Input::Review(ReviewAnswer::Skip));
+    h.wait(mins(30));
+    assert_eq!(review_offer(h.view()), None);
+}
+
+#[test]
+fn review_offer_waits_for_holds_and_closes_quietly() {
+    let mut h = review_harness(16, 55);
+    h.input(Input::SetMeeting(true));
+    h.wait(mins(10));
+    assert_eq!(review_offer(h.view()), None, "held during a meeting");
+    h.input(Input::SetMeeting(false));
+    h.wait_until(mins(6), |v| review_offer(v).is_some());
+    // Unanswered, it closes after 10 minutes and is not shown again this week.
+    h.wait_until(mins(11), |v| review_offer(v).is_none());
+    h.wait(mins(20));
+    assert_eq!(review_offer(h.view()), None);
+}
+
+#[test]
+fn review_offer_follows_the_chosen_time() {
+    let config = CoachConfig {
+        categories: Categories {
+            movement: false,
+            eye_rest: false,
+            water: false,
+        },
+        review: ReviewTime {
+            day: Weekday::Fri,
+            at: hm(11, 0),
+        },
+        ..CoachConfig::default()
+    };
+    let mut h = H::at(ist(23, 10, 55), config, WaterSnapshot::default());
+    h.wait_until(mins(6), |v| review_offer(v).is_some());
+    assert_eq!(h.local(), hm(11, 0));
+}
+
+#[test]
+fn default_movement_version_reaches_the_guide() {
+    let config = CoachConfig {
+        movement_version: MovementVersion::Standing,
+        ..CoachConfig::default()
+    };
+    let mut h = H::at(ist(20, 10, 0), config, WaterSnapshot::default());
+    h.input(Input::RoutineStarted);
+    assert_eq!(h.guide().default_variant, Some(RoutineVariant::Standing));
+    let mut ask = H::new();
+    ask.input(Input::RoutineStarted);
+    assert_eq!(ask.guide().default_variant, None);
 }

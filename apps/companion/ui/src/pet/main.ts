@@ -2,6 +2,7 @@
 // low. The Rust shell owns every decision (placement, what is open, state); this page
 // draws the latest view, measures the bubble, and reports pointer input. The window never
 // takes focus (WS_EX_NOACTIVATE), so clicks here never move the user's caret.
+import { applyA11y } from '../shared/a11y';
 import { insertArt, setPalette } from '../shared/art';
 import { renderProgress, renderRows } from '../shared/bubble';
 import { renderBadge } from '../shared/icons';
@@ -222,6 +223,7 @@ function drawOpen(v: PetView): void {
 
 function draw(v: PetView): void {
   lastView = v;
+  applyA11y(v.a11y);
   drawPet(v);
   drawOpen(v);
 }

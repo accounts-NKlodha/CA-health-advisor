@@ -44,10 +44,13 @@
 //! - The water confirmation, the water panel and the phone note ([`note`], V1-3 follow-up)
 //!   answer the user's own action in the same single bubble; while one is open nothing
 //!   opens on its own.
+//! - The weekly review offer ([`review`], slice V1-4) opens once a week at the user's
+//!   review time, like the recovery cards that open on their own.
 
 mod guide;
 mod note;
 mod recovery;
+mod review;
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -67,7 +70,7 @@ use super::types::{
     Input, InputOutcome, Notice, PauseLength, PetMode, PomodoroPause, PomodoroPhase, PomodoroView,
     ReminderReason, Response,
 };
-use super::water::{WaterEntry, WaterPace, WaterSnapshot, pace};
+use super::water::{Servings, WaterEntry, WaterPace, WaterSnapshot, pace};
 use crate::schema::{
     Activity, EventPayload, MAX_WATER_ENTRY_ML, MeasurementStatus, NewEvent, ReminderOutcome,
     RoutineOutcome, SessionState,
@@ -116,6 +119,8 @@ pub struct Context {
     pub water_entries: Vec<WaterEntry>,
     /// The user's coaching settings.
     pub config: CoachConfig,
+    /// The user's serving buttons (wireframe W5), for the water panel and the pet menu.
+    pub servings: Servings,
 }
 
 /// Per local date tallies (architecture 4.3 "Reported as"). Every duration is an estimate.
@@ -211,10 +216,11 @@ enum Prompt {
     RecoveryMorning,
     RecoveryWalk,
     RecoveryReflection,
+    ReviewOffer,
 }
 
 impl Prompt {
-    /// Recovery cards close quietly when left unanswered.
+    /// Recovery cards and the weekly review offer close quietly when left unanswered.
     const fn is_recovery_card(self) -> bool {
         !matches!(self, Self::CheckIn | Self::Lighter | Self::DeadlineDay)
     }
@@ -338,6 +344,9 @@ pub struct EngineState {
     /// The water confirmation, the water panel or the phone note, when open.
     #[serde(default)]
     note: Option<note::NoteCard>,
+    /// The weekly review offer (slice V1-4).
+    #[serde(default)]
+    review: review::ReviewOffer,
 }
 
 /// What one step produced.
@@ -417,6 +426,7 @@ impl Engine {
                 prompt_since: 0,
                 plan: None,
                 note: None,
+                review: review::ReviewOffer::default(),
             },
         }
     }
@@ -1625,6 +1635,7 @@ impl Engine {
             }
             Input::Water(w) => self.water_input(ctx, w, out),
             Input::Phone(p) => self.phone_input(ctx, p, out),
+            Input::Review(answer) => self.review_input(ctx, answer, out),
         }
     }
 
@@ -1760,6 +1771,9 @@ impl Engine {
         if self.maybe_reflection(ctx, out) {
             return;
         }
+        if self.maybe_review_offer(ctx, out) {
+            return;
+        }
         self.maybe_check_in(ctx, out);
     }
 
@@ -1775,6 +1789,7 @@ impl Engine {
     fn clear_prompt(&mut self) {
         self.s.prompt = None;
         self.s.prompt_opened_under = None;
+        self.review_closed();
     }
 
     /// Withdraw a card that a hold now blocks (a card the user asked for stays while only
@@ -2006,6 +2021,7 @@ impl Engine {
                     hours: ctx.config.long_day_check_in.hours,
                 },
                 Prompt::Lighter => Bubble::LighterSchedule,
+                Prompt::ReviewOffer => self.review_bubble()?,
                 _ => self.recovery_bubble(ctx, p)?,
             });
         }
@@ -2055,6 +2071,7 @@ impl Engine {
             guide: self.guide_view(ctx),
             recovery: self.recovery_view(ctx),
             water_entries: ctx.water_entries.clone(),
+            servings: ctx.servings.clone(),
         }
     }
 
@@ -2095,6 +2112,7 @@ mod tests {
             water: WaterSnapshot::default(),
             water_entries: Vec::new(),
             config: CoachConfig::default(),
+            servings: Servings::default(),
         }
     }
 

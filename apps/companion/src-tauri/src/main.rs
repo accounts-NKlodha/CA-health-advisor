@@ -152,6 +152,15 @@ fn main() {
             commands::review_week,
             commands::review_month,
             commands::review_phone_label,
+            commands::review_suggestion,
+            commands::settings_page,
+            commands::save_coach_settings,
+            commands::save_water_settings,
+            commands::save_workweek,
+            commands::save_accessibility,
+            commands::plan_page,
+            commands::plan_save,
+            commands::plan_cancel,
         ])
         .setup(setup)
         .build(tauri::generate_context!());
@@ -233,6 +242,7 @@ mod tests {
         let week = view::ReviewPage {
             review: store.week_review(None).unwrap(),
             motion: true,
+            a11y: store.accessibility().unwrap(),
         };
         let json = serde_json::to_value(&week).unwrap();
         assert_eq!(json["motion"], true);
@@ -246,12 +256,65 @@ mod tests {
         let month = view::ReviewPage {
             review: store.month_review(None).unwrap(),
             motion: false,
+            a11y: store.accessibility().unwrap(),
         };
         let json = serde_json::to_value(&month).unwrap();
         assert_eq!(json["review"]["status"], "too_early");
         assert_eq!(json["review"]["month"].as_str().unwrap().len(), 7);
+        assert_eq!(json["a11y"]["text_pct"], 100);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn settings_the_pages_send_are_accepted() {
+        // The shapes the settings and plan pages send (ui/src/shared/types.ts).
+        let config: hy_core::coach::CoachConfig = serde_json::from_value(serde_json::json!({
+            "intensity": "more_often",
+            "categories": { "movement": true, "eye_rest": false, "water": true },
+            "hide_during_presentation": true,
+            "media_in_use_hint": false,
+            "long_day_check_in": { "enabled": true, "hours": 10 },
+            "pomodoro_auto_start": true,
+            "movement_version": "seated",
+            "review": { "day": "fri", "at": "18:00" }
+        }))
+        .unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.review.day, chrono::Weekday::Fri);
+        let schedule: hy_core::time::WorkSchedule = serde_json::from_value(serde_json::json!({
+            "workdays": ["mon", "tue", "wed", "thu", "fri"],
+            "start": "09:00",
+            "end": "17:30"
+        }))
+        .unwrap();
+        schedule.validate().unwrap();
+        let a11y: hy_core::prefs::Accessibility = serde_json::from_value(serde_json::json!({
+            "text_pct": 150, "reduced_motion": true, "high_contrast": false
+        }))
+        .unwrap();
+        a11y.validate().unwrap();
+        let plan: hy_core::coach::RecoveryPlan = serde_json::from_value(serde_json::json!({
+            "date": "2026-10-27",
+            "more_breaks": true,
+            "walk_at": "16:30:00",
+            "walk_repeat": true,
+            "lunch_away": false,
+            "calm_pause": true,
+            "finish_at": null,
+            "reflection": true
+        }))
+        .unwrap();
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 23).unwrap();
+        plan.validate(today).unwrap();
+        // And what the pages are sent reads back the same way.
+        let json = serde_json::to_value(plan).unwrap();
+        assert_eq!(json["walk_at"], "16:30:00");
+        let json = serde_json::to_value(config).unwrap();
+        assert_eq!(
+            json["review"],
+            serde_json::json!({ "day": "fri", "at": "18:00" })
+        );
     }
 
     #[test]
@@ -261,6 +324,7 @@ mod tests {
             include_str!("../capabilities/panel.json"),
             include_str!("../capabilities/screens.json"),
             include_str!("../capabilities/review.json"),
+            include_str!("../capabilities/plan.json"),
         ];
         let build_rs = include_str!("../build.rs");
         for cap in caps {

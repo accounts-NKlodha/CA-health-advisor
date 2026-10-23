@@ -1,0 +1,28 @@
+/* The recovery-day plan window (wireframe W15). Shares the settings window's tokens and
+   controls, including the display preferences. */
+@import '../screens/screens.css';
+
+.shell.plan {
+  max-width: 720px;
+}
+.plan-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+.plan-item .check {
+  margin-right: 4px;
+}
+.saved {
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 0 0 12px;
+}
+@media (forced-colors: active) {
+  .saved {
+    border-color: CanvasText;
+  }
+}

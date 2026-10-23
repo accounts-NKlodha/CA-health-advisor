@@ -873,3 +873,21 @@ fn water_corrections_and_removals_move_the_total_and_pace_and_a_note_ends_on_res
     let c = env.open();
     assert!(!matches!(c.view().bubble, Some(Bubble::WaterPanel { .. })));
 }
+
+#[test]
+fn settings_saved_by_a_screen_reach_the_engine_on_refresh() {
+    let env = Env::new(ist(20, 10, 0));
+    let mut c = env.open_with(CoachConfig::default());
+    assert_eq!(c.view().servings, Servings::default());
+    let s = Servings::new(vec![200, 750]).unwrap();
+    c.store().set_water_servings(&s).unwrap();
+    let mut cfg = c.store().coach_config().unwrap();
+    cfg.movement_version = MovementVersion::Seated;
+    c.store().set_coach_config(&cfg).unwrap();
+    let out = c.handle(Input::Refresh).unwrap();
+    assert_eq!(out.view.servings, s);
+    assert_eq!(
+        c.config().unwrap().movement_version,
+        MovementVersion::Seated
+    );
+}

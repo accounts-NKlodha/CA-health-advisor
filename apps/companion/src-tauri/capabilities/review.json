@@ -1,11 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "review",
-  "description": "The review window (created on open, destroyed on close): the weekly review and monthly progress, and label corrections of past phone reports.",
-  "windows": ["review"],
+  "description": "The review window (created on open, destroyed on close): the weekly review and monthly progress, label corrections of past phone reports, the week's suggestions, and display preference changes.",
+  "windows": [
+    "review"
+  ],
   "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
     "allow-review-week",
     "allow-review-month",
-    "allow-review-phone-label"
+    "allow-review-phone-label",
+    "allow-review-suggestion"
   ]
 }

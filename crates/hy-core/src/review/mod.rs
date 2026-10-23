@@ -20,6 +20,7 @@
 //!
 //! [`week`] and [`month`] are pure: the store reads the facts ([`crate::store::Store`]'s
 //! `day_facts`) and these functions turn them into what the review windows show.
+//! [`suggest`] gives the week's "Try next week" suggestions.
 
 use std::collections::BTreeMap;
 
@@ -31,6 +32,7 @@ use crate::schema::{PhoneLabel, RoutineOutcome};
 use crate::store::{ActivityDay, EVENT_RETENTION_DAYS, MonthKey};
 use crate::time::WeekdaySet;
 
+pub mod suggest;
 #[cfg(test)]
 mod tests;
 
@@ -534,6 +536,9 @@ pub struct WeekReview {
     pub previous_week: Option<NaiveDate>,
     /// The Monday of the next week, if it has started.
     pub next_week: Option<NaiveDate>,
+    /// "Try next week": up to three suggestions (the store adds them for this week and
+    /// the previous one).
+    pub suggestions: Vec<suggest::Suggestion>,
 }
 
 fn plural(n: u32, one: &str, many: &str) -> String {
@@ -683,6 +688,7 @@ pub fn week(
         phone,
         previous_week,
         next_week,
+        suggestions: Vec::new(),
     }
 }
 

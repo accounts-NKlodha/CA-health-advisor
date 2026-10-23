@@ -141,6 +141,14 @@ export interface LayoutView {
   bubble_max_h: number;
 }
 
+/** Display preferences (Settings, Accessibility; wireframe W12). */
+export interface Accessibility {
+  /** 100, 125 or 150. */
+  text_pct: number;
+  reduced_motion: boolean;
+  high_contrast: boolean;
+}
+
 export interface PetView {
   name: string;
   pack_key: string;
@@ -151,6 +159,7 @@ export interface PetView {
   pose: StatePose;
   accessible_name: string;
   motion: boolean;
+  a11y: Accessibility;
   pet_px: number;
   open: OpenView;
   layout: LayoutView;
@@ -162,6 +171,7 @@ export interface PanelView {
   menu: MenuView;
   panel_hint: string;
   accessible_name: string;
+  a11y: Accessibility;
 }
 
 export interface PackCard {
@@ -280,6 +290,8 @@ export interface WeekReview {
     longest_block_s: number | null;
   } | null;
   phone: { show: boolean; counts: PhoneCounts; entries: PhoneEntry[] };
+  /** "Try next week" (up to 3). */
+  suggestions: Suggestion[];
   previous_week: string | null;
   next_week: string | null;
 }
@@ -315,6 +327,86 @@ export interface MonthReview {
 
 export interface ReviewPage<T> {
   review: T;
-  /** The in-app motion setting; Windows' reduced-motion setting is respected as well. */
+  /** Animation allowed (the pet's Motion switch on, reduced motion off); Windows'
+   *  reduced-motion setting is respected as well. */
   motion: boolean;
+  a11y: Accessibility;
+}
+
+// "Try next week" on the weekly review (wireframe W13; hy_core::review::suggest).
+
+export type SuggestionKind = 'serving' | 'seated' | 'standing' | 'lighter' | 'keep';
+export type SuggestionAnswer = 'apply' | 'undo' | 'hide';
+
+export type Suggestion = { kind: SuggestionKind; text: string } & (
+  | { state: 'open' }
+  | { state: 'info' }
+  | { state: 'applied'; now: string; was: string }
+  | { state: 'hidden' }
+);
+
+// Settings tabs (wireframes W4 to W7 and W12; SettingsPage in view.rs).
+
+export type Intensity = 'light' | 'balanced' | 'more_often';
+export type MovementVersion = 'ask' | 'seated' | 'standing';
+export type WeekdayName = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
+
+export interface CoachConfig {
+  intensity: Intensity;
+  categories: { movement: boolean; eye_rest: boolean; water: boolean };
+  hide_during_presentation: boolean;
+  media_in_use_hint: boolean;
+  long_day_check_in: { enabled: boolean; hours: number };
+  pomodoro_auto_start: boolean;
+  movement_version: MovementVersion;
+  /** "HH:MM". */
+  review: { day: WeekdayName; at: string };
+}
+
+export interface WorkSchedule {
+  workdays: WeekdayName[];
+  /** "HH:MM". */
+  start: string;
+  end: string;
+}
+
+export interface SettingsPage {
+  coach: CoachConfig;
+  schedule: WorkSchedule;
+  zone: string;
+  zones: string[];
+  water_goal_ml: number | null;
+  goal_min_ml: number;
+  goal_max_ml: number;
+  servings: number[];
+  serving_min_ml: number;
+  serving_max_ml: number;
+  max_servings: number;
+  a11y: Accessibility;
+  programme: { day: string; movements: string[] }[];
+  library: { name: string; place: string; dose: string; seated: string | null }[];
+  provisional: string | null;
+  hotkey: string | null;
+}
+
+// The recovery-day plan window (wireframe W15; PlanPage in view.rs).
+
+export interface RecoveryPlan {
+  date: string;
+  more_breaks: boolean;
+  /** "HH:MM:SS" or null. */
+  walk_at: string | null;
+  walk_repeat: boolean;
+  lunch_away: boolean;
+  calm_pause: boolean;
+  finish_at: string | null;
+  reflection: boolean;
+}
+
+export interface PlanPage {
+  plan: RecoveryPlan | null;
+  draft: RecoveryPlan;
+  dates: { date: string; workday: boolean }[];
+  water_goal_ml: number | null;
+  a11y: Accessibility;
 }

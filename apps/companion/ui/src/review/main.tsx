@@ -1,11 +1,22 @@
 // The review window (wireframes W13 and W14), in Preact. It exists only while open: the
 // window is created on demand and destroyed on close (A7). It reads the weekly review and
 // monthly progress from the shell, which builds them from the store's per-day tallies and
-// events, and changes nothing except the label of a past phone report.
+// events, and changes nothing except the label of a past phone report and the settings a
+// suggestion applies (or undoes).
 import { render } from 'preact';
 import { useCallback, useEffect, useState } from 'preact/hooks';
+import { applyA11y, followA11y } from '../shared/a11y';
 import { call, report } from '../shared/ipc';
-import type { Metric, MonthReview, PhoneEntry, PhoneLabel, ReviewPage, WeekReview } from '../shared/types';
+import type {
+  Metric,
+  MonthReview,
+  PhoneEntry,
+  PhoneLabel,
+  ReviewPage,
+  Suggestion,
+  SuggestionAnswer,
+  WeekReview,
+} from '../shared/types';
 import { mayAnimate } from './marks';
 import { MonthView } from './Month';
 import { WeekView } from './Week';
@@ -28,6 +39,7 @@ function App() {
     call('review_week', { day: d })
       .then((p) => {
         setWeek(p);
+        applyA11y(p.a11y);
         setError('');
       })
       .catch((e: unknown) => setError(String(e)));
@@ -37,6 +49,7 @@ function App() {
     call('review_month', { month: m })
       .then((p) => {
         setMonthly(p);
+        applyA11y(p.a11y);
         setError('');
       })
       .catch((e: unknown) => setError(String(e)));
@@ -46,6 +59,8 @@ function App() {
     if (tab === 'week') loadWeek(day);
     else loadMonth(month);
   }, [tab, day, month, loadWeek, loadMonth]);
+
+  useEffect(() => followA11y(), []);
 
   // Coming back to the window shows anything logged meanwhile.
   useEffect(() => {
@@ -62,6 +77,26 @@ function App() {
       .then((p) => {
         setWeek(p);
         setStatus(`Saved as ${label}.`);
+      })
+      .catch((err: unknown) => {
+        setStatus(String(err));
+        loadWeek(day);
+      });
+  };
+
+  const suggest = (s: Suggestion, answer: SuggestionAnswer) => {
+    const start = week?.review.start;
+    if (!start) return;
+    call('review_suggestion', { week: start, kind: s.kind, answer })
+      .then((p) => {
+        setWeek(p);
+        setStatus(
+          answer === 'apply'
+            ? 'Applied. Undo puts the old setting back.'
+            : answer === 'undo'
+              ? 'Undone. The old setting is back.'
+              : 'Hidden for this week.',
+        );
       })
       .catch((err: unknown) => {
         setStatus(String(err));
@@ -117,6 +152,7 @@ function App() {
               setStatus('');
             }}
             onLabel={relabel}
+            onSuggestion={suggest}
           />
         ) : null}
         {tab === 'month' && monthly ? (

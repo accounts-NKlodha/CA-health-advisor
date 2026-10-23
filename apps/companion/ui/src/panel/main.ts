@@ -4,6 +4,7 @@
 // leave focus there.
 // When the engine's bubble is open beside the pet (a reminder, a Pomodoro card, the
 // check-in), the panel shows the same bubble first so it can be answered by keyboard.
+import { applyA11y } from '../shared/a11y';
 import { renderProgress, renderRows } from '../shared/bubble';
 import { renderFigure } from '../shared/figures';
 import { call, on, report } from '../shared/ipc';
@@ -101,6 +102,7 @@ function bubbleSection(b: Bubble): HTMLElement {
 }
 
 function draw(v: PanelView, keepFocus: boolean): void {
+  applyA11y(v.a11y);
   // Remember which control had focus so a redraw (after a size change) keeps it.
   const active = document.activeElement;
   const focusLabel = active instanceof HTMLButtonElement ? active.getAttribute('aria-label') ?? active.textContent : null;

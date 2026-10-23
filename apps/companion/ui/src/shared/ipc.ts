@@ -4,14 +4,22 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
+  Accessibility,
+  CoachConfig,
   MonthReview,
   PanelView,
   PetEdit,
   PetView,
   PhoneLabel,
+  PlanPage,
+  RecoveryPlan,
   ReviewPage,
+  SettingsPage,
   SettingsView,
+  SuggestionAnswer,
+  SuggestionKind,
   WeekReview,
+  WorkSchedule,
 } from './types';
 
 interface Commands {
@@ -40,6 +48,18 @@ interface Commands {
     args: { week: string | null; entry: string; label: PhoneLabel };
     result: ReviewPage<WeekReview>;
   };
+  review_suggestion: {
+    args: { week: string; kind: SuggestionKind; answer: SuggestionAnswer };
+    result: ReviewPage<WeekReview>;
+  };
+  settings_page: { args: undefined; result: SettingsPage };
+  save_coach_settings: { args: { config: CoachConfig }; result: SettingsPage };
+  save_water_settings: { args: { goalMl: number | null; servings: number[] }; result: SettingsPage };
+  save_workweek: { args: { schedule: WorkSchedule; zone: string }; result: SettingsPage };
+  save_accessibility: { args: { a11y: Accessibility }; result: SettingsPage };
+  plan_page: { args: undefined; result: PlanPage };
+  plan_save: { args: { plan: RecoveryPlan }; result: PlanPage };
+  plan_cancel: { args: undefined; result: PlanPage };
 }
 
 type Name = keyof Commands;

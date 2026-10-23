@@ -24,6 +24,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use super::config::{CONFIG_KEY, CoachConfig};
 use super::engine::{Context, DayTally, Engine, EngineState, STATE_FORMAT, StepOutput};
 use super::types::{CoachView, Input, Notice};
+use super::water::SERVINGS_KEY;
 use super::water::WaterSnapshot;
 use crate::error::{Error, Result};
 use crate::schema::{GoalKind, NewEvent};
@@ -280,5 +281,6 @@ fn context(store: &Store, wall: DateTime<Utc>, elapsed: Duration) -> Result<Cont
         },
         water_entries,
         config,
+        servings: store.setting(SERVINGS_KEY)?.unwrap_or_default(),
     })
 }

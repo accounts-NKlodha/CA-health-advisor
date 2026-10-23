@@ -415,3 +415,207 @@ fn day_facts_refuses_unreasonable_ranges() {
         31
     );
 }
+
+// ------------------------------------------------------- suggestions (V1-4)
+
+mod suggestions {
+    use super::*;
+    use hy_core::coach::{Intensity, MovementVersion, Servings};
+    use hy_core::review::suggest::{SuggestionKind, SuggestionState};
+
+    /// A store first used on Monday 12 Oct, now Saturday 24 Oct 17:30, every workday of
+    /// this week recorded, with 750 ml logged three times and three seated routines.
+    fn week() -> Env {
+        let mut env = Env::new(ist(10, 12, 9, 0), ist(10, 24, 17, 30));
+        for d in 19..=24 {
+            env.track(date(10, d));
+        }
+        for d in [19, 20, 21] {
+            env.water(ist(10, d, 11, 0), 750);
+            env.routine(ist(10, d, 12, 0), RoutineOutcome::Done);
+            env.reminder(ist(10, d, 15, 0), Activity::Movement, ReminderOutcome::Done);
+        }
+        env
+    }
+
+    fn kinds(env: &Env) -> Vec<(SuggestionKind, SuggestionState)> {
+        env.store
+            .week_review(None)
+            .unwrap()
+            .suggestions
+            .into_iter()
+            .map(|s| (s.kind, s.state))
+            .collect()
+    }
+
+    #[test]
+    fn suggestions_come_from_the_weeks_own_records() {
+        let env = week();
+        assert_eq!(
+            kinds(&env),
+            vec![
+                (SuggestionKind::Serving, SuggestionState::Open),
+                (SuggestionKind::Seated, SuggestionState::Open),
+            ]
+        );
+        // Older weeks get none.
+        let old = env.store.week_review(Some(date(10, 12))).unwrap();
+        assert!(old.suggestions.is_empty());
+    }
+
+    #[test]
+    fn apply_changes_the_setting_and_undo_restores_it_exactly() {
+        let mut env = week();
+        let monday = date(10, 19);
+        env.store
+            .apply_suggestion(monday, SuggestionKind::Serving)
+            .unwrap();
+        assert_eq!(
+            env.store.water_servings().unwrap().ml(),
+            &[150, 250, 500, 750]
+        );
+        let shown = env.store.week_review(None).unwrap().suggestions;
+        assert_eq!(
+            shown[0].state,
+            SuggestionState::Applied {
+                now: "serving buttons 150, 250, 500, 750 ml".into(),
+                was: "serving buttons 150, 250, 500 ml".into(),
+            }
+        );
+        assert!(
+            env.store
+                .apply_suggestion(monday, SuggestionKind::Serving)
+                .is_err()
+        );
+        env.store
+            .apply_suggestion(monday, SuggestionKind::Seated)
+            .unwrap();
+        assert_eq!(
+            env.store.coach_config().unwrap().movement_version,
+            MovementVersion::Seated
+        );
+        env.store
+            .undo_suggestion(monday, SuggestionKind::Serving)
+            .unwrap();
+        assert_eq!(env.store.water_servings().unwrap(), Servings::default());
+        env.store
+            .undo_suggestion(monday, SuggestionKind::Seated)
+            .unwrap();
+        assert_eq!(
+            env.store.coach_config().unwrap().movement_version,
+            MovementVersion::Ask
+        );
+        assert_eq!(
+            kinds(&env),
+            vec![
+                (SuggestionKind::Serving, SuggestionState::Open),
+                (SuggestionKind::Seated, SuggestionState::Open),
+            ]
+        );
+        assert!(
+            env.store
+                .undo_suggestion(monday, SuggestionKind::Seated)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn not_for_me_hides_it_for_that_week() {
+        let mut env = week();
+        env.store
+            .hide_suggestion(date(10, 19), SuggestionKind::Seated)
+            .unwrap();
+        assert_eq!(
+            kinds(&env),
+            vec![
+                (SuggestionKind::Serving, SuggestionState::Open),
+                (SuggestionKind::Seated, SuggestionState::Hidden),
+            ]
+        );
+        assert!(
+            env.store
+                .hide_suggestion(date(10, 19), SuggestionKind::Lighter)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn many_set_aside_breaks_suggest_one_step_lighter() {
+        let mut env = Env::new(ist(10, 12, 9, 0), ist(10, 24, 17, 30));
+        for d in 19..=24 {
+            env.track(date(10, d));
+            env.reminder(
+                ist(10, d, 10, 0),
+                Activity::Movement,
+                ReminderOutcome::Dismissed,
+            );
+            env.reminder(
+                ist(10, d, 11, 0),
+                Activity::EyeRest,
+                ReminderOutcome::NoResponse,
+            );
+        }
+        let s = env.store.week_review(None).unwrap().suggestions;
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].kind, SuggestionKind::Lighter);
+        assert_eq!(
+            s[0].text,
+            "12 of 12 breaks were set aside. Try fewer reminders next week?"
+        );
+        env.store
+            .apply_suggestion(date(10, 19), SuggestionKind::Lighter)
+            .unwrap();
+        assert_eq!(
+            env.store.coach_config().unwrap().intensity,
+            Intensity::Light
+        );
+    }
+
+    #[test]
+    fn a_strong_week_says_no_change_is_needed() {
+        let mut env = Env::new(ist(10, 12, 9, 0), ist(10, 24, 17, 30));
+        for d in 19..=24 {
+            env.track(date(10, d));
+            env.reminder(ist(10, d, 10, 0), Activity::Movement, ReminderOutcome::Done);
+        }
+        let s = env.store.week_review(None).unwrap().suggestions;
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].kind, SuggestionKind::Keep);
+        assert_eq!(s[0].state, SuggestionState::Info);
+        assert!(
+            env.store
+                .apply_suggestion(date(10, 19), SuggestionKind::Keep)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn not_enough_data_gives_no_suggestions() {
+        let mut env = Env::new(ist(10, 12, 9, 0), ist(10, 24, 17, 30));
+        env.track(date(10, 19));
+        for _ in 0..3 {
+            env.water(ist(10, 19, 11, 0), 750);
+        }
+        assert!(env.store.week_review(None).unwrap().suggestions.is_empty());
+    }
+
+    #[test]
+    fn settings_round_trip() {
+        let env = week();
+        let a = hy_core::prefs::Accessibility {
+            text_pct: 125,
+            reduced_motion: true,
+            high_contrast: true,
+        };
+        env.store.set_accessibility(&a).unwrap();
+        assert_eq!(env.store.accessibility().unwrap(), a);
+        assert!(
+            env.store
+                .set_accessibility(&hy_core::prefs::Accessibility { text_pct: 90, ..a })
+                .is_err()
+        );
+        let mut c = env.store.coach_config().unwrap();
+        c.long_day_check_in.hours = 11;
+        assert!(env.store.set_coach_config(&c).is_err());
+    }
+}

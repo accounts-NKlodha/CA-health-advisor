@@ -6,10 +6,11 @@
 
 use std::time::Duration;
 
+use chrono::{NaiveTime, Timelike, Weekday};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::schema::Activity;
+use crate::schema::{Activity, RoutineVariant};
 
 /// Settings key under which [`CoachConfig`] is stored.
 pub const CONFIG_KEY: &str = "coach_config";
@@ -155,6 +156,55 @@ impl Default for LongDayCheckIn {
     }
 }
 
+/// The movement routine's default version (wireframe W6: ask each time, seated or
+/// standing). With a default, the routine's first screen starts that version and offers
+/// the other one instead of asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MovementVersion {
+    /// Ask each time (the default).
+    #[default]
+    Ask,
+    /// Seated.
+    Seated,
+    /// Standing.
+    Standing,
+}
+
+impl MovementVersion {
+    /// The routine variant this default starts, if any.
+    #[must_use]
+    pub const fn variant(self) -> Option<RoutineVariant> {
+        match self {
+            Self::Ask => None,
+            Self::Seated => Some(RoutineVariant::Seated),
+            Self::Standing => Some(RoutineVariant::Standing),
+        }
+    }
+}
+
+/// When the weekly review is offered (wireframes W1 step 4, W5 and B9; the prototype's
+/// default is Saturday 17:00).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewTime {
+    /// Day of the week.
+    #[serde(with = "crate::time::weekday_name")]
+    pub day: Weekday,
+    /// Local time, minute precision.
+    #[serde(with = "crate::time::hhmm")]
+    pub at: NaiveTime,
+}
+
+impl Default for ReviewTime {
+    fn default() -> Self {
+        Self {
+            day: Weekday::Sat,
+            at: NaiveTime::from_hms_opt(17, 0, 0).unwrap_or(NaiveTime::MIN),
+        }
+    }
+}
+
 /// The user's coaching settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -172,6 +222,12 @@ pub struct CoachConfig {
     pub long_day_check_in: LongDayCheckIn,
     /// Start the next Pomodoro round automatically (off; wireframe W7).
     pub pomodoro_auto_start: bool,
+    /// The movement routine's default version (wireframe W6; slice V1-4).
+    #[serde(default)]
+    pub movement_version: MovementVersion,
+    /// When the weekly review is offered (wireframe B9; slice V1-4).
+    #[serde(default)]
+    pub review: ReviewTime,
 }
 
 impl Default for CoachConfig {
@@ -183,6 +239,8 @@ impl Default for CoachConfig {
             media_in_use_hint: false,
             long_day_check_in: LongDayCheckIn::default(),
             pomodoro_auto_start: false,
+            movement_version: MovementVersion::Ask,
+            review: ReviewTime::default(),
         }
     }
 }
@@ -191,10 +249,14 @@ impl CoachConfig {
     /// Check the settings' own rules.
     ///
     /// # Errors
-    /// [`Error::Invalid`] if the check-in hours are not 8, 9 or 10.
+    /// [`Error::Invalid`] if the check-in hours are not 8, 9 or 10, or the review time
+    /// has seconds.
     pub fn validate(&self) -> Result<()> {
         if !(8..=10).contains(&self.long_day_check_in.hours) {
             return Err(Error::invalid("long-day check-in hours must be 8, 9 or 10"));
+        }
+        if self.review.at.second() != 0 || self.review.at.nanosecond() != 0 {
+            return Err(Error::invalid("the review time uses whole minutes"));
         }
         Ok(())
     }
@@ -313,6 +375,48 @@ mod tests {
         let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
         v["surprise"] = serde_json::json!(1);
         assert!(serde_json::from_value::<CoachConfig>(v).is_err());
+    }
+
+    #[test]
+    fn settings_saved_before_v1_4_still_load() {
+        let old = r#"{"intensity":"light","categories":{"movement":true,"eye_rest":false,"water":true},
+            "hide_during_presentation":true,"media_in_use_hint":false,
+            "long_day_check_in":{"enabled":false,"hours":10},"pomodoro_auto_start":true}"#;
+        let c: CoachConfig = serde_json::from_str(old).unwrap();
+        assert_eq!(c.intensity, Intensity::Light);
+        assert_eq!(c.movement_version, MovementVersion::Ask);
+        assert_eq!(c.review, ReviewTime::default());
+        assert!(c.pomodoro_auto_start);
+    }
+
+    #[test]
+    fn review_time_and_movement_version_serialise() {
+        let c = CoachConfig {
+            movement_version: MovementVersion::Seated,
+            review: ReviewTime {
+                day: Weekday::Fri,
+                at: NaiveTime::from_hms_opt(18, 0, 0).unwrap(),
+            },
+            ..CoachConfig::default()
+        };
+        let v = serde_json::to_value(c).unwrap();
+        assert_eq!(v["movement_version"], "seated");
+        assert_eq!(v["review"]["day"], "fri");
+        assert_eq!(v["review"]["at"], "18:00");
+        assert_eq!(serde_json::from_value::<CoachConfig>(v).unwrap(), c);
+        assert_eq!(
+            MovementVersion::Standing.variant(),
+            Some(RoutineVariant::Standing)
+        );
+        assert_eq!(MovementVersion::Ask.variant(), None);
+        let bad = CoachConfig {
+            review: ReviewTime {
+                day: Weekday::Sat,
+                at: NaiveTime::from_hms_opt(17, 0, 30).unwrap(),
+            },
+            ..CoachConfig::default()
+        };
+        assert!(bad.validate().is_err());
     }
 
     #[test]

@@ -11,6 +11,7 @@ body {
 
 #panel {
   box-sizing: border-box;
+  font-size: calc(14px * var(--ts, 1));
   height: 100%;
   padding: 14px 16px;
   border: 1px solid var(--line);
@@ -20,7 +21,7 @@ body {
 .panel-state {
   margin: 0 0 8px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: calc(12px * var(--ts, 1));
 }
 
 #panel .panel-bubble {
@@ -31,7 +32,7 @@ body {
 
 #panel .panel-bubble h2 {
   margin: 0 0 6px;
-  font-size: 15px;
+  font-size: calc(15px * var(--ts, 1));
   font-weight: 600;
 }
 

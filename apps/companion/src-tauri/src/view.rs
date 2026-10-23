@@ -1,7 +1,11 @@
 //! What the pages are sent. Every view is a complete snapshot, so a page can always
 //! redraw from the latest one.
 
+use chrono::NaiveDate;
+use hy_core::coach::{CoachConfig, RecoveryPlan, Servings};
+use hy_core::prefs::Accessibility;
 use hy_core::store::PetProfile;
+use hy_core::time::WorkSchedule;
 use hy_pet::hotkey::HOTKEY_CHOICES;
 use hy_pet::messages::{MessageId, message};
 use hy_pet::pack::{ArtStatus, ColourVariant, Hitbox, Library, Pack, StatePose};
@@ -16,8 +20,95 @@ use serde::Serialize;
 pub struct ReviewPage<T> {
     /// The review.
     pub review: T,
-    /// The pet's motion setting (the in-app reduced-motion switch).
+    /// Animation allowed: the pet's Motion switch is on and reduced motion is off
+    /// (Settings, Accessibility).
     pub motion: bool,
+    /// The display preferences.
+    pub a11y: Accessibility,
+}
+
+/// One day of the movement programme (wireframe W6).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProgrammeDay {
+    /// "Mon" to "Sat".
+    pub day: &'static str,
+    /// The three movements' names.
+    pub movements: Vec<&'static str>,
+}
+
+/// One movement of the library (wireframe W6).
+#[derive(Debug, Clone, Serialize)]
+pub struct LibraryMovement {
+    /// Its name.
+    pub name: &'static str,
+    /// Seated, standing, or both.
+    pub place: &'static str,
+    /// Repetitions or seconds, and about how long.
+    pub dose: &'static str,
+    /// The seated replacement's name, if it has one.
+    pub seated: Option<&'static str>,
+}
+
+/// The settings window's coaching, water, workweek, movement and accessibility tabs
+/// (wireframes W4 to W7 and W12). The Pet tab keeps its own view ([`SettingsView`]).
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingsPage {
+    /// Reminders, movement version, Pomodoro and the review time.
+    pub coach: CoachConfig,
+    /// Workdays and hours.
+    pub schedule: WorkSchedule,
+    /// The IANA time zone.
+    pub zone: &'static str,
+    /// Every zone offered.
+    pub zones: Vec<&'static str>,
+    /// Today's water goal, if one is set.
+    pub water_goal_ml: Option<u32>,
+    /// Accepted goal range, ml.
+    pub goal_min_ml: u32,
+    /// Accepted goal range, ml.
+    pub goal_max_ml: u32,
+    /// The serving buttons.
+    pub servings: Servings,
+    /// Accepted serving range, ml.
+    pub serving_min_ml: u32,
+    /// Accepted serving range, ml.
+    pub serving_max_ml: u32,
+    /// At most this many serving buttons.
+    pub max_servings: usize,
+    /// Display preferences.
+    pub a11y: Accessibility,
+    /// The Monday to Saturday programme.
+    pub programme: Vec<ProgrammeDay>,
+    /// The movement library.
+    pub library: Vec<LibraryMovement>,
+    /// Shown on the movement tab while the content is provisional.
+    pub provisional: Option<&'static str>,
+    /// The panel hotkey, for the keyboard table.
+    pub hotkey: Option<String>,
+}
+
+/// One date the recovery day can move to (wireframe W15).
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct PlanDate {
+    /// The date.
+    pub date: NaiveDate,
+    /// It is a workday.
+    pub workday: bool,
+}
+
+/// The recovery-day plan window (wireframe W15).
+#[derive(Debug, Clone, Serialize)]
+pub struct PlanPage {
+    /// The saved plan, if one is pending (its date is after today).
+    pub plan: Option<RecoveryPlan>,
+    /// A starting plan for the next workday, used when none is saved.
+    pub draft: RecoveryPlan,
+    /// The dates offered (tomorrow onward).
+    pub dates: Vec<PlanDate>,
+    /// The user's own water goal, which stays the same.
+    pub water_goal_ml: Option<u32>,
+    /// Display preferences.
+    pub a11y: Accessibility,
 }
 
 /// The pet page's view.
@@ -41,6 +132,8 @@ pub struct PetView {
     pub accessible_name: String,
     /// Animation allowed.
     pub motion: bool,
+    /// Display preferences (text size, reduced motion, contrast).
+    pub a11y: Accessibility,
     /// The pet window's side in CSS pixels (logical).
     pub pet_px: f64,
     /// What is open beside the pet.
@@ -107,6 +200,8 @@ pub struct PanelView {
     pub panel_hint: String,
     /// The pet's accessible name and state.
     pub accessible_name: String,
+    /// Display preferences (text size, reduced motion, contrast).
+    pub a11y: Accessibility,
 }
 
 /// Placement inside the pet window, CSS pixels.

@@ -24,6 +24,15 @@ const COMMANDS: &[&str] = &[
     "review_week",
     "review_month",
     "review_phone_label",
+    "review_suggestion",
+    "settings_page",
+    "save_coach_settings",
+    "save_water_settings",
+    "save_workweek",
+    "save_accessibility",
+    "plan_page",
+    "plan_save",
+    "plan_cancel",
 ];
 
 fn main() {
