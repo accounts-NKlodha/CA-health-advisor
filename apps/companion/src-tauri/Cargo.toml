@@ -19,6 +19,7 @@ hy-pet.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "=2.12.4", features = ["tray-icon"] }
+uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # Already in the lockfile through Tauri. Used only by src/win32.rs.

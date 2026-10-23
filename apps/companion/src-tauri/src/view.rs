@@ -10,6 +10,16 @@ use hy_pet::shell::{Bubble, MenuAction, Open};
 use hy_pet::state::{BaseState, StateLook};
 use serde::Serialize;
 
+/// A review page's data (wireframes W13 and W14) and whether it may animate: the
+/// graphics animate once on opening unless motion is off (here or in Windows).
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewPage<T> {
+    /// The review.
+    pub review: T,
+    /// The pet's motion setting (the in-app reduced-motion switch).
+    pub motion: bool,
+}
+
 /// The pet page's view.
 #[derive(Debug, Clone, Serialize)]
 pub struct PetView {

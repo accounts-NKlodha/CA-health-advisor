@@ -33,6 +33,7 @@ use crate::schema::{
 use crate::time::{UserZone, WorkSchedule};
 
 mod coach;
+mod review;
 #[cfg(test)]
 mod tests;
 
@@ -115,6 +116,65 @@ impl MonthKey {
         }
     }
 
+    /// The year.
+    #[must_use]
+    pub const fn year(self) -> i32 {
+        self.year
+    }
+
+    /// The month, 1 to 12.
+    #[must_use]
+    pub const fn month(self) -> u32 {
+        self.month
+    }
+
+    /// The first day of the month.
+    #[must_use]
+    pub fn first_day(self) -> NaiveDate {
+        NaiveDate::from_ymd_opt(self.year, self.month, 1).unwrap_or(NaiveDate::MIN)
+    }
+
+    /// The last day of the month.
+    #[must_use]
+    pub fn last_day(self) -> NaiveDate {
+        self.succ()
+            .first_day()
+            .pred_opt()
+            .unwrap_or_else(|| self.first_day())
+    }
+
+    /// The month before (kept at year 1 for January of year 1).
+    #[must_use]
+    pub const fn pred(self) -> Self {
+        match (self.month, self.year) {
+            (1, 1) => self,
+            (1, y) => Self {
+                year: y - 1,
+                month: 12,
+            },
+            (m, y) => Self {
+                year: y,
+                month: m - 1,
+            },
+        }
+    }
+
+    /// The month after (kept at year 9999 for December of year 9999).
+    #[must_use]
+    pub const fn succ(self) -> Self {
+        match (self.month, self.year) {
+            (12, 9999) => self,
+            (12, y) => Self {
+                year: y + 1,
+                month: 1,
+            },
+            (m, y) => Self {
+                year: y,
+                month: m + 1,
+            },
+        }
+    }
+
     fn text(self) -> String {
         format!("{:04}-{:02}", self.year, self.month)
     }
@@ -130,6 +190,36 @@ impl MonthKey {
             .parse()
             .map_err(|_| Error::invalid(format!("stored month {s:?}")))?;
         Self::new(year, month)
+    }
+}
+
+impl std::fmt::Display for MonthKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text())
+    }
+}
+
+impl std::str::FromStr for MonthKey {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        if s.len() != 7 || s.as_bytes().get(4) != Some(&b'-') {
+            return Err(Error::invalid(format!("month {s:?} is not YYYY-MM")));
+        }
+        Self::parse(s)
+    }
+}
+
+impl Serialize for MonthKey {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&self.text())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MonthKey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        text.parse().map_err(serde::de::Error::custom)
     }
 }
 

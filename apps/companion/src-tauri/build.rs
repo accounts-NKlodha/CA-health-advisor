@@ -20,6 +20,10 @@ const COMMANDS: &[&str] = &[
     "panel_close",
     "settings_bootstrap",
     "set_hotkey",
+    "open_review",
+    "review_week",
+    "review_month",
+    "review_phone_label",
 ];
 
 fn main() {

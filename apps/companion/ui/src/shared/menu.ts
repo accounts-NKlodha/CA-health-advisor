@@ -1,6 +1,6 @@
 // The pet menu (wireframe B1), shared by the pet's bubble and the keyboard panel (K1).
-// It lists the engine's actions (added by the coaching engine in a later slice), then the
-// shell's own: size S/M/L/XL, Bring pet above clock, Hide pet and Settings.
+// It lists the engine's actions, then the shell's own: size S/M/L/XL, Bring pet above
+// clock, Hide pet, Weekly review and Settings.
 import { icon } from './icons';
 import type { MenuView } from './types';
 
@@ -9,6 +9,7 @@ export interface MenuHandlers {
   size(pct: number): void;
   bring(): void;
   hide(): void;
+  review(): void;
   settings(): void;
 }
 
@@ -64,7 +65,12 @@ export function renderMenu(menu: MenuView, h: MenuHandlers, headingId: string): 
   links.className = 'row';
   const bring = button('Bring pet above clock', h.bring, 'btn');
   bring.prepend(icon('pin', 14));
-  links.append(bring, button('Hide pet', h.hide, 'btn'), button('Settings', h.settings, 'btn'));
+  links.append(
+    bring,
+    button('Hide pet', h.hide, 'btn'),
+    button('Weekly review', h.review, 'btn'),
+    button('Settings', h.settings, 'btn'),
+  );
   root.append(links);
 
   const hint = document.createElement('p');

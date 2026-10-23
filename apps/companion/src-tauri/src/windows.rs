@@ -1,6 +1,6 @@
-//! Window creation (architecture 4.1): the pet window always exists; the keyboard panel
-//! and the settings window are created on demand and destroyed on close, so their memory
-//! is returned (A7: idle at most 150 MB).
+//! Window creation (architecture 4.1): the pet window always exists; the keyboard panel,
+//! the settings window and the review window are created on demand and destroyed on
+//! close, so their memory is returned (A7: idle at most 150 MB).
 
 use std::sync::Arc;
 
@@ -8,7 +8,7 @@ use hy_pet::geometry::{Monitor, Rect};
 use hy_pet::placement::screens_window_logical;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
-use crate::shell::{PANEL, PET, SCREENS, Shell, set_window_rect};
+use crate::shell::{PANEL, PET, REVIEW, SCREENS, Shell, set_window_rect};
 
 /// The same WebView2 arguments for every window: windows sharing one WebView2
 /// environment must use identical options. These switch off Edge features that would
@@ -96,13 +96,45 @@ pub fn open_panel(shell: &Arc<Shell>, rect: Option<Rect>) -> tauri::Result<()> {
 /// # Errors
 /// A Tauri window-creation error.
 pub fn open_settings(app: &AppHandle, monitor: Option<&Monitor>) -> tauri::Result<()> {
-    if let Some(w) = app.get_webview_window(SCREENS) {
+    open_screen(
+        app,
+        SCREENS,
+        "screens.html",
+        "HealthierYou - Settings",
+        monitor,
+    )
+}
+
+/// Open the review window (wireframes W13 and W14), or focus it if open. Sized like the
+/// settings window.
+///
+/// # Errors
+/// A Tauri window-creation error.
+pub fn open_review(app: &AppHandle, monitor: Option<&Monitor>) -> tauri::Result<()> {
+    open_screen(
+        app,
+        REVIEW,
+        "review.html",
+        "HealthierYou - Weekly review",
+        monitor,
+    )
+}
+
+/// An ordinary window (created on open, destroyed on close), or focus it if it is open.
+fn open_screen(
+    app: &AppHandle,
+    label: &str,
+    page: &str,
+    title: &str,
+    monitor: Option<&Monitor>,
+) -> tauri::Result<()> {
+    if let Some(w) = app.get_webview_window(label) {
         let _ = w.unminimize();
         return w.set_focus();
     }
     let (width, height) = monitor.map_or((900.0, 640.0), screens_window_logical);
-    let w = WebviewWindowBuilder::new(app, SCREENS, WebviewUrl::App("screens.html".into()))
-        .title("HealthierYou - Settings")
+    let w = WebviewWindowBuilder::new(app, label, WebviewUrl::App(page.into()))
+        .title(title)
         .inner_size(width, height)
         .min_inner_size(width.min(640.0), height.min(440.0))
         .resizable(true)

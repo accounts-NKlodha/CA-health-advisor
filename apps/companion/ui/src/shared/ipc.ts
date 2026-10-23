@@ -3,7 +3,16 @@
 // Tauri maps them to the Rust snake_case parameters.
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { PanelView, PetEdit, PetView, SettingsView } from './types';
+import type {
+  MonthReview,
+  PanelView,
+  PetEdit,
+  PetView,
+  PhoneLabel,
+  ReviewPage,
+  SettingsView,
+  WeekReview,
+} from './types';
 
 interface Commands {
   pet_bootstrap: { args: undefined; result: PetView };
@@ -24,6 +33,13 @@ interface Commands {
   panel_close: { args: { restore: boolean }; result: void };
   settings_bootstrap: { args: undefined; result: SettingsView };
   set_hotkey: { args: { hotkey: string | null }; result: SettingsView };
+  open_review: { args: undefined; result: void };
+  review_week: { args: { day: string | null }; result: ReviewPage<WeekReview> };
+  review_month: { args: { month: string | null }; result: ReviewPage<MonthReview> };
+  review_phone_label: {
+    args: { week: string | null; entry: string; label: PhoneLabel };
+    result: ReviewPage<WeekReview>;
+  };
 }
 
 type Name = keyof Commands;

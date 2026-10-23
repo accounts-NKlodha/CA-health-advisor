@@ -12,7 +12,10 @@
 //!
 //! Slice V1-2 adds [`coach`]: the activity tracker, the coaching engine (one reminder at a
 //! time, suppression and precedence, focus, pause, meeting, presentation, Pomodoro) and
-//! its persistence. Later slices add reviews and sync on top of this crate.
+//! its persistence.
+//!
+//! Slice V1-4 adds [`review`]: the weekly and monthly reviews, built from per-day tallies
+//! and the current view of the event log. Sync is a later slice.
 //! Pairing, the server link (certificate pin and token) and the signed receipt are not
 //! part of V1-0: they wait for the pairing security gate before V1-5.
 
@@ -21,6 +24,7 @@ pub mod coach;
 pub mod error;
 pub mod ids;
 pub mod migrations;
+pub mod review;
 pub mod schema;
 pub mod store;
 pub mod time;

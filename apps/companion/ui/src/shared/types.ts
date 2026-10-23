@@ -202,3 +202,123 @@ export type PetEdit =
   | { kind: 'motion'; on: boolean }
   | { kind: 'tone'; tone: Tone }
   | { kind: 'reset_defaults' };
+
+// Reviews (wireframes W13 and W14; hy_core::review, sent as ReviewPage in view.rs).
+
+export type Metric = 'movement' | 'breaks' | 'water';
+
+/** How one day looks for one metric. "zero" is a measured zero; "no_data" is never zero. */
+export type DayMark =
+  | 'met'
+  | 'partly'
+  | 'zero'
+  | 'nothing_due'
+  | 'no_data'
+  | 'off'
+  | 'not_started'
+  | 'today'
+  | 'future';
+
+export type PhoneLabel = 'unlabelled' | 'work' | 'personal' | 'unsure';
+
+export interface Ratio {
+  num: number;
+  den: number;
+  pct: number | null;
+}
+
+export interface Coverage {
+  recorded: number;
+  workdays: number;
+}
+
+export interface MetricRow {
+  metric: Metric;
+  marks: DayMark[];
+  value: Ratio;
+  met: number;
+  partly: number;
+  zero: number;
+  no_data: number;
+  nothing_due: number;
+}
+
+export interface PhoneCounts {
+  work: number;
+  personal: number;
+  unsure: number;
+  unlabelled: number;
+}
+
+export interface PhoneEntry {
+  id: string;
+  date: string;
+  /** Local time, "HH:MM:SS". */
+  time: string;
+  label: PhoneLabel;
+}
+
+export interface WeekReview {
+  start: string;
+  end: string;
+  today: string;
+  status: 'before_start' | 'first_week' | 'not_enough_data' | 'normal';
+  days: { date: string; workday: boolean }[];
+  coverage: Coverage;
+  rows: MetricRow[];
+  tallies: {
+    longest_block_s: number | null;
+    focus_sessions: number;
+    pomodoro_rounds: number;
+    confirmed_breaks: number;
+  };
+  highlights: string[];
+  comparison: {
+    movement: Ratio;
+    breaks: Ratio;
+    water: Ratio;
+    longest_block_s: number | null;
+  } | null;
+  phone: { show: boolean; counts: PhoneCounts; entries: PhoneEntry[] };
+  previous_week: string | null;
+  next_week: string | null;
+}
+
+/** How a monthly bar is drawn: decided by the engine from the metric's own count. */
+export type BarKind = 'no_data' | 'nothing_to_count' | 'zero' | 'measured';
+
+export interface MonthBar {
+  month: string;
+  in_progress: boolean;
+  coverage: Coverage;
+  movement: Ratio;
+  breaks: Ratio;
+  water: Ratio;
+  kind: Record<Metric, BarKind>;
+}
+
+export interface MonthDay {
+  date: string;
+  workday: boolean;
+  movement: DayMark;
+  breaks: DayMark;
+  water: DayMark;
+}
+
+export interface MonthReview {
+  month: string;
+  today: string;
+  status: 'too_early' | 'normal';
+  days_used: number;
+  bars: MonthBar[];
+  baseline: { from: string; to: string; movement: Ratio; breaks: Ratio; water: Ratio } | null;
+  days: MonthDay[];
+  previous_month: string | null;
+  next_month: string | null;
+}
+
+export interface ReviewPage<T> {
+  review: T;
+  /** The in-app motion setting; Windows' reduced-motion setting is respected as well. */
+  motion: boolean;
+}

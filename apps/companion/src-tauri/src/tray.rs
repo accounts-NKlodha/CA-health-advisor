@@ -47,6 +47,13 @@ fn build_menu(app: &AppHandle, shell: &Shell) -> tauri::Result<Menu<Wry>> {
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItem::with_id(
         app,
+        "review",
+        "Weekly review",
+        true,
+        None::<&str>,
+    )?)?;
+    menu.append(&MenuItem::with_id(
+        app,
         "settings",
         "Settings",
         true,
@@ -72,6 +79,7 @@ fn on_menu(app: &AppHandle, id: &str) {
         "toggle" => shell.toggle_from_tray(),
         "bring" => shell.bring_above_clock(),
         "panel" => shell.open_panel(),
+        "review" => shell.open_review(),
         "settings" => shell.open_settings(),
         "quit" => app.exit(0),
         other => {

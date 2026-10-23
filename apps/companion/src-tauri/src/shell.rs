@@ -1,5 +1,6 @@
-//! The pet shell: the pet window, its bubble, the keyboard panel and the settings window,
-//! driven by the pure rules in `hy-pet`.
+//! The pet shell: the pet window, its bubble, the keyboard panel, the settings window and
+//! the review window, driven by the pure rules in `hy-pet` (and `hy_core::review` for the
+//! reviews).
 //!
 //! Threading: every method of [`Shell`] runs on Tauri's main (UI) thread: synchronous
 //! commands, tray and window events run there already, and everything else is posted
@@ -15,8 +16,10 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use hy_core::schema::PetEdge;
-use hy_core::store::{PetProfile, Store};
+use chrono::NaiveDate;
+use hy_core::review::{MonthReview, WeekReview};
+use hy_core::schema::{PetEdge, PhoneLabel};
+use hy_core::store::{MonthKey, PetProfile, Store};
 use hy_pet::frame::ShellCore;
 use hy_pet::geometry::{Monitor, Rect, layout_fingerprint};
 use hy_pet::hotkey::Hotkey;
@@ -33,11 +36,12 @@ use hy_pet::shell::{
 };
 use hy_pet::state::{PetState, StateLook};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
+use uuid::Uuid;
 
 use crate::coach::SystemSignal;
 use crate::view::{
-    LayoutView, MenuView, PanelView, PetView, SettingsView, menu_view, open_view, pose_for,
-    settings_view,
+    LayoutView, MenuView, PanelView, PetView, ReviewPage, SettingsView, menu_view, open_view,
+    pose_for, settings_view,
 };
 use crate::{tray, windows};
 
@@ -47,6 +51,8 @@ pub const PET: &str = "pet";
 pub const PANEL: &str = "panel";
 /// The settings window's label.
 pub const SCREENS: &str = "screens";
+/// The review window's label (wireframes W13 and W14).
+pub const REVIEW: &str = "review";
 
 /// How long the "Your pet is back above the clock" notice stays.
 const NOTICE_MS: u64 = 2600;
@@ -76,6 +82,7 @@ struct Inner {
     panel_prev_foreground: isize,
     notice_seq: u64,
     page_ready: bool,
+    review_loaded: bool,
 }
 
 /// The pet shell.
@@ -186,6 +193,7 @@ impl Shell {
                 panel_prev_foreground: 0,
                 notice_seq: 0,
                 page_ready: false,
+                review_loaded: false,
             }),
             sink: Mutex::new(None),
             system: Mutex::new(None),
@@ -908,6 +916,72 @@ impl Shell {
         if let Err(e) = windows::open_settings(&self.app, monitor.as_ref()) {
             eprintln!("HealthierYou: could not open settings: {e}");
         }
+    }
+
+    // ------------------------------------------------------------------ reviews
+
+    /// Open the review window (or focus it).
+    pub fn open_review(self: &Arc<Self>) {
+        let monitor = lock(&self.inner).core.monitor().cloned();
+        if let Err(e) = windows::open_review(&self.app, monitor.as_ref()) {
+            eprintln!("HealthierYou: could not open the review: {e}");
+        }
+    }
+
+    /// The motion setting the review pages follow, and note that a review page loaded.
+    fn review_motion(&self) -> bool {
+        let mut i = lock(&self.inner);
+        i.review_loaded = true;
+        i.profile.motion
+    }
+
+    /// The weekly review of the week containing `day` (default this week).
+    ///
+    /// # Errors
+    /// A store read failure, worded for the page.
+    pub fn review_week(&self, day: Option<NaiveDate>) -> Result<ReviewPage<WeekReview>, String> {
+        let motion = self.review_motion();
+        let review = lock(&self.store)
+            .week_review(day)
+            .map_err(|e| format!("The review could not be read: {e}"))?;
+        Ok(ReviewPage { review, motion })
+    }
+
+    /// Monthly progress for `month` (default this month).
+    ///
+    /// # Errors
+    /// A store read failure, worded for the page.
+    pub fn review_month(&self, month: Option<MonthKey>) -> Result<ReviewPage<MonthReview>, String> {
+        let motion = self.review_motion();
+        let review = lock(&self.store)
+            .month_review(month)
+            .map_err(|e| format!("The review could not be read: {e}"))?;
+        Ok(ReviewPage { review, motion })
+    }
+
+    /// Change a past phone report's label from the weekly review (a correction that
+    /// supersedes it), then the week's review again.
+    ///
+    /// # Errors
+    /// The refusal, worded for the page; nothing was changed.
+    pub fn review_phone_label(
+        &self,
+        week: Option<NaiveDate>,
+        entry: Uuid,
+        label: PhoneLabel,
+    ) -> Result<ReviewPage<WeekReview>, String> {
+        if label == PhoneLabel::Unlabelled {
+            return Err("Choose work, personal or unsure.".into());
+        }
+        lock(&self.store)
+            .relabel_phone(entry, label)
+            .map_err(|e| format!("Nothing was changed: {e}"))?;
+        self.review_week(week)
+    }
+
+    /// Whether a review page has loaded (for the self-test).
+    pub fn review_loaded(&self) -> bool {
+        lock(&self.inner).review_loaded
     }
 
     // ---------------------------------------------------------- engine plumbing

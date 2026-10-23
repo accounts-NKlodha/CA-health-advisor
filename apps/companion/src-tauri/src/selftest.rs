@@ -22,6 +22,8 @@
 //! confirmation, Undo stores a retraction, Details opens the water panel (laid out inside
 //! the work area with its entry rows), and an entry is logged, corrected and removed
 //! there; "Phone interruption" is noted, labelled and undone, each checked in the store.
+//! Then the review window (wireframes W13 and W14) opens under its own capability, its page
+//! loads this week's review, monthly progress reads, and the window closes.
 //!
 //! A CI runner is not an office PC: focus checks that depend on an interactive desktop
 //! are recorded as informational, and real Windows acceptance of focus and DPI remains a
@@ -618,7 +620,10 @@ fn coach_end_to_end(
     // 5. Water and the phone note from the pet menu, answered on the real bubble.
     water_and_phone_end_to_end(r, shell, runner);
 
-    // 6. The engine's state is saved (as on exit).
+    // 6. The weekly review window (wireframes W13 and W14) from the tray or pet menu.
+    review_window(r, shell);
+
+    // 7. The engine's state is saved (as on exit).
     let saved = runner.call(|l| l.flush().is_ok()) == Some(true);
     r.check("coach_state_saved", saved, "flush of the engine state");
 }
@@ -963,6 +968,51 @@ fn water_and_phone_end_to_end(r: &mut Report, shell: &Arc<Shell>, runner: &Coach
         format!(
             "cards inside the work area and stored notes {steps:?}; now {:?}",
             entries(runner)
+        ),
+    );
+}
+
+/// Open the review window, wait for its page to load the week through its capability,
+/// read monthly progress, then close it.
+fn review_window(r: &mut Report, shell: &Arc<Shell>) {
+    use tauri::Manager;
+    let _ = on_main(shell, |s| s.open_review());
+    let opened = wait_until(Duration::from_secs(10), || {
+        on_main(shell, |s| {
+            s.app().get_webview_window(crate::shell::REVIEW).is_some()
+        }) == Some(true)
+    });
+    let loaded = wait_until(Duration::from_secs(30), || shell.review_loaded());
+    let week = shell.review_week(None);
+    let week_ok = week.as_ref().is_ok_and(|p| p.review.days.len() == 7);
+    let month = shell.review_month(None);
+    let month_ok = month.as_ref().is_ok_and(|p| !p.review.bars.is_empty());
+    let _ = on_main(shell, |s| {
+        if let Some(w) = s.app().get_webview_window(crate::shell::REVIEW) {
+            let _ = w.close();
+        }
+    });
+    let closed = wait_until(Duration::from_secs(10), || {
+        on_main(shell, |s| {
+            s.app().get_webview_window(crate::shell::REVIEW).is_none()
+        }) == Some(true)
+    });
+    let week_detail = match &week {
+        Ok(p) => format!(
+            "{:?}, {} of {} workdays recorded",
+            p.review.status, p.review.coverage.recorded, p.review.coverage.workdays
+        ),
+        Err(e) => e.clone(),
+    };
+    let month_detail = match &month {
+        Ok(p) => format!("{:?}, {} months", p.review.status, p.review.bars.len()),
+        Err(e) => e.clone(),
+    };
+    r.check(
+        "review_window",
+        opened && loaded && week_ok && month_ok && closed,
+        format!(
+            "opened {opened}; page loaded {loaded}; week {week_detail}; month {month_detail}; closed {closed}"
         ),
     );
 }

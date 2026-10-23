@@ -4,11 +4,16 @@
 
 use std::sync::Arc;
 
+use chrono::NaiveDate;
+use hy_core::review::{MonthReview, WeekReview};
+use hy_core::schema::PhoneLabel;
+use hy_core::store::MonthKey;
 use hy_pet::profile::PetEdit;
 use tauri::State;
+use uuid::Uuid;
 
 use crate::shell::Shell;
-use crate::view::{PanelView, PetView, SettingsView};
+use crate::view::{PanelView, PetView, ReviewPage, SettingsView};
 
 type ShellState<'a> = State<'a, Arc<Shell>>;
 
@@ -105,6 +110,12 @@ pub fn open_settings(shell: ShellState<'_>) {
     shell.open_settings();
 }
 
+/// Open the review window (wireframe W13).
+#[tauri::command]
+pub fn open_review(shell: ShellState<'_>) {
+    shell.open_review();
+}
+
 // ----------------------------------------------------------------------- panel
 
 /// The panel page's first view.
@@ -135,4 +146,44 @@ pub fn settings_bootstrap(shell: ShellState<'_>) -> SettingsView {
 #[tauri::command]
 pub fn set_hotkey(shell: ShellState<'_>, hotkey: Option<String>) -> Result<SettingsView, String> {
     shell.set_hotkey(hotkey.as_deref())
+}
+
+// --------------------------------------------------------------------- reviews
+
+/// The weekly review of the week containing `day` (default this week).
+///
+/// # Errors
+/// A read failure, worded for the user.
+#[tauri::command]
+pub fn review_week(
+    shell: ShellState<'_>,
+    day: Option<NaiveDate>,
+) -> Result<ReviewPage<WeekReview>, String> {
+    shell.review_week(day)
+}
+
+/// Monthly progress for `month` (`"2026-10"`; default this month).
+///
+/// # Errors
+/// A read failure, worded for the user.
+#[tauri::command]
+pub fn review_month(
+    shell: ShellState<'_>,
+    month: Option<MonthKey>,
+) -> Result<ReviewPage<MonthReview>, String> {
+    shell.review_month(month)
+}
+
+/// Change a phone report's label from the weekly review; answers with the week again.
+///
+/// # Errors
+/// The refusal, worded for the user; nothing was changed.
+#[tauri::command]
+pub fn review_phone_label(
+    shell: ShellState<'_>,
+    week: Option<NaiveDate>,
+    entry: Uuid,
+    label: PhoneLabel,
+) -> Result<ReviewPage<WeekReview>, String> {
+    shell.review_phone_label(week, entry, label)
 }
