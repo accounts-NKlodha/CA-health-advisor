@@ -16,6 +16,10 @@ use hy_core::secret::Secret;
 use hy_server::Config;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+/// The load-heavy tests run one at a time: run side by side on a two-core CI runner they
+/// starve each other's handshakes and timings, which tests the runner, not the server.
+static HEAVY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn pair_body(secret: &[u8; 10], origin: uuid::Uuid) -> Vec<u8> {
     serde_json::to_vec(&PairRequest {
         protocol: PROTOCOL,
@@ -46,15 +50,20 @@ async fn guess(h: &Arc<Harness>, n: u8, count: usize, workers: usize) -> (usize,
             let c = h.client(n);
             let (mut invalid, mut limited) = (0, 0);
             for _ in 0..mine {
-                let raw = c
-                    .raw(
-                        reqwest::Method::POST,
-                        "/v1/pair",
-                        None,
-                        Some(pair_body(&random_secret(), common::new_id())),
-                    )
-                    .await
-                    .unwrap();
+                let body = pair_body(&random_secret(), common::new_id());
+                // A connection the OS or a busy runner drops before any HTTP byte was
+                // answered is retried; it never reached the pairing code.
+                let mut tries = 0;
+                let raw = loop {
+                    match c
+                        .raw(reqwest::Method::POST, "/v1/pair", None, Some(body.clone()))
+                        .await
+                    {
+                        Ok(raw) => break raw,
+                        Err(hy_core::link::LinkError::Unreachable) if tries < 3 => tries += 1,
+                        Err(e) => panic!("{e}"),
+                    }
+                };
                 match (raw.status, error_of(&raw).as_str()) {
                     (403, "slip_invalid") => invalid += 1,
                     (429, "rate_limited") => limited += 1,
@@ -82,6 +91,7 @@ fn fast_config() -> Config {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn t_s5_a_thousand_guesses_from_one_ip_hit_the_limit() {
+    let _heavy = HEAVY.lock().await;
     let h = Arc::new(Harness::start_with(fast_config(), test_limits()).await);
     let u = h.user("u1");
     let slip = h.slip(&u);
@@ -113,6 +123,7 @@ async fn t_s5_a_thousand_guesses_from_one_ip_hit_the_limit() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn t_s5_twenty_ips_hit_the_global_limit_which_survives_a_restart() {
+    let _heavy = HEAVY.lock().await;
     let h = Arc::new(Harness::start_with(fast_config(), test_limits()).await);
     let u = h.user("u1");
     let slip = h.slip(&u);
@@ -165,6 +176,7 @@ fn median(mut v: Vec<Duration>) -> Duration {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn t_s5_unknown_used_and_expired_slips_answer_in_the_same_time() {
+    let _heavy = HEAVY.lock().await;
     let floor = Duration::from_millis(150);
     let config = Config {
         pair_floor: floor,
@@ -209,9 +221,16 @@ async fn t_s5_unknown_used_and_expired_slips_answer_in_the_same_time() {
             out
         }
     };
-    let unknown = time((0..rounds).map(|_| random_secret()).collect()).await;
-    let used = time(used).await;
-    let expired = time(expired).await;
+    // One warm-up answer, then the three kinds interleaved, so scheduling noise falls
+    // on all of them alike.
+    let _ = time(vec![random_secret()]).await;
+    let (mut unknown_t, mut used_t, mut expired_t) = (Vec::new(), Vec::new(), Vec::new());
+    for r in 0..rounds {
+        unknown_t.extend(time(vec![random_secret()]).await);
+        used_t.extend(time(vec![used[r]]).await);
+        expired_t.extend(time(vec![expired[r]]).await);
+    }
+    let (unknown, used, expired) = (unknown_t, used_t, expired_t);
     for t in unknown.iter().chain(&used).chain(&expired) {
         assert!(*t >= floor, "every answer waits for the floor: {t:?}");
     }
@@ -359,6 +378,7 @@ async fn t_s7_token_misuse_gets_401_with_the_right_reason() {
 #[test]
 fn t_s8_another_users_ids_anywhere_in_a_request_change_nothing() {
     use proptest::prelude::*;
+    let _heavy = HEAVY.blocking_lock();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -478,6 +498,7 @@ fn t_s8_another_users_ids_anywhere_in_a_request_change_nothing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn t_s22_idle_connections_slow_headers_huge_bodies_and_floods_leave_a_genuine_client_working()
 {
+    let _heavy = HEAVY.lock().await;
     let h = Arc::new(Harness::start().await);
     let d = h.confirmed_device("u1", "PC-1").await;
     let mut store = d.store(h.clock.clone());
