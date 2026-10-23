@@ -5,13 +5,13 @@
 use std::sync::Arc;
 
 use chrono::NaiveDate;
-use hy_core::coach::{CoachConfig, RecoveryPlan};
+use hy_core::coach::RecoveryPlan;
 use hy_core::prefs::Accessibility;
 use hy_core::review::suggest::SuggestionKind;
 use hy_core::review::{MonthReview, WeekReview};
 use hy_core::schema::PhoneLabel;
+use hy_core::settings::{CoachChange, WaterChange, WorkweekChange};
 use hy_core::store::MonthKey;
-use hy_core::time::WorkSchedule;
 use hy_pet::profile::PetEdit;
 use tauri::State;
 use uuid::Uuid;
@@ -120,6 +120,12 @@ pub fn open_review(shell: ShellState<'_>) {
     shell.open_review();
 }
 
+/// The week the review page should go to ("Open" on the weekly review offer), once.
+#[tauri::command]
+pub fn review_target(shell: ShellState<'_>) -> Option<NaiveDate> {
+    shell.review_target()
+}
+
 // ----------------------------------------------------------------------- panel
 
 /// The panel page's first view.
@@ -163,6 +169,7 @@ pub fn review_week(
     shell: ShellState<'_>,
     day: Option<NaiveDate>,
 ) -> Result<ReviewPage<WeekReview>, String> {
+    shell.note_review_request(day);
     shell.review_week(day)
 }
 
@@ -219,42 +226,40 @@ pub fn settings_page(shell: ShellState<'_>) -> Result<SettingsPage, String> {
     shell.settings_page()
 }
 
-/// Save the coaching settings (reminders, movement version, Pomodoro, review time).
+/// Change one coaching setting (reminders, movement version, Pomodoro, review time).
 ///
 /// # Errors
 /// The refusal, worded for the user; nothing was changed.
 #[tauri::command]
 pub fn save_coach_settings(
     shell: ShellState<'_>,
-    config: CoachConfig,
+    change: CoachChange,
 ) -> Result<SettingsPage, String> {
-    shell.save_coach_settings(config)
+    shell.save_coach_settings(change)
 }
 
-/// Save the water goal (from today) and the serving buttons.
+/// Change the water goal (from today), or add or remove one serving button.
 ///
 /// # Errors
 /// The refusal, worded for the user; nothing was changed.
 #[tauri::command]
 pub fn save_water_settings(
     shell: ShellState<'_>,
-    goal_ml: Option<u32>,
-    servings: Vec<u32>,
+    change: WaterChange,
 ) -> Result<SettingsPage, String> {
-    shell.save_water_settings(goal_ml, servings)
+    shell.save_water_settings(change)
 }
 
-/// Save the workdays, hours and time zone.
+/// Change the workdays, hours or time zone (only the fields sent).
 ///
 /// # Errors
 /// The refusal, worded for the user; nothing was changed.
 #[tauri::command]
 pub fn save_workweek(
     shell: ShellState<'_>,
-    schedule: WorkSchedule,
-    zone: String,
+    change: WorkweekChange,
 ) -> Result<SettingsPage, String> {
-    shell.save_workweek(schedule, &zone)
+    shell.save_workweek(change)
 }
 
 /// Save the display preferences.

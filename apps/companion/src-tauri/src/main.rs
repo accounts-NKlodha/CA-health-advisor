@@ -149,6 +149,7 @@ fn main() {
             commands::settings_bootstrap,
             commands::set_hotkey,
             commands::open_review,
+            commands::review_target,
             commands::review_week,
             commands::review_month,
             commands::review_phone_label,
@@ -290,13 +291,50 @@ mod tests {
         .unwrap();
         config.validate().unwrap();
         assert_eq!(config.review.day, chrono::Weekday::Fri);
-        let schedule: hy_core::time::WorkSchedule = serde_json::from_value(serde_json::json!({
+        // Saves send one field at a time (CoachChange, WaterChange, WorkweekChange).
+        use hy_core::settings::{CoachChange, WaterChange, WorkweekChange};
+        for (sent, field) in [
+            (serde_json::json!({ "intensity": "light" }), "intensity"),
+            (serde_json::json!({ "eye_rest": false }), "eye_rest"),
+            (serde_json::json!({ "water": true }), "water"),
+            (
+                serde_json::json!({ "long_day_hours": 10 }),
+                "long_day_hours",
+            ),
+            (
+                serde_json::json!({ "movement_version": "seated" }),
+                "movement_version",
+            ),
+            (
+                serde_json::json!({ "review": { "day": "fri", "at": "18:00" } }),
+                "review",
+            ),
+        ] {
+            let change: CoachChange = serde_json::from_value(sent.clone()).unwrap();
+            assert_eq!(serde_json::to_value(change).unwrap(), sent, "{field}");
+        }
+        assert!(
+            serde_json::from_value::<CoachChange>(serde_json::to_value(config).unwrap()).is_err()
+        );
+        for sent in [
+            serde_json::json!({ "goal": 2000 }),
+            serde_json::json!({ "add_serving": 750 }),
+            serde_json::json!({ "remove_serving": 150 }),
+        ] {
+            serde_json::from_value::<WaterChange>(sent).unwrap();
+        }
+        let week: WorkweekChange = serde_json::from_value(serde_json::json!({
             "workdays": ["mon", "tue", "wed", "thu", "fri"],
-            "start": "09:00",
-            "end": "17:30"
+            "hours": { "start": "09:00", "end": "17:30" },
+            "zone": "Asia/Kolkata"
         }))
         .unwrap();
-        schedule.validate().unwrap();
+        week.schedule_after(hy_core::time::WorkSchedule::default())
+            .validate()
+            .unwrap();
+        let only_zone: WorkweekChange =
+            serde_json::from_value(serde_json::json!({ "zone": "Europe/London" })).unwrap();
+        assert!(only_zone.workdays.is_none() && only_zone.hours.is_none());
         let a11y: hy_core::prefs::Accessibility = serde_json::from_value(serde_json::json!({
             "text_pct": 150, "reduced_motion": true, "high_contrast": false
         }))
@@ -323,6 +361,26 @@ mod tests {
             json["review"],
             serde_json::json!({ "day": "fri", "at": "18:00" })
         );
+    }
+
+    #[test]
+    fn the_review_offer_week_is_taken_once_and_dropped_by_other_opens() {
+        let week = chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let mut t = shell::ReviewTarget::default();
+        assert_eq!(t.take(), None);
+        // "Open" on the offer: the page takes the week once, then holds it itself.
+        t.offer(week);
+        assert_eq!(t.take(), Some(week));
+        assert_eq!(t.take(), None);
+        // Opened from the tray before a page took it: dropped, so a later window starts
+        // on this week.
+        t.offer(week);
+        t.clear();
+        assert_eq!(t.take(), None);
+        // A second offer replaces the first.
+        t.offer(week - chrono::Days::new(7));
+        t.offer(week);
+        assert_eq!(t.take(), Some(week));
     }
 
     #[test]

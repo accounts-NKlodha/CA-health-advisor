@@ -14,13 +14,14 @@ use chrono::{Datelike, Days, NaiveDate, Weekday};
 use hy_core::coach::movement::{LIBRARY, PROGRAMME, PROVISIONAL, PROVISIONAL_NOTICE};
 use hy_core::coach::recovery::PLAN_AHEAD_DAYS;
 use hy_core::coach::water::{MAX_SERVINGS, WATER_PANEL_RANGE_ML};
-use hy_core::coach::{CoachConfig, Input, InputOutcome, RecoveryAction, RecoveryPlan, Servings};
+use hy_core::coach::{Input, InputOutcome, RecoveryAction, RecoveryPlan};
 use hy_core::prefs::Accessibility;
 use hy_core::review::WeekReview;
 use hy_core::review::suggest::SuggestionKind;
 use hy_core::schema::{GoalKind, WATER_GOAL_RANGE_ML};
+use hy_core::settings::{CoachChange, WaterChange, WorkweekChange};
 use hy_core::store::Store;
-use hy_core::time::{UserZone, WorkSchedule};
+use hy_core::time::UserZone;
 use hy_pet::link::CoachLink;
 use serde::Deserialize;
 use tauri::{Emitter, Manager};
@@ -73,7 +74,15 @@ impl Shell {
                 .ok_or_else(|| "The app did not answer in time. Try again.".to_owned())?,
             None => f(&mut lock(&self.store)),
         };
-        result.map_err(|e| format!("Nothing was changed: {e}"))
+        let out = result.map_err(|e| format!("Nothing was changed: {e}"))?;
+        // Every open settings page reloads; a page keeps the newest revision it has seen.
+        let revision = {
+            let mut i = lock(&self.inner);
+            i.settings_revision += 1;
+            i.settings_revision
+        };
+        let _ = self.app.emit("hy://settings", revision);
+        Ok(out)
     }
 
     // ---------------------------------------------------------------- settings
@@ -83,16 +92,19 @@ impl Shell {
     /// # Errors
     /// A store read failure, worded for the page.
     pub fn settings_page(&self) -> Result<SettingsPage, String> {
-        let a11y = {
+        // The revision is read before the settings: the page holds at least every change
+        // counted by it.
+        let (a11y, revision) = {
             let mut i = lock(&self.inner);
             i.settings_loaded = true;
-            i.a11y
+            (i.a11y, i.settings_revision)
         };
         let hotkey = self.hotkey_label();
         let store = lock(&self.store);
         let read = |e: hy_core::Error| format!("Settings could not be read: {e}");
         let today = store.today().map_err(read)?;
         Ok(SettingsPage {
+            revision,
             coach: store.coach_config().map_err(read)?,
             schedule: store.work_schedule().map_err(read)?,
             zone: store.user_zone().map_err(read)?.name(),
@@ -126,53 +138,37 @@ impl Shell {
         })
     }
 
-    /// Save the coaching settings (Reminders, Movement programme, Focus and Pomodoro, and
-    /// the review time; wireframes W4 to W7).
+    /// Change one coaching setting (Reminders, Movement programme, Focus and Pomodoro, and
+    /// the review time; wireframes W4 to W7). Only that field is written, onto the
+    /// settings saved now, so a change made in another window is never undone.
     ///
     /// # Errors
     /// The refusal, worded for the page; nothing was changed.
-    pub fn save_coach_settings(&self, config: CoachConfig) -> Result<SettingsPage, String> {
-        self.change_settings(move |s| s.set_coach_config(&config))?;
+    pub fn save_coach_settings(&self, change: CoachChange) -> Result<SettingsPage, String> {
+        self.change_settings(move |s| s.change_coach_config(change))?;
         self.settings_page()
     }
 
-    /// Save the water goal (from today; earlier days keep the goal they had) and the
-    /// serving buttons (wireframe W5).
+    /// Change the water goal (from today; earlier days keep the goal they had) or add or
+    /// remove one serving button (wireframe W5), onto what is saved now.
     ///
     /// # Errors
     /// The refusal, worded for the page; nothing was changed.
-    pub fn save_water_settings(
-        &self,
-        goal_ml: Option<u32>,
-        servings: Vec<u32>,
-    ) -> Result<SettingsPage, String> {
-        let servings = Servings::new(servings).map_err(|e| format!("Nothing was changed: {e}"))?;
+    pub fn save_water_settings(&self, change: WaterChange) -> Result<SettingsPage, String> {
         self.change_settings(move |s| {
             let today = s.today()?;
-            if let Some(goal) = goal_ml
-                && s.goal_on(GoalKind::WaterDailyMl, today)? != Some(goal)
-            {
-                s.set_goal(GoalKind::WaterDailyMl, goal, today)?;
-            }
-            s.set_water_servings(&servings)
+            s.change_water(change, today)
         })?;
         self.settings_page()
     }
 
-    /// Save the workdays, work hours and time zone (wireframe W5).
+    /// Change the workdays, work hours or time zone (wireframe W5); fields the page left
+    /// out keep what is saved now.
     ///
     /// # Errors
     /// The refusal, worded for the page; nothing was changed.
-    pub fn save_workweek(
-        &self,
-        schedule: WorkSchedule,
-        zone: &str,
-    ) -> Result<SettingsPage, String> {
-        let zone = UserZone::parse(zone).map_err(|e| format!("Nothing was changed: {e}"))?;
-        self.change_settings(move |s| {
-            s.set_work_schedule(&schedule)?;
-            s.set_user_zone(zone)
-        })?;
+    pub fn save_workweek(&self, change: WorkweekChange) -> Result<SettingsPage, String> {
+        self.change_settings(move |s| s.change_workweek(&change))?;
         self.settings_page()
     }
 

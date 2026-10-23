@@ -25,6 +25,7 @@ const COMMANDS: &[&str] = &[
     "review_month",
     "review_phone_label",
     "review_suggestion",
+    "review_target",
     "settings_page",
     "save_coach_settings",
     "save_water_settings",

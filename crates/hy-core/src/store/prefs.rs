@@ -13,7 +13,11 @@ use crate::review::suggest::{
     self, ANSWERS_KEY, Answers, Applied, Change, Current, SuggestFacts, SuggestionKind,
 };
 use crate::review::{WeekReview, week_start};
-use crate::schema::{Activity, EventPayload, ReminderOutcome, RoutineOutcome, RoutineVariant};
+use crate::schema::{
+    Activity, EventPayload, GoalKind, ReminderOutcome, RoutineOutcome, RoutineVariant,
+};
+use crate::settings::{CoachChange, WaterChange, WorkweekChange};
+use crate::time::UserZone;
 
 impl Store {
     /// The coaching settings (defaults until changed).
@@ -32,6 +36,54 @@ impl Store {
     pub fn set_coach_config(&self, config: &CoachConfig) -> Result<()> {
         config.validate()?;
         self.put_setting(CONFIG_KEY, config)
+    }
+
+    /// Change one field of the coaching settings saved now, and answer with the result.
+    /// Fields other windows changed meanwhile are kept ([`crate::settings`]).
+    ///
+    /// # Errors
+    /// [`Error::Invalid`] if the result breaks a rule; nothing is written.
+    pub fn change_coach_config(&self, change: CoachChange) -> Result<CoachConfig> {
+        let tx = self.conn.unchecked_transaction()?;
+        let config = change.applied_to(self.coach_config()?);
+        self.set_coach_config(&config)?;
+        tx.commit()?;
+        Ok(config)
+    }
+
+    /// Apply one Water tab change to what is saved now: the goal (from `today`; earlier
+    /// days keep theirs) or one serving button added or removed.
+    ///
+    /// # Errors
+    /// [`Error::Invalid`] if the result breaks a rule; nothing is written.
+    pub fn change_water(&self, change: WaterChange, today: NaiveDate) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        if let WaterChange::Goal(goal) = change {
+            if self.goal_on(GoalKind::WaterDailyMl, today)? != Some(goal) {
+                self.set_goal(GoalKind::WaterDailyMl, goal, today)?;
+            }
+        } else if let Some(servings) = change.servings_after(&self.water_servings()?)? {
+            self.set_water_servings(&servings)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Apply the workweek fields a save changed to what is saved now.
+    ///
+    /// # Errors
+    /// [`Error::InvalidTimeZone`] for an unknown zone, [`Error::Invalid`] if the schedule
+    /// breaks its rules; nothing is written.
+    pub fn change_workweek(&self, change: &WorkweekChange) -> Result<()> {
+        let zone = change.zone.as_deref().map(UserZone::parse).transpose()?;
+        let tx = self.conn.unchecked_transaction()?;
+        let schedule = change.schedule_after(self.work_schedule()?);
+        self.set_work_schedule(&schedule)?;
+        if let Some(z) = zone {
+            self.set_user_zone(z)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// The serving buttons (defaults until changed).
