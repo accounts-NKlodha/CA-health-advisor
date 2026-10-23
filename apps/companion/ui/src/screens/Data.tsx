@@ -1,27 +1,44 @@
 // Settings > Sharing & server (wireframe W8) and Backup (W9).
-// Sharing: this build has no office server yet, so the status reads "Not paired" and
-// every optional category is off; pairing arrives with the office server.
+// Sharing: pairing with the office server (slice V1-5a). The user pastes the slip from
+// the administrator; this PC then shows the server's six words and its own check code to
+// read out, and stays "waiting for confirmation" until the administrator confirms it.
+// Every optional category stays off; switching them on arrives with sync (V1-5b).
 // Backup: "Export my data" writes one encrypted file to the Documents folder; "Import a
 // backup" replaces all HealthierYou data on this PC with a file's (never merges), keeps
 // every deletion from both sides, and restarts the app.
 import { useEffect, useState } from 'preact/hooks';
 import { call, on, report, stageBackup } from '../shared/ipc';
-import type { BackupSummary, ImportFinished, SettingsPage } from '../shared/types';
+import type { BackupSummary, ImportFinished, LinkView, SettingsPage } from '../shared/types';
+import { checkCodeText, newPcs, slipInput, slipLooksComplete, statusLine } from './pairing';
 
 const MIN_PASSWORD = 8;
 
 export function SharingTab({ page }: { page: SettingsPage }) {
+  const [link, setLink] = useState<LinkView | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    call('server_status').then(setLink).catch((err: unknown) => setError(String(err)));
+  }, []);
+  const paired = link !== null && link.state !== 'none';
   return (
     <main class="pane">
       <h2>Sharing & server</h2>
       <p class="saved-note" role="status">
-        Not paired. Everything works on this PC; nothing is shared or sent.
+        {link ? statusLine(link) : 'Reading...'}
       </p>
+      {error ? (
+        <p class="note" role="alert">
+          {error}
+        </p>
+      ) : null}
+      {link ? <ServerLink link={link} onChange={setLink} onError={setError} /> : null}
       <section aria-labelledby="share-h">
         <h3 id="share-h">Optional sharing</h3>
         <p>
-          All off. Each category can be switched on only after this PC is paired with the office
-          server, which comes with a later update.
+          All off.{' '}
+          {paired
+            ? 'Switching a category on comes with a later update.'
+            : 'Each category can be switched on only after this PC is paired with the office server.'}
         </p>
         <ul class="lib">
           {page.sharing.map((s) => (
@@ -39,6 +56,138 @@ export function SharingTab({ page }: { page: SettingsPage }) {
         </p>
       </section>
     </main>
+  );
+}
+
+function ServerLink({
+  link,
+  onChange,
+  onError,
+}: {
+  link: LinkView;
+  onChange: (v: LinkView) => void;
+  onError: (e: string) => void;
+}) {
+  const [slip, setSlip] = useState('');
+  const [busy, setBusy] = useState(false);
+  const run = (p: Promise<LinkView>) => {
+    setBusy(true);
+    onError('');
+    p.then(onChange)
+      .catch((err: unknown) => onError(String(err)))
+      .finally(() => setBusy(false));
+  };
+  if (link.state === 'none') {
+    return (
+      <section aria-labelledby="pair-h">
+        <h3 id="pair-h">Pair with the office server</h3>
+        <p>
+          Your administrator gives you a pairing slip. It works once, for 24 hours. After pairing,
+          read the six words and the check code shown here to your administrator. Nothing is
+          shared until you switch a category on.
+        </p>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!slipLooksComplete(slip) || busy) return;
+            run(call('server_pair', { slip: slipInput(slip) }).then((v) => {
+              setSlip('');
+              return v;
+            }));
+          }}
+        >
+          <label class="field">
+            <span>Pairing slip</span>
+            <textarea
+              rows={3}
+              spellcheck={false}
+              autocomplete="off"
+              value={slip}
+              aria-describedby="slip-note"
+              onInput={(e) => setSlip(e.currentTarget.value)}
+            />
+          </label>
+          <p class="note" id="slip-note">
+            Paste it, or type it with or without the dashes. A typing mistake is caught here before
+            anything is sent.
+          </p>
+          <button type="submit" class="btn primary" disabled={!slipLooksComplete(slip) || busy}>
+            Pair
+          </button>
+        </form>
+        {link.message ? <p class="status" role="status">{link.message}</p> : null}
+      </section>
+    );
+  }
+  const fresh = newPcs(link);
+  return (
+    <section aria-labelledby="server-h">
+      <h3 id="server-h">Office server</h3>
+      {link.state === 'pending' ? (
+        <>
+          <p>
+            Read these to your administrator, in person or on a call they place to you. If the
+            words they see are different, do not continue: the slip may have been altered.
+          </p>
+          <p class="words" aria-label="Six words">
+            <strong>{link.words.join(' ')}</strong>
+          </p>
+          <p>
+            Check code: <strong class="mono">{checkCodeText(link.check_code)}</strong>
+          </p>
+        </>
+      ) : null}
+      {fresh.length > 0 ? (
+        <div class="notice" role="alert">
+          <p>
+            A new PC was paired to you: <strong>{fresh.map((d) => d.label).join(', ')}</strong>. If
+            this was not you, tell your administrator.
+          </p>
+          <button
+            type="button"
+            class="btn"
+            onClick={() => {
+              const first = fresh[0];
+              if (first) run(call('server_notice_seen', { deviceRef: first.device_ref }));
+            }}
+          >
+            OK
+          </button>
+        </div>
+      ) : null}
+      {link.state === 'confirmed' && link.devices.length > 0 ? (
+        <>
+          <h4>PCs paired to you</h4>
+          <ul class="lib">
+            {link.devices.map((d) => (
+              <li key={d.device_ref}>
+                {d.label}
+                {d.this_pc ? ' (this PC)' : ''}
+                {d.confirmed ? '' : ' (waiting for confirmation)'}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+      {link.message ? <p class="status" role="status">{link.message}</p> : null}
+      <p>
+        <button type="button" class="btn" disabled={busy} onClick={() => run(call('server_refresh'))}>
+          Check again
+        </button>{' '}
+        <button
+          type="button"
+          class="btn"
+          disabled={busy}
+          onClick={() => {
+            if (window.confirm('Unpair this PC? Sharing stops and the server is told when it can be reached.')) {
+              run(call('server_unpair'));
+            }
+          }}
+        >
+          Unpair this PC
+        </button>
+      </p>
+    </section>
   );
 }
 

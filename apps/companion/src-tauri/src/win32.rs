@@ -18,6 +18,9 @@
 //!   `SHQueryUserNotificationState` plus a look at the foreground window. Only raw values
 //!   are read here; the rules are in `hy_pet::link::signals`.
 //!
+//! - The server link's token is sealed with user-scope DPAPI (`CryptProtectData`, V1-5
+//!   contract 6.1): only this Windows user on this PC can open it.
+//!
 //! Window handles cross this module as `isize` so callers need no unsafe code.
 
 #![allow(unsafe_code)]
@@ -26,11 +29,15 @@ use std::sync::OnceLock;
 
 use std::time::Duration;
 
+use hy_core::secret::Secret;
 use hy_pet::geometry::Rect;
 use hy_pet::link::signals::{ForegroundWindow, NotificationState, idle_from_ticks};
-use windows_sys::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, LocalFree, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+};
+use windows_sys::Win32::Security::Cryptography::{
+    CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
 };
 use windows_sys::Win32::System::Power::RegisterSuspendResumeNotification;
 use windows_sys::Win32::System::RemoteDesktop::{
@@ -342,4 +349,89 @@ pub fn restore_foreground(prev: isize) -> bool {
     }
     // SAFETY: IsWindow validates the handle first; SetForegroundWindow takes a handle only.
     unsafe { IsWindow(hwnd(prev)) != 0 && SetForegroundWindow(hwnd(prev)) != 0 }
+}
+
+fn dpapi_blob(bytes: &[u8]) -> std::io::Result<CRYPT_INTEGER_BLOB> {
+    Ok(CRYPT_INTEGER_BLOB {
+        cbData: u32::try_from(bytes.len()).map_err(|_| std::io::Error::other("blob too large"))?,
+        pbData: bytes.as_ptr().cast_mut(),
+    })
+}
+
+/// Copy a DPAPI output blob out, overwrite the OS buffer and free it.
+fn dpapi_take(out: &CRYPT_INTEGER_BLOB) -> Vec<u8> {
+    if out.pbData.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: on success DPAPI returns `cbData` bytes at `pbData`, allocated with
+    // LocalAlloc; they are copied, the OS buffer is overwritten (it may hold the token)
+    // and freed exactly once.
+    unsafe {
+        let len = out.cbData as usize;
+        let v = std::slice::from_raw_parts(out.pbData, len).to_vec();
+        std::ptr::write_bytes(out.pbData, 0, len);
+        LocalFree(out.pbData.cast());
+        v
+    }
+}
+
+/// Seal `plain` for the current Windows user (user-scope DPAPI, no UI).
+///
+/// # Errors
+/// The OS error if DPAPI refuses.
+pub fn protect_user(plain: &[u8], entropy: &[u8]) -> std::io::Result<Vec<u8>> {
+    let input = dpapi_blob(plain)?;
+    let ent = dpapi_blob(entropy)?;
+    let mut out = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
+    // SAFETY: `input` and `ent` point to live slices for the duration of the call and
+    // DPAPI only reads them; `out` is a valid out-pointer; the description, reserved and
+    // prompt arguments may be null.
+    let ok = unsafe {
+        CryptProtectData(
+            &raw const input,
+            std::ptr::null(),
+            &raw const ent,
+            std::ptr::null(),
+            std::ptr::null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &raw mut out,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(dpapi_take(&out))
+}
+
+/// Open a blob sealed by [`protect_user`]. Fails for another Windows user, another PC or
+/// a damaged blob ("re-pair needed").
+///
+/// # Errors
+/// The OS error if the blob cannot be opened here.
+pub fn unprotect_user(sealed: &[u8], entropy: &[u8]) -> std::io::Result<Secret<Vec<u8>>> {
+    let input = dpapi_blob(sealed)?;
+    let ent = dpapi_blob(entropy)?;
+    let mut out = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
+    // SAFETY: as in `protect_user`; the description out-pointer may be null.
+    let ok = unsafe {
+        CryptUnprotectData(
+            &raw const input,
+            std::ptr::null_mut(),
+            &raw const ent,
+            std::ptr::null(),
+            std::ptr::null(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &raw mut out,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(Secret::new(dpapi_take(&out)))
 }

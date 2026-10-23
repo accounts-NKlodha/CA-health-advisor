@@ -1,0 +1,340 @@
+//! The `/v1` LAN API (V1-5 contract 8.1), served only over the pinned TLS listener.
+//!
+//! Common rules: the user id always comes from the token, never from a path, query,
+//! body or header; errors are one small enum with no free text; request bodies are never
+//! logged. A pending device may call only `GET /v1/state` and `POST /v1/unpair`: every
+//! other authenticated endpoint refuses it with `device_unconfirmed` **before** any other
+//! processing (contract 4.5).
+//!
+//! V1-5a serves pairing, state and unpair. History, control, upload, receipt and the
+//! update manifest are V1-5b (and V1-6): here they authenticate, apply the pending-device
+//! gate, and otherwise answer `protocol_unsupported`.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Instant;
+
+use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::extract::{Extension, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use hy_core::protocol::unb64_exact;
+use hy_core::protocol::wire::{ErrorBody, PairRequest, WireError};
+
+use crate::logging::{self, V};
+use crate::server::{AuthedDevice, DeviceState, Refusal, Server};
+
+/// The connecting peer's address, attached to each connection by the accept loop.
+#[derive(Debug, Clone, Copy)]
+pub struct Peer(pub SocketAddr);
+
+/// Request body limit for every endpoint (contract 5).
+pub const BODY_LIMIT: usize = 256 * 1024;
+/// Request body limit for `/v1/pair`.
+pub const PAIR_BODY_LIMIT: usize = 4 * 1024;
+
+/// The HTTP status for each wire error.
+#[must_use]
+pub fn status_of(e: WireError) -> StatusCode {
+    match e {
+        WireError::UnknownToken | WireError::DeviceRevoked => StatusCode::UNAUTHORIZED,
+        WireError::DeviceUnconfirmed | WireError::SlipInvalid => StatusCode::FORBIDDEN,
+        WireError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+        WireError::OriginConflict | WireError::StaleEnable | WireError::DeviceRegressed => {
+            StatusCode::CONFLICT
+        }
+        WireError::RecoveryHold => StatusCode::LOCKED,
+        WireError::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        WireError::ProtocolUnsupported => StatusCode::NOT_FOUND,
+        WireError::CannotRecord => StatusCode::SERVICE_UNAVAILABLE,
+        WireError::AcceptedPendingRecovery => StatusCode::ACCEPTED,
+        _ => StatusCode::BAD_REQUEST,
+    }
+}
+
+fn error_response(e: WireError) -> Response {
+    let mut r = (status_of(e), axum::Json(ErrorBody { error: e })).into_response();
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    r
+}
+
+fn json_response<T: serde::Serialize>(value: &T) -> Response {
+    let mut r = axum::Json(value).into_response();
+    r.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    r
+}
+
+/// The bearer token from the `Authorization` header only (never a query string).
+fn bearer(headers: &HeaderMap) -> Option<[u8; 32]> {
+    let mut values = headers.get_all(header::AUTHORIZATION).iter();
+    let first = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let token = first.to_str().ok()?.strip_prefix("Bearer ")?;
+    unb64_exact::<32>(token)
+}
+
+fn log_request(
+    endpoint: &'static str,
+    start: Instant,
+    status: StatusCode,
+    error: Option<WireError>,
+    dev: Option<&AuthedDevice>,
+) {
+    let latency = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let mut fields: Vec<(&'static str, V<'_>)> = vec![
+        ("endpoint", V::Name(endpoint)),
+        ("status", V::Status(status.as_u16())),
+        ("latency_ms", V::N(latency)),
+    ];
+    if let Some(e) = error {
+        fields.push(("error", V::Error(e)));
+    }
+    if let Some(d) = dev {
+        fields.push(("user", V::Id(&d.user_id)));
+        fields.push(("device", V::Id(&d.device_ref)));
+    }
+    logging::log("request", &fields);
+}
+
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, WireError> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|_| WireError::CannotRecord)
+}
+
+/// Authenticate, answering the error response on failure.
+async fn auth(server: &Arc<Server>, headers: &HeaderMap) -> Result<AuthedDevice, WireError> {
+    let token = bearer(headers);
+    let s = server.clone();
+    blocking(move || s.authenticate(token.as_ref())).await?
+}
+
+/// The router for the LAN listener.
+pub fn router(server: Arc<Server>) -> Router {
+    Router::new()
+        .route("/v1/pair", post(pair))
+        .route("/v1/state", get(state))
+        .route("/v1/unpair", post(unpair))
+        .route("/v1/history", get(confirmed_only_history))
+        .route("/v1/control", post(confirmed_only_control))
+        .route("/v1/upload", post(confirmed_only_upload))
+        .route("/v1/receipt", post(confirmed_only_receipt))
+        .route("/v1/update/manifest", get(confirmed_only_manifest))
+        .fallback(not_found)
+        .with_state(server)
+}
+
+async fn not_found() -> Response {
+    error_response(WireError::ProtocolUnsupported)
+}
+
+async fn pair(
+    State(server): State<Arc<Server>>,
+    Extension(Peer(peer)): Extension<Peer>,
+    body: Body,
+) -> Response {
+    let start = Instant::now();
+    let floor = server.config.pair_floor;
+    let s = server.clone();
+    let outcome: Result<_, Refusal> = async {
+        let s1 = s.clone();
+        blocking(move || s1.count_pair_attempt(peer.ip())).await??;
+        let bytes = to_bytes(body, PAIR_BODY_LIMIT)
+            .await
+            .map_err(|_| WireError::PayloadTooLarge)?;
+        let req: PairRequest =
+            serde_json::from_slice(&bytes).map_err(|_| WireError::SchemaInvalid)?;
+        let s2 = s.clone();
+        blocking(move || s2.redeem(&req, peer.ip())).await?
+    }
+    .await;
+    // One answer time for every outcome (contract 4.4: timing-equalised).
+    if let Some(rest) = floor.checked_sub(start.elapsed()) {
+        tokio::time::sleep(rest).await;
+    }
+    match outcome {
+        Ok((resp, _token)) => {
+            log_request("pair", start, StatusCode::OK, None, None);
+            json_response(&resp)
+        }
+        Err(Refusal::RateLimited(secs)) => {
+            log_request(
+                "pair",
+                start,
+                StatusCode::TOO_MANY_REQUESTS,
+                Some(WireError::RateLimited),
+                None,
+            );
+            let mut r = error_response(WireError::RateLimited);
+            if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+                r.headers_mut().insert(header::RETRY_AFTER, v);
+            }
+            r
+        }
+        Err(Refusal::Wire(e)) => {
+            log_request("pair", start, status_of(e), Some(e), None);
+            error_response(e)
+        }
+    }
+}
+
+fn after_seq(uri: &Uri) -> u64 {
+    uri.query()
+        .into_iter()
+        .flat_map(|q| q.split('&'))
+        .filter_map(|kv| kv.strip_prefix("after_seq="))
+        .find_map(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+async fn state(State(server): State<Arc<Server>>, headers: HeaderMap, uri: Uri) -> Response {
+    let start = Instant::now();
+    let dev = match auth(&server, &headers).await {
+        Ok(d) => d,
+        Err(e) => {
+            log_request("state", start, status_of(e), Some(e), None);
+            return error_response(e);
+        }
+    };
+    let after = after_seq(&uri);
+    let s = server.clone();
+    match blocking(move || s.state_for(&dev, after))
+        .await
+        .and_then(|r| r)
+    {
+        Ok(state) => {
+            log_request("state", start, StatusCode::OK, None, Some(&dev));
+            json_response(&state)
+        }
+        Err(e) => {
+            log_request("state", start, status_of(e), Some(e), Some(&dev));
+            error_response(e)
+        }
+    }
+}
+
+async fn unpair(State(server): State<Arc<Server>>, headers: HeaderMap) -> Response {
+    let start = Instant::now();
+    let dev = match auth(&server, &headers).await {
+        Ok(d) => d,
+        Err(e) => {
+            log_request("unpair", start, status_of(e), Some(e), None);
+            return error_response(e);
+        }
+    };
+    let s = server.clone();
+    match blocking(move || s.unpair(&dev)).await.and_then(|r| r) {
+        Ok(()) => {
+            log_request("unpair", start, StatusCode::OK, None, Some(&dev));
+            json_response(&serde_json::json!({}))
+        }
+        Err(e) => {
+            log_request("unpair", start, status_of(e), Some(e), Some(&dev));
+            error_response(e)
+        }
+    }
+}
+
+/// The pending-device gate shared by every confirmed-only endpoint. The body is never
+/// read before it passes.
+async fn confirmed_only(
+    endpoint: &'static str,
+    server: &Arc<Server>,
+    headers: &HeaderMap,
+) -> Response {
+    let start = Instant::now();
+    let dev = match auth(server, headers).await {
+        Ok(d) => d,
+        Err(e) => {
+            log_request(endpoint, start, status_of(e), Some(e), None);
+            return error_response(e);
+        }
+    };
+    if dev.state != DeviceState::Active {
+        log_request(
+            endpoint,
+            start,
+            StatusCode::FORBIDDEN,
+            Some(WireError::DeviceUnconfirmed),
+            Some(&dev),
+        );
+        return error_response(WireError::DeviceUnconfirmed);
+    }
+    // Sync, history, receipts and the manifest arrive in V1-5b and V1-6.
+    log_request(
+        endpoint,
+        start,
+        StatusCode::NOT_FOUND,
+        Some(WireError::ProtocolUnsupported),
+        Some(&dev),
+    );
+    error_response(WireError::ProtocolUnsupported)
+}
+
+async fn confirmed_only_history(State(s): State<Arc<Server>>, h: HeaderMap) -> Response {
+    confirmed_only("history", &s, &h).await
+}
+
+async fn confirmed_only_control(State(s): State<Arc<Server>>, h: HeaderMap) -> Response {
+    confirmed_only("control", &s, &h).await
+}
+
+async fn confirmed_only_upload(State(s): State<Arc<Server>>, h: HeaderMap) -> Response {
+    confirmed_only("upload", &s, &h).await
+}
+
+async fn confirmed_only_receipt(State(s): State<Arc<Server>>, h: HeaderMap) -> Response {
+    confirmed_only("receipt", &s, &h).await
+}
+
+async fn confirmed_only_manifest(State(s): State<Arc<Server>>, h: HeaderMap) -> Response {
+    confirmed_only("manifest", &s, &h).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bearer_tokens_come_only_from_one_authorization_header() {
+        let token = [7u8; 32];
+        let mut h = HeaderMap::new();
+        assert_eq!(bearer(&h), None);
+        h.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", hy_core::protocol::b64(&token))).unwrap(),
+        );
+        assert_eq!(bearer(&h), Some(token));
+        h.append(header::AUTHORIZATION, HeaderValue::from_static("Bearer x"));
+        assert_eq!(bearer(&h), None, "two headers");
+        let mut t = HeaderMap::new();
+        t.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Basic {}", hy_core::protocol::b64(&token))).unwrap(),
+        );
+        assert_eq!(bearer(&t), None);
+        let mut short = HeaderMap::new();
+        short.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", hy_core::protocol::b64(&token[..31])))
+                .unwrap(),
+        );
+        assert_eq!(bearer(&short), None);
+    }
+
+    #[test]
+    fn after_seq_reads_only_its_own_parameter() {
+        let u: Uri = "/v1/state?user_id=abc&after_seq=12".parse().unwrap();
+        assert_eq!(after_seq(&u), 12);
+        let u: Uri = "/v1/state?after_seq=x".parse().unwrap();
+        assert_eq!(after_seq(&u), 0);
+    }
+}

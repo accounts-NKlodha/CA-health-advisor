@@ -19,10 +19,29 @@ fn date(y: i32, m: u32, d: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, d).unwrap()
 }
 
+/// A store paired with a server and confirmed long before any test date. Since V1-5 the
+/// upload queue refuses everything on an unpaired or pending PC (migration v5), so the
+/// sharing tests below start from a confirmed link; the link rules themselves are tested
+/// in `tests/link_store.rs`.
 fn store() -> (Store, Arc<ManualClock>) {
     let clock = Arc::new(ManualClock::new(start()));
     let store = Store::open_in_memory(clock.clone()).unwrap();
+    confirm_test_link(&store);
     (store, clock)
+}
+
+fn confirm_test_link(store: &Store) {
+    store
+        .conn
+        .execute(
+            "INSERT INTO server_link (id, server_key_id, pin, head_key, host, port, user_id,
+                 device_ref, alias, token_blob, confirmed, confirmed_on, paired_at)
+             VALUES (1, zeroblob(32), zeroblob(32), zeroblob(32), 'server', 8443,
+                 '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002',
+                 'Test', x'00', 1, '2026-01-01', 0)",
+            [],
+        )
+        .unwrap();
 }
 
 fn water(ml: u32) -> NewEvent {

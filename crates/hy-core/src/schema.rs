@@ -384,6 +384,14 @@ text_enum! {
         DeletionRequested => "deletion_requested",
         /// An enable was refused as stale.
         StaleEnableRejected => "stale_enable_rejected",
+        /// This PC paired with the office server (V1-5; the notice version is recorded).
+        Paired => "paired",
+        /// This PC unpaired, was revoked, or needs to pair again.
+        Unpaired => "unpaired",
+        /// An enable made on another of the user's PCs was applied here (owner O2).
+        RemoteEnableApplied => "remote_enable_applied",
+        /// The server saw an older receipt from this PC; every category was switched off.
+        RegressionReset => "regression_reset",
     }
 }
 

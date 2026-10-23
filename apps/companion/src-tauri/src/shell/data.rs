@@ -4,8 +4,8 @@
 //! - **Setup** opens by itself on the first start of a new store and can be run again
 //!   from Settings. Its steps save through the same commands as the settings tabs;
 //!   "Finish" records that setup is done.
-//! - **Sharing:** this build has no office server yet, so it states "Not paired; nothing
-//!   is shared" and lists every category as off.
+//! - **Sharing:** every category and whether it is on. Pairing with the office server is
+//!   in [`crate::server_link`]; switching categories on arrives with sync (slice V1-5b).
 //! - **Export** writes one encrypted `.hybackup` file to the user's Documents folder.
 //! - **Import** decrypts a file the page staged, replaces this PC's data on the engine's
 //!   own store connection (so nothing is written in between), then restarts the app so
@@ -199,8 +199,14 @@ impl Shell {
 
     // ------------------------------------------------------------------ sharing
 
-    /// The sharing tab's rows (W8): every category and whether it is on. Without an
-    /// office server (slice V1-5) every category is off.
+    /// Run `f` on the shell's store (the server link's steps; never across a network
+    /// wait).
+    pub fn with_store<R>(&self, f: impl FnOnce(&mut hy_core::store::Store) -> R) -> R {
+        f(&mut lock(&self.store))
+    }
+
+    /// The sharing tab's rows (W8): every category and whether it is on. Until sync
+    /// (slice V1-5b) every category stays off, paired or not.
     ///
     /// # Errors
     /// A store read failure.

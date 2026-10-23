@@ -41,6 +41,11 @@ const COMMANDS: &[&str] = &[
     "backup_export",
     "backup_stage",
     "backup_import",
+    "server_status",
+    "server_pair",
+    "server_refresh",
+    "server_unpair",
+    "server_notice_seen",
 ];
 
 fn main() {

@@ -662,26 +662,98 @@ fn tombstone_and_consent_checks() {
 }
 
 #[test]
-fn outbox_needs_a_device_identity_and_an_enabled_category() {
+fn outbox_needs_a_device_identity_an_enabled_category_and_a_confirmed_link() {
     let conn = db();
     // No device id yet: the origin check refuses everything.
     exec(&conn, "UPDATE sharing_policy SET enabled = 1, share_from = '2026-10-01' WHERE category = 'hydration'").unwrap();
-    let insert = || {
+    let insert = |date: &str| {
         exec(
             &conn,
             &format!(
-                "INSERT INTO outbox (category, origin_device, local_date, revision, payload, created_at) VALUES ('hydration', '{DEV}', '2026-10-21', 1, '{{}}', 0)"
+                "INSERT INTO outbox (category, origin_device, local_date, revision, payload, created_at) VALUES ('hydration', '{DEV}', '{date}', 1, '{{}}', 0)"
             ),
         )
     };
-    assert!(insert().is_err());
+    assert!(insert("2026-10-21").is_err());
     exec(
         &conn,
         &format!("INSERT INTO store_meta VALUES ('device_id', '{DEV}')"),
     )
     .unwrap();
-    insert().unwrap();
-    assert!(insert().is_err(), "duplicate revision");
+    // Not paired (V1-5): still refused.
+    let err = insert("2026-10-21").unwrap_err().to_string();
+    assert!(err.contains("not confirmed"), "{err}");
+    // Paired but pending: refused.
+    exec(
+        &conn,
+        "INSERT INTO server_link (id, server_key_id, pin, head_key, host, port, user_id, device_ref, alias, token_blob, confirmed, confirmed_on, paired_at)
+         VALUES (1, zeroblob(32), zeroblob(32), zeroblob(32), 'srv', 8443, '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002', 'A', x'00', 0, NULL, 0)",
+    )
+    .unwrap();
+    let err = insert("2026-10-21").unwrap_err().to_string();
+    assert!(err.contains("not confirmed"), "{err}");
+    // Confirmed on the 15th: earlier dates stay refused even after share_from.
+    exec(
+        &conn,
+        "UPDATE server_link SET confirmed = 1, confirmed_on = '2026-10-15'",
+    )
+    .unwrap();
+    let err = insert("2026-10-14").unwrap_err().to_string();
+    assert!(err.contains("before confirmation"), "{err}");
+    insert("2026-10-21").unwrap();
+    assert!(insert("2026-10-21").is_err(), "duplicate revision");
+    // Confirmation is one-way and the link's identity is fixed.
+    assert!(
+        exec(
+            &conn,
+            "UPDATE server_link SET confirmed = 0, confirmed_on = NULL"
+        )
+        .is_err()
+    );
+    assert!(exec(&conn, "UPDATE server_link SET pin = zeroblob(32)").is_err());
+    // Removing the link purges the queue in the same statement.
+    exec(&conn, "DELETE FROM server_link").unwrap();
+    let queued: i64 = conn
+        .query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(queued, 0);
+}
+
+#[test]
+fn receipts_need_a_confirmed_link_never_decrease_and_go_only_with_the_link() {
+    let conn = db();
+    let receipt = |seq: i64| {
+        exec(
+            &conn,
+            &format!(
+                "INSERT INTO head_receipt (id, key_id, user_id, seq, chain_hash, issued_at, sig)
+                 VALUES (1, zeroblob(32), '00000000-0000-0000-0000-000000000001', {seq}, zeroblob(32), 0, zeroblob(64))"
+            ),
+        )
+    };
+    assert!(receipt(1).is_err(), "no link");
+    exec(
+        &conn,
+        "INSERT INTO server_link (id, server_key_id, pin, head_key, host, port, user_id, device_ref, alias, token_blob, confirmed, confirmed_on, paired_at)
+         VALUES (1, zeroblob(32), zeroblob(32), zeroblob(32), 'srv', 8443, '00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002', 'A', x'00', 0, NULL, 0)",
+    )
+    .unwrap();
+    assert!(receipt(1).is_err(), "pending link");
+    exec(
+        &conn,
+        "UPDATE server_link SET confirmed = 1, confirmed_on = '2026-10-15'",
+    )
+    .unwrap();
+    receipt(5).unwrap();
+    assert!(exec(&conn, "UPDATE head_receipt SET seq = 4").is_err());
+    assert!(exec(&conn, "UPDATE head_receipt SET key_id = x'01'").is_err());
+    exec(&conn, "UPDATE head_receipt SET seq = 6").unwrap();
+    assert!(exec(&conn, "DELETE FROM head_receipt").is_err());
+    exec(&conn, "DELETE FROM server_link").unwrap();
+    let left: i64 = conn
+        .query_row("SELECT COUNT(*) FROM head_receipt", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 0);
 }
 
 #[test]

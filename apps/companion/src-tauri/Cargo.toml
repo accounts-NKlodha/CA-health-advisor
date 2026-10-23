@@ -14,7 +14,8 @@ tauri-build = { version = "=2.7.3", features = [] }
 
 [dependencies]
 chrono.workspace = true
-hy-core.workspace = true
+# `link`: the pinned TLS client and pairing flow (slice V1-5a).
+hy-core = { workspace = true, features = ["link"] }
 hy-pet.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -26,6 +27,7 @@ uuid.workspace = true
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
+  "Win32_Security_Cryptography",
   "Win32_System_Power",
   "Win32_System_RemoteDesktop",
   "Win32_System_SystemInformation",
@@ -37,8 +39,8 @@ windows-sys = { version = "0.61.2", features = [
 
 # The workspace forbids unsafe code. The companion needs a few Win32 calls (the proven
 # non-activating pet window, show without activation, display-change and hotkey messages,
-# handing focus back, and the tracker's signals: input idle time, lock and unlock, sleep
-# and wake, presentation and full-screen state). They live in src/win32.rs only, each with
+# handing focus back, the tracker's signals: input idle time, lock and unlock, sleep and
+# wake, presentation and full-screen state, and user-scope DPAPI for the server token). They live in src/win32.rs only, each with
 # a SAFETY note, so here unsafe code is denied (not forbidden) and that one module allows
 # it.
 [lints.rust]

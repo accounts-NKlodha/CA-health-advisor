@@ -1,7 +1,8 @@
-# HealthierYou CI (slices V1-0, V1-1 and V1-2, and their integration).
+# HealthierYou CI (slices V1-0 to V1-4 and V1-5a, and their integration).
 # Linux: format, lint and unit tests for the shared core, the pet shell logic (hy-pet:
-# placement and clamping, pet packs, edits), server and simulator, plus the companion UI
-# type check and build. The companion is a Windows product (Tauri 2 +
+# placement and clamping, pet packs, edits), the office server (V1-5a: the real server
+# over loopback TLS 1.3 against the companion's pinned client, T-P and T-S tests) and
+# simulator, plus the companion UI type check and build. The companion is a Windows product (Tauri 2 +
 # WebView2), so it is linted, tested and built on the Windows job, modelled on the
 # batch 1 feasibility workflow (spike/batch1). Installers and the bundled fixed WebView2
 # runtime are slice V1-6, so the Windows job builds the binary without bundling.
@@ -163,7 +164,12 @@ jobs:
           "self-test exit code: $($p.ExitCode)"
           if ($p.ExitCode -ne 0) { throw "Pet shell self-test failed (exit code $($p.ExitCode))" }
 
-      - name: Run the server and simulator skeletons
+      # The server's first start on Windows: keys sealed with machine-scope DPAPI, then
+      # loaded back (V1-5a). The simulator is still a skeleton until V1-5b.
+      - name: Server init and fingerprint (real DPAPI), simulator skeleton
         run: |
-          cargo run --locked -q -p hy-server
+          $data = Join-Path $env:RUNNER_TEMP 'hy-server-data'
+          cargo run --locked -q -p hy-server -- --version
+          cargo run --locked -q -p hy-server -- init --data-dir $data --host ci-server
+          cargo run --locked -q -p hy-server -- fingerprint --data-dir $data
           cargo run --locked -q -p hy-sim

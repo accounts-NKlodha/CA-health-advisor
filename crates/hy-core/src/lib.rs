@@ -17,19 +17,26 @@
 //! Slice V1-4 adds [`review`]: the weekly and monthly reviews, built from per-day tallies
 //! and the current view of the event log, with "Try next week" suggestions; and
 //! [`prefs`]: the display preferences (text size, reduced motion, contrast); and
-//! [`backup`]: the encrypted full personal backup file. Sync is a later slice.
-//! Pairing, the server link (certificate pin and token) and the signed receipt are not
-//! part of V1-0: they wait for the pairing security gate before V1-5.
+//! [`backup`]: the encrypted full personal backup file.
+//!
+//! Slice V1-5 adds [`protocol`]: the office-server protocol shared by the server, the
+//! companion and the simulator (pairing slip, fingerprint words, control-log chain,
+//! signed heads, `/v1` bodies); [`secret`]: redacting, zeroizing secret values; and, with
+//! the `link` feature, [`link`]: the pinned TLS 1.3 client.
 
 pub mod backup;
 pub mod clock;
 pub mod coach;
 pub mod error;
 pub mod ids;
+#[cfg(feature = "link")]
+pub mod link;
 pub mod migrations;
 pub mod prefs;
+pub mod protocol;
 pub mod review;
 pub mod schema;
+pub mod secret;
 pub mod settings;
 pub mod store;
 pub mod time;

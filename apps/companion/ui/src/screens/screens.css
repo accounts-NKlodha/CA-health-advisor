@@ -444,3 +444,15 @@ kbd {
     border-color: CanvasText;
   }
 }
+/* Pairing (V1-5a): the six words are read out, so they are large and spaced. */
+.words strong {
+  font-size: 1.4rem;
+  letter-spacing: 0.04em;
+  word-spacing: 0.4em;
+}
+.notice {
+  border: 2px solid var(--pending);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 10px 0;
+}
