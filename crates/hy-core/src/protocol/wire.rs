@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::schema::Category;
+
 /// The wire error enum (contract appendix A). `slip_malformed` is client-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -207,7 +209,9 @@ pub struct WireEntry {
 ///
 /// A pending device receives only `{status: "pending", alias}` (contract 4.5). A confirmed
 /// device also receives its chain entries after `after_seq`, the signed head and the
-/// device list. (Policy, tombstones and hold state are added with sync in V1-5b.)
+/// device list and whether the user is in recovery hold. Policy changes and tombstones
+/// reach devices only as chain entries, so a device applies them only after the head
+/// and the extension verify (7.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StateResponse {
@@ -230,8 +234,205 @@ pub enum StateResponse {
         more: bool,
         /// The user's current signed head (absent during recovery hold).
         head: Option<String>,
+        /// The user is in recovery hold: sharing is paused (contract 9).
+        hold: bool,
     },
 }
+
+/// Most operations in one `POST /v1/control`.
+pub const MAX_CONTROL_OPS: usize = 50;
+/// Most rows in one `POST /v1/upload`.
+pub const MAX_UPLOAD_ROWS: usize = 100;
+/// Longest date range `GET /v1/history` serves, in days.
+pub const MAX_HISTORY_DAYS: i64 = 90;
+
+/// One control operation (contract 8.1 and 8.3), idempotent by its id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ControlOp {
+    /// Switch a category on. Accepted only if `base_seq` is at least the seq of the
+    /// category's latest disable or deletion.
+    Enable {
+        /// Idempotency key.
+        op_id: Uuid,
+        /// The category.
+        category: Category,
+        /// The device's latest known policy seq for the category.
+        base_seq: u64,
+    },
+    /// Switch a category off. Always accepted.
+    Disable {
+        /// Idempotency key.
+        op_id: Uuid,
+        /// The category.
+        category: Category,
+    },
+    /// Delete shared data for a date range (both ends included). Always accepted.
+    Delete {
+        /// Idempotency key.
+        request_id: Uuid,
+        /// The category.
+        category: Category,
+        /// First date, `YYYY-MM-DD`.
+        from: String,
+        /// Last date, `YYYY-MM-DD`.
+        to: String,
+    },
+}
+
+impl ControlOp {
+    /// The operation's idempotency key.
+    #[must_use]
+    pub fn id(&self) -> Uuid {
+        match self {
+            Self::Enable { op_id, .. } | Self::Disable { op_id, .. } => *op_id,
+            Self::Delete { request_id, .. } => *request_id,
+        }
+    }
+}
+
+/// `POST /v1/control` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlRequest {
+    /// At most [`MAX_CONTROL_OPS`] operations, applied in order.
+    pub ops: Vec<ControlOp>,
+}
+
+/// What happened to one control operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ControlOutcome {
+    /// Recorded at this seq (the same seq again for a repeated id).
+    Accepted {
+        /// The entry's seq.
+        seq: u64,
+    },
+    /// The enable was older than the latest disable or deletion.
+    StaleEnable {
+        /// The seq of that disable or deletion.
+        latest_seq: u64,
+    },
+    /// Recovery hold: applied, and sequenced on release (no seq yet).
+    AcceptedPendingRecovery,
+    /// Refused.
+    Rejected {
+        /// Why.
+        error: WireError,
+    },
+}
+
+/// One result of `POST /v1/control`. (`deny_unknown_fields` cannot be combined with a
+/// flattened field; the outcome's own enum still refuses unknown tags.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlResult {
+    /// The operation's id.
+    pub id: Uuid,
+    /// The outcome.
+    #[serde(flatten)]
+    pub outcome: ControlOutcome,
+}
+
+/// `POST /v1/control` response: per-operation results and the new head (absent during
+/// hold). The entries themselves arrive with the next `GET /v1/state`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlResponse {
+    /// One per operation, in order.
+    pub results: Vec<ControlResult>,
+    /// The user's head after these operations.
+    pub head: Option<String>,
+}
+
+/// One summary row to upload (contract 8.6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UploadRow {
+    /// The category.
+    pub category: Category,
+    /// The PC that recorded it; must be the token's own device.
+    pub origin_device: Uuid,
+    /// `YYYY-MM-DD`.
+    pub local_date: String,
+    /// Higher than any revision stored for this row.
+    pub revision: u32,
+    /// The category's schema ([`super::share`]).
+    pub payload: serde_json::Value,
+}
+
+/// `POST /v1/upload` request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UploadRequest {
+    /// At most [`MAX_UPLOAD_ROWS`] rows.
+    pub rows: Vec<UploadRow>,
+}
+
+/// What happened to one upload row. A rejected row is discarded by the device, never
+/// re-stamped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RowOutcome {
+    /// Stored.
+    Accepted,
+    /// Refused.
+    Rejected {
+        /// Why.
+        error: WireError,
+    },
+}
+
+/// `POST /v1/upload` response: one outcome per row, in order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UploadResponse {
+    /// The outcomes.
+    pub results: Vec<RowOutcome>,
+}
+
+/// One row of `GET /v1/history` ("Restore from server"): read-only, keyed by origin.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryRow {
+    /// The category.
+    pub category: Category,
+    /// The PC that recorded it.
+    pub origin_device: Uuid,
+    /// `YYYY-MM-DD`.
+    pub local_date: String,
+    /// Its revision.
+    pub revision: u32,
+    /// The payload.
+    pub payload: serde_json::Value,
+}
+
+/// `GET /v1/history` response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoryResponse {
+    /// The rows, by date.
+    pub rows: Vec<HistoryRow>,
+}
+
+/// `POST /v1/receipt` request: this device's stored receipt (contract 9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptRequest {
+    /// The signed head, wire form.
+    pub head: String,
+}
+
+/// `POST /v1/receipt` response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptResponse {
+    /// Counted as this device's evidence.
+    pub recorded: bool,
+}
+
+/// The header every authenticated request from a confirmed device carries: its stored
+/// receipt (contract 7.4, "Echo").
+pub const RECEIPT_HEADER: &str = "hy-receipt";
 
 /// Most chain entries in one state response (contract 7.4).
 pub const ENTRY_PAGE: usize = 500;

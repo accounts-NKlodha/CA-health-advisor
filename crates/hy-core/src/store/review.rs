@@ -92,6 +92,18 @@ impl Store {
     /// [`Error::Invalid`] if the range is reversed or longer than [`MAX_FACT_DAYS`];
     /// otherwise a read failure.
     pub fn day_facts(&self, from: NaiveDate, to: NaiveDate) -> Result<Vec<DayFacts>> {
+        self.day_facts_for(from, to, None)
+    }
+
+    /// [`Store::day_facts`] counting only events recorded on `origin` (the shared
+    /// records: a PC never uploads another PC's entries, such as rows from an imported
+    /// backup, under its own id; T-L7).
+    pub(super) fn day_facts_for(
+        &self,
+        from: NaiveDate,
+        to: NaiveDate,
+        origin: Option<uuid::Uuid>,
+    ) -> Result<Vec<DayFacts>> {
         let span = (to - from).num_days();
         if !(0..MAX_FACT_DAYS).contains(&span) {
             return Err(Error::invalid(format!(
@@ -160,10 +172,12 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT e.local_date, e.type, e.payload FROM events e
              WHERE e.local_date BETWEEN ?1 AND ?2 AND e.type <> 'entry.retracted'
+               AND (?3 IS NULL OR e.origin_device = ?3)
                AND NOT EXISTS (SELECT 1 FROM events s WHERE s.supersedes = e.id)",
         )?;
+        let origin = origin.map(|o| o.to_string());
         let rows = stmt
-            .query_map(params![date_text(from), date_text(to)], |r| {
+            .query_map(params![date_text(from), date_text(to), origin], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,

@@ -146,6 +146,9 @@ pub enum StateOutcome {
     /// The chain or head did not verify. Nothing was applied: sharing stays paused and
     /// the receipt stays as it was (contract 7.4, "server history mismatch").
     HistoryMismatch,
+    /// The server is in recovery hold for this user (contract 7.3): no entries and no
+    /// head were sent. The receipt stays as it was and sharing is paused until release.
+    Hold,
 }
 
 fn blob32(v: Vec<u8>) -> rusqlite::Result<[u8; 32]> {
@@ -252,6 +255,18 @@ impl Store {
         tx.execute(
             "UPDATE sharing_policy SET enabled = 0, updated_at = ?1 WHERE enabled = 1",
             [to_ms(now)],
+        )?;
+        // A new link starts from nothing another link owned (also after a backup import
+        // that brought such state without a link): no policy sequence or share dates,
+        // no unsent policy operation, no sync status, notices or upload revisions.
+        tx.execute("UPDATE sharing_policy SET share_from = NULL, seq = 0", [])?;
+        tx.execute(
+            "DELETE FROM policy_ops WHERE state IN ('pending', 'pending_recovery')",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM settings WHERE key IN ('server_status', 'server_notices', 'share_revisions', 'server_regression_suppress')",
+            [],
         )?;
         tx.execute(
             "INSERT INTO server_link (id, server_key_id, pin, head_key, host, port, last_ip,
@@ -412,16 +427,32 @@ impl Store {
     /// # Errors
     /// [`Error::NotFound`] if this PC is not paired; [`Error::Sqlite`] on a write failure.
     pub fn apply_confirmed_state(&mut self, state: &StateResponse) -> Result<Option<StateOutcome>> {
+        let out = self.apply_confirmed_checked(state)?;
+        match out {
+            Some(StateOutcome::HistoryMismatch) => {
+                super::sync::record_mismatch(&self.conn, self.clock.now())?;
+            }
+            Some(StateOutcome::Hold) => super::sync::record_hold(&self.conn, self.clock.now())?,
+            _ => {}
+        }
+        Ok(out)
+    }
+
+    fn apply_confirmed_checked(&mut self, state: &StateResponse) -> Result<Option<StateOutcome>> {
         let StateResponse::Confirmed {
             confirmed_on,
             devices,
             entries,
             head,
+            hold,
             ..
         } = state
         else {
             return Ok(None);
         };
+        if *hold && head.is_none() {
+            return Ok(self.server_link()?.map(|_| StateOutcome::Hold));
+        }
         let link = self
             .server_link()?
             .ok_or_else(|| Error::NotFound("server link".into()))?;
@@ -429,7 +460,7 @@ impl Store {
         let Ok(confirmed_on) = parse_date(confirmed_on) else {
             return Ok(Some(StateOutcome::HistoryMismatch));
         };
-        // A confirmed response must carry a head (no hold exists before V1-5b).
+        // Outside a hold a confirmed response must carry a head.
         let Some(head) = head.as_deref().map(SignedHead::from_wire) else {
             return Ok(Some(StateOutcome::HistoryMismatch));
         };
@@ -544,6 +575,14 @@ impl Store {
             }
             upsert_device(&tx, d, notice_shown)?;
         }
+        super::sync::apply_entries(
+            &tx,
+            &self.ids,
+            self.device_id,
+            self.clock.now(),
+            &decoded,
+            devices,
+        )?;
         tx.commit()?;
         Ok(Some(StateOutcome::Applied {
             seq: h.seq,

@@ -78,6 +78,10 @@ interface Commands {
   server_unpair: { args: undefined; result: LinkView };
   server_notice_seen: { args: { deviceRef: string }; result: LinkView };
   server_set_address: { args: { address: string }; result: LinkView };
+  server_share_set: { args: { category: string; enabled: boolean }; result: LinkView };
+  server_notice_dismiss: { args: { id: number }; result: LinkView };
+  server_share_preview: { args: { category: string }; result: string | null };
+  server_restore: { args: undefined; result: LinkView };
 }
 
 type Name = keyof Commands;

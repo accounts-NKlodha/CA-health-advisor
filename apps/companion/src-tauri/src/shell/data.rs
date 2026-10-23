@@ -79,7 +79,7 @@ struct SetupDone {
     existing: bool,
 }
 
-const fn category_label(c: Category) -> &'static str {
+pub(crate) const fn category_label(c: Category) -> &'static str {
     match c {
         Category::Hydration => "Hydration summary",
         Category::Outcomes => "Reminder and exercise outcomes",

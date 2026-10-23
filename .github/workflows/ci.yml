@@ -165,8 +165,9 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "Pet shell self-test failed (exit code $($p.ExitCode))" }
 
       # The server's first start on Windows: keys sealed with machine-scope DPAPI, then
-      # loaded back (V1-5a). The simulator is still a skeleton until V1-5b.
-      - name: Server init and fingerprint (real DPAPI), simulator skeleton
+      # loaded back (V1-5a). Then the load simulator (V1-5b): the real server in process
+      # with 10 simulated companions over a simulated week, a backup and a restore.
+      - name: Server init and fingerprint (real DPAPI), load simulator
         run: |
           $data = Join-Path $env:RUNNER_TEMP 'hy-server-data'
           cargo run --locked -q -p hy-server -- --version

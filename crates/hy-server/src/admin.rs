@@ -115,6 +115,8 @@ pub fn router(server: Arc<Server>, port: u16) -> Router {
         .route("/slips", post(new_slip))
         .route("/devices/confirm", post(confirm))
         .route("/devices/revoke", post(revoke))
+        .route("/recovery/users", post(witness_users))
+        .route("/recovery/user", post(witness_user))
         .fallback(|| async { (StatusCode::NOT_FOUND, "Not found") })
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
@@ -512,8 +514,29 @@ async fn dashboard(State(st): State<AdminState>, headers: HeaderMap) -> Response
         grouped.join(" "),
         esc(&fingerprint_phrase(&s.keys.fingerprint))
     );
+    let mirror = if s.mirror_open() {
+        "open and written with every change"
+    } else {
+        "<strong class=\"warn\">not available: control changes are refused until it is back</strong>"
+    };
+    let backup = match crate::backup::last_backup(s).ok().flatten() {
+        Some(at) => when(at),
+        // A restored database was copied before its own backup was recorded.
+        None if crate::backup::is_restored_copy(s) => {
+            "No backup recorded in this restored copy".to_owned()
+        }
+        None => "none yet".to_owned(),
+    };
+    let _ = write!(
+        b,
+        "<p>Control-log mirror: {mirror}.</p><p>Last backup: {backup}.</p>\
+         <p class=\"note\">Backups open only with this server's backup key (<span class=\"mono\">backup.key</span> \
+         in the keys folder, protected for this PC). Keep a protected copy of the keys folder somewhere safe: \
+         if the key is lost, every existing backup is permanently unrecoverable.</p>"
+    );
     if users.iter().any(|u| u.hold) {
         b.push_str("<p class=\"warn\">One or more users are in recovery hold: their shared history is paused.</p>");
+        recovery_section(&mut b, s, &csrf, now);
     }
 
     b.push_str(
@@ -570,11 +593,21 @@ async fn dashboard(State(st): State<AdminState>, headers: HeaderMap) -> Response
                 ),
             };
             let seen = d.last_seen.map_or_else(|| "never".to_owned(), when);
+            let regressed = d
+                .regressed_at
+                .filter(|_| d.state == DeviceState::Active)
+                .map(|at| {
+                    format!(
+                        " <strong>(presented an older receipt {}: a restored or copied PC)</strong>",
+                        when(at)
+                    )
+                })
+                .unwrap_or_default();
             let unseen = d.state == DeviceState::Active
                 && now - d.last_seen.unwrap_or(d.created_at) > UNSEEN_FLAG_MS;
             let _ = write!(
                 pcs,
-                "<div>{} - {state}; last seen {seen}{}",
+                "<div>{} - {state}; last seen {seen}{}{regressed}",
                 esc(&d.label),
                 if unseen {
                     " <strong>(unseen for over 14 days)</strong>"
@@ -626,6 +659,152 @@ async fn dashboard(State(st): State<AdminState>, headers: HeaderMap) -> Response
     }
     b.push_str("</table>");
     page("Overview", &b)
+}
+
+/// The recovery-hold section: what each held user still needs, and the witness forms
+/// (contract 9). Elapsed time is never evidence, so no form releases a user directly.
+fn recovery_section(b: &mut String, s: &Server, csrf: &str, now: i64) {
+    let Ok(rows) = s.hold_rows() else {
+        b.push_str("<p class=\"warn\">The recovery state could not be read.</p>");
+        return;
+    };
+    b.push_str(
+        "<h2>Recovery hold</h2>\
+         <p>The database was restored or rolled back. A user is released only when every one of their confirmed PCs \
+         has checked in with its own token and you have confirmed both the list of users and that user's PCs. \
+         A user still incomplete after 7 days has their shared history discarded; time alone never releases anyone.</p>",
+    );
+    if s.users_witnessed() {
+        b.push_str("<p>The list of users: confirmed.</p>");
+    } else {
+        let _ = write!(
+            b,
+            "<p>Is the list of users below complete and correct, with no user missing or added?</p>\
+             <form method=\"post\" action=\"/recovery/users\">{csrf}<input type=\"hidden\" name=\"right\" value=\"yes\"><button>Yes, the list is right</button></form> \
+             <form method=\"post\" action=\"/recovery/users\">{csrf}<input type=\"hidden\" name=\"right\" value=\"no\"><label><input type=\"checkbox\" name=\"sure\" value=\"yes\" required> I understand this cannot be undone</label> <button>No: discard every user's shared history</button></form>"
+        );
+    }
+    b.push_str("<table><tr><th>User</th><th>Hold since</th><th>Discarded at</th><th>PCs (check-in)</th><th>Your confirmation</th></tr>");
+    for r in rows {
+        let uid = hex(&r.user_id);
+        let mut pcs = String::new();
+        for (dev, label, state, seq) in &r.devices {
+            let status = match (state, seq) {
+                (DeviceState::Pending, _) => {
+                    "<strong>waiting for confirmation</strong>: it can never check in; reject it (the user re-pairs after release)"
+                        .to_owned()
+                }
+                (_, Some(seq)) => format!("checked in (entry {seq})"),
+                (_, None) => "<strong>missing</strong>".to_owned(),
+            };
+            let _ = write!(
+                pcs,
+                "<div>{} <span class=\"mono\">{}</span>: {status}</div>",
+                esc(label),
+                short(dev)
+            );
+        }
+        let witness = if r.witnessed {
+            "confirmed".to_owned()
+        } else {
+            format!(
+                "<form method=\"post\" action=\"/recovery/user\">{csrf}<input type=\"hidden\" name=\"user\" value=\"{uid}\"><input type=\"hidden\" name=\"right\" value=\"yes\"><button>These are all their PCs</button></form> \
+                 <form method=\"post\" action=\"/recovery/user\">{csrf}<input type=\"hidden\" name=\"user\" value=\"{uid}\"><input type=\"hidden\" name=\"right\" value=\"no\"><label><input type=\"checkbox\" name=\"sure\" value=\"yes\" required> I understand</label> <button>Not right: discard</button></form>"
+            )
+        };
+        let deadline = r.started_at + crate::recovery::HOLD_MAX_MS;
+        let _ = write!(
+            b,
+            "<tr><td>{}</td><td>{}</td><td>{}{}</td><td>{}</td><td>{witness}</td></tr>",
+            esc(&r.alias),
+            when(r.started_at),
+            when(deadline),
+            if deadline - now < 24 * 3600 * 1000 {
+                " <strong>(within a day)</strong>"
+            } else {
+                ""
+            },
+            if pcs.is_empty() {
+                "none".to_owned()
+            } else {
+                pcs
+            },
+        );
+    }
+    b.push_str("</table>");
+}
+
+#[derive(Deserialize)]
+struct WitnessForm {
+    csrf: String,
+    right: String,
+    #[serde(default)]
+    user: String,
+    /// Required for a "not right" answer, which discards.
+    #[serde(default)]
+    sure: String,
+}
+
+impl WitnessForm {
+    /// The answer: yes, or a confirmed no. Anything else changes nothing.
+    fn answer(&self) -> Option<bool> {
+        match (self.right.as_str(), self.sure.as_str()) {
+            ("yes", _) => Some(true),
+            ("no", "yes") => Some(false),
+            _ => None,
+        }
+    }
+}
+
+fn not_confirmed() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        page("Not done", "<p class=\"warn\">Tick the box to confirm a discard. Nothing was changed.</p><p><a href=\"/\">Back</a></p>"),
+    )
+        .into_response()
+}
+
+async fn witness_users(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Form(f): Form<WitnessForm>,
+) -> Response {
+    let Some(cookie) = session(&st.server, &headers) else {
+        return to_login();
+    };
+    if !csrf_ok(&cookie, &f.csrf) {
+        return (StatusCode::FORBIDDEN, "Form expired. Reload the page.").into_response();
+    }
+    let Some(right) = f.answer() else {
+        return not_confirmed();
+    };
+    match st.server.witness_users(right) {
+        Ok(()) => Redirect::to("/").into_response(),
+        Err(e) => admin_error(e),
+    }
+}
+
+async fn witness_user(
+    State(st): State<AdminState>,
+    headers: HeaderMap,
+    Form(f): Form<WitnessForm>,
+) -> Response {
+    let Some(cookie) = session(&st.server, &headers) else {
+        return to_login();
+    };
+    if !csrf_ok(&cookie, &f.csrf) {
+        return (StatusCode::FORBIDDEN, "Form expired. Reload the page.").into_response();
+    }
+    let Some(user) = parse_id(&f.user) else {
+        return admin_error(AdminError::NotFound);
+    };
+    let Some(right) = f.answer() else {
+        return not_confirmed();
+    };
+    match st.server.witness_user(&user, right) {
+        Ok(()) => Redirect::to("/").into_response(),
+        Err(e) => admin_error(e),
+    }
 }
 
 fn admin_error(e: AdminError) -> Response {

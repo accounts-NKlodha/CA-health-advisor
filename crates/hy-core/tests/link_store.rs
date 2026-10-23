@@ -103,6 +103,7 @@ impl FakeServer {
             entries: Self::wire(&self.entries[usize::try_from(after).unwrap()..]),
             more: false,
             head: Some(self.head()),
+            hold: false,
         }
     }
 }
@@ -462,4 +463,125 @@ fn importing_a_backup_onto_a_confirmed_pc_unpairs_it_in_the_same_transaction() {
         s.store.consent_log().unwrap().last().unwrap().kind,
         ConsentKind::Unpaired
     );
+}
+
+#[test]
+fn t_s17_a_forged_policy_entry_starts_nothing_and_stops_uploads() {
+    use hy_core::protocol::chain::day_number;
+    let mut s = setup();
+    s.server.push(EntryBody::DeviceConfirmed {
+        device_ref: *s.me.as_bytes(),
+    });
+    let state = s.server.state(0, vec![device(s.me, "PC-1")]);
+    assert!(matches!(
+        s.store.apply_confirmed_state(&state).unwrap(),
+        Some(StateOutcome::Applied { .. })
+    ));
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 23).unwrap();
+    // The genuine entry enables hydration from today; the copy delivered to this PC is
+    // altered to start 30 days earlier, under the genuine head.
+    let genuine = EntryBody::Policy {
+        category: Category::Hydration,
+        enabled: true,
+        share_from: day_number(today),
+        op_id: [5; 16],
+        device_ref: [11; 16],
+    };
+    s.server.push(genuine);
+    let mut state = s.server.state(2, vec![device(s.me, "PC-1")]);
+    let StateResponse::Confirmed { entries, .. } = &mut state else {
+        panic!()
+    };
+    let forged = EntryBody::Policy {
+        category: Category::Hydration,
+        enabled: true,
+        share_from: day_number(today) - 30,
+        op_id: [5; 16],
+        device_ref: [11; 16],
+    };
+    entries[0].body = b64(&forged.encode());
+    s.store
+        .append_event(
+            hy_core::schema::NewEvent::manual(hy_core::schema::EventPayload::WaterLogged {
+                amount_ml: 250,
+            })
+            .at(Utc.with_ymd_and_hms(2026, 10, 23, 5, 0, 0).unwrap()),
+        )
+        .unwrap();
+    assert_mismatch_changes_nothing(&mut s, &state);
+    assert!(!s.store.sharing_policy(Category::Hydration).unwrap().enabled);
+    assert!(
+        s.store.server_status().unwrap().mismatch,
+        "persisted for the UI"
+    );
+    assert_eq!(s.store.queue_share_records(today).unwrap(), 0);
+    assert!(s.store.outbox().unwrap().is_empty());
+    // The genuine extension then verifies and clears the mismatch.
+    let state = s.server.state(2, vec![device(s.me, "PC-1")]);
+    assert!(matches!(
+        s.store.apply_confirmed_state(&state).unwrap(),
+        Some(StateOutcome::Applied { .. })
+    ));
+    assert!(s.store.sharing_policy(Category::Hydration).unwrap().enabled);
+    assert!(!s.store.server_status().unwrap().mismatch);
+}
+
+#[test]
+fn nothing_queued_under_one_link_reaches_the_next_after_a_backup_import() {
+    use hy_core::schema::DateRange;
+    let mut s = setup();
+    s.server.push(EntryBody::DeviceConfirmed {
+        device_ref: *s.me.as_bytes(),
+    });
+    s.store
+        .apply_confirmed_state(&s.server.state(0, vec![device(s.me, "PC-1")]))
+        .unwrap();
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 23).unwrap();
+    let op = s
+        .store
+        .request_enable(Category::Hydration, "notice-1")
+        .unwrap();
+    s.store.accept_enable(op, 50, today).unwrap();
+    // Offline under link A: an enable and a deletion wait to be sent.
+    s.store
+        .request_enable(Category::PhoneReports, "notice-1")
+        .unwrap();
+    s.store
+        .record_deletion(
+            Category::Hydration,
+            DateRange {
+                from: today,
+                to: today,
+            },
+        )
+        .unwrap();
+    assert_eq!(s.store.pending_control_ops().unwrap().len(), 2);
+    // A backup of this PC, taken while paired, is imported: the link goes.
+    let contents = s.store.backup_contents().unwrap();
+    s.store.import_contents(&contents).unwrap();
+    assert!(s.store.server_link().unwrap().is_none());
+    // Paired to another server and user (link B).
+    let b = NewLink {
+        pin: [4; 32],
+        head_key: [5; 32],
+        host: "other-pc".into(),
+        port: 8443,
+        last_ip: None,
+        user_id: Uuid::from_bytes([21; 16]),
+        device_ref: Uuid::from_bytes([22; 16]),
+        alias: "u2".into(),
+        token_blob: vec![0; 64],
+    };
+    s.store.save_pairing(&b, "notice-1").unwrap();
+    assert!(
+        s.store.pending_control_ops().unwrap().is_empty(),
+        "link A's enable and deletion are never sent under link B"
+    );
+    for &c in Category::ALL {
+        let p = s.store.sharing_policy(c).unwrap();
+        assert!(!p.enabled && p.seq == 0 && p.share_from.is_none(), "{c:?}");
+    }
+    assert!(!s.store.server_status().unwrap().mismatch);
+    // The deletion still blocks local re-upload of that day (tombstones are permanent).
+    assert!(s.store.outbox().unwrap().is_empty());
 }

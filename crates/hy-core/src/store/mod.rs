@@ -37,11 +37,13 @@ mod coach;
 mod link;
 mod prefs;
 mod review;
+mod sync;
 #[cfg(test)]
 mod tests;
 
 pub use coach::{ActivityDay, CoachCommit, SavedCoachState};
 pub use link::{NewLink, PairedDevice, ServerLink, StateOutcome};
+pub use sync::{NoticeKind, REMOTE_ENABLE_NOTICE, SHARE_LOOKBACK_DAYS, ServerNotice, ServerStatus};
 
 /// Setting keys with typed accessors.
 pub mod keys {
@@ -1273,8 +1275,8 @@ impl Store {
         )?;
         let op_id = self.ids.next(now);
         tx.execute(
-            "INSERT INTO policy_ops (op_id, local_seq, category, kind, base_seq, state, server_seq, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'disable', ?4, 'pending', NULL, ?5, ?5)",
+            "INSERT INTO policy_ops (op_id, local_seq, category, kind, base_seq, state, server_seq, created_at, updated_at, link_device)
+             VALUES (?1, ?2, ?3, 'disable', ?4, 'pending', NULL, ?5, ?5, (SELECT device_ref FROM server_link))",
             params![
                 op_id.to_string(),
                 next_policy_op_seq(&tx)?,
@@ -1309,8 +1311,8 @@ impl Store {
         let policy = read_policy(&tx, category)?;
         let op_id = self.ids.next(now);
         tx.execute(
-            "INSERT INTO policy_ops (op_id, local_seq, category, kind, base_seq, state, server_seq, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'enable', ?4, 'pending', NULL, ?5, ?5)",
+            "INSERT INTO policy_ops (op_id, local_seq, category, kind, base_seq, state, server_seq, created_at, updated_at, link_device)
+             VALUES (?1, ?2, ?3, 'enable', ?4, 'pending', NULL, ?5, ?5, (SELECT device_ref FROM server_link))",
             params![
                 op_id.to_string(),
                 next_policy_op_seq(&tx)?,
@@ -1430,8 +1432,8 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let request_id = self.ids.next(now);
         tx.execute(
-            "INSERT INTO tombstones (request_id, category, from_date, to_date, state, server_seq, created_at)
-             VALUES (?1, ?2, ?3, ?4, 'pending', NULL, ?5)",
+            "INSERT INTO tombstones (request_id, category, from_date, to_date, state, server_seq, created_at, link_device)
+             VALUES (?1, ?2, ?3, ?4, 'pending', NULL, ?5, (SELECT device_ref FROM server_link))",
             params![
                 request_id.to_string(),
                 category,

@@ -1742,6 +1742,11 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "hy-core",
+ "hy-server",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

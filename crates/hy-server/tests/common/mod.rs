@@ -18,7 +18,9 @@ use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
 use hy_core::clock::{Clock, ManualClock};
-use hy_core::link::flow::{DeviceFacts, FlowError, Redeemed, fetch_state, redeem_slip};
+use hy_core::link::flow::{
+    DeviceFacts, FlowError, Redeemed, SyncOutcome, fetch_state, redeem_slip, sync_once,
+};
 use hy_core::link::{LinkClient, LinkOptions, RawResponse};
 use hy_core::protocol::slip::Slip;
 use hy_core::protocol::wire::StateResponse;
@@ -26,6 +28,7 @@ use hy_core::secret::{EphemeralVault, Secret, TokenVault};
 use hy_core::store::{NewLink, Store};
 use hy_server::keys::{ServerKeys, UnprotectedForTests};
 use hy_server::serve::{self, Limits};
+use hy_server::server::Faults;
 use hy_server::{Config, Server, db};
 use rustls::ServerConfig;
 use tokio::net::TcpListener;
@@ -88,6 +91,10 @@ pub struct Harness {
     pub api: SocketAddr,
     pub admin: SocketAddr,
     pub dir: PathBuf,
+    /// The control-log mirror (a sibling folder of `dir`, standing in for another volume).
+    pub mirror: PathBuf,
+    /// What the startup comparison found.
+    pub startup: hy_server::recovery::Startup,
     _tmp: Option<tempfile::TempDir>,
     shutdown: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
@@ -102,33 +109,81 @@ impl Harness {
     /// A fresh server with these settings.
     pub async fn start_with(config: Config, limits: Limits) -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().to_path_buf();
+        let dir = tmp.path().join("data");
+        std::fs::create_dir_all(&dir).unwrap();
         let clock = Arc::new(ManualClock::new(start_time()));
         let mut h = Self::open(&dir, clock, config, limits).await;
         h._tmp = Some(tmp);
         h
     }
 
-    /// Open (or create) the server in `dir`, as a service start does.
-    pub async fn open(
+    /// The default mirror for a data folder: `../mirror/control.mirror`.
+    pub fn mirror_for(dir: &Path) -> PathBuf {
+        let m = dir.parent().unwrap().join("mirror");
+        std::fs::create_dir_all(&m).unwrap();
+        m.join("control.mirror")
+    }
+
+    /// Open (or create) the server in `dir`, as a service start does, with the default
+    /// mirror.
+    pub async fn open(dir: &Path, clock: Arc<ManualClock>, config: Config, limits: Limits) -> Self {
+        let mirror = Self::mirror_for(dir);
+        Self::open_with(dir, &mirror, clock, config, limits)
+            .await
+            .unwrap()
+    }
+
+    /// Open the server in `dir` with the mirror at `mirror`; runs the startup comparison
+    /// (contract 7.3) before serving and returns its refusal, if any.
+    pub async fn open_with(
         dir: &Path,
+        mirror: &Path,
+        clock: Arc<ManualClock>,
+        config: Config,
+        limits: Limits,
+    ) -> Result<Self, String> {
+        Self::open_full(dir, mirror, clock, config, limits, Faults::default(), 0).await
+    }
+
+    /// As [`Harness::open_with`], with faults injected before the startup comparison,
+    /// listening on `port` for the API (0: any free port). A restart keeps the port, as
+    /// the real service does, so paired PCs reach the server again at their known
+    /// address.
+    pub async fn open_full(
+        dir: &Path,
+        mirror: &Path,
         clock: Arc<ManualClock>,
         mut config: Config,
         limits: Limits,
-    ) -> Self {
+        faults: Faults,
+        port: u16,
+    ) -> Result<Self, String> {
         let keys = if ServerKeys::exist(dir) {
             ServerKeys::load(dir, &UnprotectedForTests).unwrap()
         } else {
             ServerKeys::create(dir, &UnprotectedForTests, &config.host_name, 2026).unwrap()
         };
         let conn = db::open(&dir.join("server.db")).unwrap();
-        let api_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let mut tries = 0;
+        let api_listener = loop {
+            match TcpListener::bind(("127.0.0.1", port)).await {
+                Ok(l) => break l,
+                Err(e) if tries < 50 => {
+                    tries += 1;
+                    let _ = e;
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(e) => panic!("rebinding the API port: {e}"),
+            }
+        };
         let admin_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let api = api_listener.local_addr().unwrap();
         let admin = admin_listener.local_addr().unwrap();
         config.api_port = api.port();
         let clock_dyn: Arc<dyn Clock> = clock.clone();
         let server = Arc::new(Server::new(conn, keys, clock_dyn, config));
+        server.inject_faults(faults);
+        let startup = server.startup(mirror)?;
         let (tx, rx) = watch::channel(false);
         let s1 = server.clone();
         let rx1 = rx.clone();
@@ -141,16 +196,143 @@ impl Harness {
         let t2 = tokio::spawn(async move {
             serve::serve_admin(admin_listener, s2, rx).await.unwrap();
         });
-        Self {
+        Ok(Self {
             server,
             clock,
             api,
             admin,
             dir: dir.to_path_buf(),
+            mirror: mirror.to_path_buf(),
+            startup,
             _tmp: None,
             shutdown: tx,
             tasks: vec![t1, t2],
-        }
+        })
+    }
+
+    /// The test backup key.
+    pub fn backup_key() -> hy_server::backup::BackupKey {
+        hy_server::backup::BackupKey::from_bytes([7; 32])
+    }
+
+    /// Write a server backup now (into `../backups`).
+    pub fn backup(&self) -> PathBuf {
+        let dir = self.dir.parent().unwrap().join("backups");
+        hy_server::backup::write(&self.server, &dir, &Self::backup_key())
+            .unwrap()
+            .path
+    }
+
+    /// Stop, restore `file` as `hy-server restore` does, and start again (the startup
+    /// comparison runs against the same mirror).
+    pub async fn restore(self, file: &Path) -> Self {
+        self.restore_with(file, Faults::default()).await
+    }
+
+    /// As [`Harness::restore`], with faults injected before the startup comparison.
+    pub async fn restore_with(self, file: &Path, faults: Faults) -> Self {
+        self.restore_full(file, faults, |_| {}).await
+    }
+
+    /// As [`Harness::restore`], letting `change` alter the mirror first (an old disk
+    /// image restored with the database).
+    pub async fn restore_after(self, file: &Path, change: impl FnOnce(&Path)) -> Self {
+        self.restore_full(file, Faults::default(), change).await
+    }
+
+    async fn restore_full(self, file: &Path, faults: Faults, change: impl FnOnce(&Path)) -> Self {
+        let mirror = self.mirror.clone();
+        let config = self.server.config.clone();
+        let port = self.api.port();
+        let (tmp, dir, clock) = self.stop().await;
+        let now = clock.now().timestamp_millis();
+        hy_server::backup::restore(&dir, file, &Self::backup_key(), now).unwrap();
+        change(&mirror);
+        let mut h = Self::open_full(&dir, &mirror, clock, config, test_limits(), faults, port)
+            .await
+            .unwrap();
+        h._tmp = tmp;
+        h
+    }
+
+    /// Stop, let `change` alter the folders (data folder, mirror path), and start again.
+    pub async fn restart_after(self, change: impl FnOnce(&Path, &Path)) -> Self {
+        let mirror = self.mirror.clone();
+        let config = self.server.config.clone();
+        let port = self.api.port();
+        let (tmp, dir, clock) = self.stop().await;
+        change(&dir, &mirror);
+        let mut h = Self::open_full(
+            &dir,
+            &mirror,
+            clock,
+            config,
+            test_limits(),
+            Faults::default(),
+            port,
+        )
+        .await
+        .unwrap();
+        h._tmp = tmp;
+        h
+    }
+
+    /// The user's control-log tail and `mirror_hwm` (T-J6: equal before uploads).
+    pub fn tail_and_hwm(&self, user: &[u8; 16]) -> (i64, i64) {
+        let conn = self.server.db();
+        let tail = conn
+            .query_row(
+                "SELECT coalesce(max(seq), 0) FROM control_log WHERE user_id = ?1",
+                [user.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let hwm = conn
+            .query_row(
+                "SELECT coalesce((SELECT seq FROM mirror_hwm WHERE user_id = ?1), 0)",
+                [user.as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        (tail, hwm)
+    }
+
+    /// Audit rows of one event.
+    pub fn audits(&self, event: &str) -> i64 {
+        self.server
+            .db()
+            .query_row(
+                "SELECT COUNT(*) FROM audit WHERE event = ?1",
+                [event],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// Stop and open again on the same folders (a service restart).
+    pub async fn restart(self) -> Self {
+        let mirror = self.mirror.clone();
+        let config = self.server.config.clone();
+        let port = self.api.port();
+        let (tmp, dir, clock) = self.stop().await;
+        let mut h = Self::open_full(
+            &dir,
+            &mirror,
+            clock,
+            config,
+            test_limits(),
+            Faults::default(),
+            port,
+        )
+        .await
+        .unwrap();
+        h._tmp = tmp;
+        h
+    }
+
+    /// Keep `tmp` (returned by [`Harness::stop`]) alive as long as this server runs.
+    pub fn keep(&mut self, tmp: Option<tempfile::TempDir>) {
+        self._tmp = tmp;
     }
 
     /// Stop the listeners and close the database; returns the folder (kept alive) and
@@ -210,7 +392,7 @@ impl Harness {
             user_id: *r.link.user_id.as_bytes(),
             token,
             link: r.link.clone(),
-            vault,
+            vault: Arc::new(vault),
         };
         Ok((r, device))
     }
@@ -229,6 +411,34 @@ impl Harness {
         d
     }
 
+    /// A companion PC for `user`: a store whose device id is the origin it pairs with,
+    /// paired and confirmed (not yet synced).
+    pub async fn pc(&self, user: &[u8; 16], label: &str) -> Pc {
+        let pc = self.pending_pc(user, label).await;
+        self.confirm(&pc.dev);
+        pc
+    }
+
+    /// As [`Harness::pc`], left pending.
+    pub async fn pending_pc(&self, user: &[u8; 16], label: &str) -> Pc {
+        self.pending_pc_with(&self.slip(user), label).await
+    }
+
+    /// A pending PC paired with a given slip.
+    pub async fn pending_pc_with(&self, slip: &Slip, label: &str) -> Pc {
+        let clock: Arc<dyn Clock> = self.clock.clone();
+        let mut store = Store::open_in_memory(clock).unwrap();
+        let (_, dev) = self
+            .pair_as(slip, label, store.device_id(), opts())
+            .await
+            .unwrap();
+        store.save_pairing(&dev.link, "v1-5-notice-1").unwrap();
+        Pc {
+            dev,
+            store: std::sync::Mutex::new(store),
+        }
+    }
+
     /// Count rows of a server table.
     pub fn count(&self, table: &str) -> i64 {
         self.server
@@ -244,7 +454,7 @@ pub struct Device {
     pub user_id: [u8; 16],
     pub token: Secret<[u8; 32]>,
     pub link: NewLink,
-    pub vault: EphemeralVault,
+    pub vault: Arc<EphemeralVault>,
 }
 
 impl Device {
@@ -263,9 +473,57 @@ impl Device {
     ) -> Result<Option<hy_core::store::StateOutcome>, FlowError> {
         let link = store.server_link().unwrap().expect("paired");
         let after = store.head_receipt().unwrap().map_or(0, |r| r.head.seq);
-        let fetched = fetch_state(&link, after, &self.vault, opts()).await?;
+        let fetched = fetch_state(&link, after, &*self.vault, opts()).await?;
         store.set_link_last_ip(&fetched.addr.to_string()).unwrap();
         Ok(store.apply_confirmed_state(&fetched.state).unwrap())
+    }
+}
+
+/// A companion PC: its pairing and its store.
+pub struct Pc {
+    pub dev: Device,
+    pub store: std::sync::Mutex<Store>,
+}
+
+impl Pc {
+    /// Run `f` with the store.
+    pub fn with<R>(&self, f: impl FnOnce(&mut Store) -> R) -> R {
+        f(&mut self.store.lock().unwrap())
+    }
+
+    /// One whole companion sync.
+    pub async fn sync(&self) -> Result<SyncOutcome, FlowError> {
+        let today = self.with(|s| s.today().unwrap());
+        sync_once(&self.store, &*self.dev.vault, opts(), today).await
+    }
+
+    /// One whole companion sync that must succeed.
+    pub async fn synced(&self) -> SyncOutcome {
+        self.sync().await.unwrap()
+    }
+
+    /// Log water on this PC at `at`.
+    pub fn water(&self, at: chrono::DateTime<Utc>, ml: u32) {
+        self.with(|s| {
+            s.append_event(
+                hy_core::schema::NewEvent::manual(hy_core::schema::EventPayload::WaterLogged {
+                    amount_ml: ml,
+                })
+                .at(at),
+            )
+            .unwrap();
+        });
+    }
+
+    /// A client for this PC that echoes its stored receipt.
+    pub fn client(&self, h: &Harness) -> LinkClient {
+        let receipt = self.with(|s| s.head_receipt().unwrap().map(|r| r.to_wire()));
+        h.client(1).with_receipt(receipt)
+    }
+
+    /// This PC's origin-device id.
+    pub fn origin(&self) -> Uuid {
+        self.with(|s| s.device_id())
     }
 }
 

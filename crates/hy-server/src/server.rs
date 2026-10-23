@@ -6,6 +6,7 @@
 //! revocation takes effect on the next request (6.3).
 
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -33,6 +34,7 @@ use crate::chain;
 use crate::db::{h32, id16};
 use crate::keys::ServerKeys;
 use crate::logging::{self, V};
+use crate::mirror::{Mirror, MirrorFault};
 
 /// Server settings.
 #[derive(Debug, Clone)]
@@ -238,6 +240,8 @@ pub struct DeviceRow {
     pub last_seen: Option<i64>,
     /// Why it was revoked.
     pub revoke_reason: Option<String>,
+    /// When it last presented an older receipt than before (a restored or cloned PC).
+    pub regressed_at: Option<i64>,
 }
 
 /// One user for the admin page.
@@ -253,9 +257,33 @@ pub struct UserRow {
     pub outstanding_slips: i64,
 }
 
+/// Faults the crash-point tests inject (T-J1 to T-J6, T-S16). Each fires once. No
+/// setting, flag, endpoint or admin action of the product reaches them.
+#[doc(hidden)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Faults {
+    /// The next control transaction is rolled back instead of committed (a crash
+    /// mid-transaction).
+    pub fail_before_commit: bool,
+    /// The next mirror step stops after the append and fsync, before `mirror_hwm` and
+    /// the acknowledgement (a crash in between).
+    pub stop_after_mirror: bool,
+    /// The next replayed `pairing` entry is applied without its token verifier.
+    pub replay_without_verifier: bool,
+    /// The next control operation stops after its commit, before the mirror append (a
+    /// crash in between).
+    pub crash_after_commit: bool,
+    /// The next state response that carries entries has its first entry altered, as a
+    /// forked or tampering server would send (the companion must refuse it).
+    pub tamper_next_entries: bool,
+}
+
 /// The server.
 pub struct Server {
     db: Mutex<Connection>,
+    mirror: Mutex<Option<Mirror>>,
+    mirror_path: Mutex<Option<PathBuf>>,
+    faults: Mutex<Faults>,
     /// The server's keys.
     pub keys: ServerKeys,
     /// The clock (injected in tests).
@@ -296,6 +324,9 @@ impl Server {
     pub fn new(conn: Connection, keys: ServerKeys, clock: Arc<dyn Clock>, config: Config) -> Self {
         Self {
             db: Mutex::new(conn),
+            mirror: Mutex::new(None),
+            mirror_path: Mutex::new(None),
+            faults: Mutex::new(Faults::default()),
             keys,
             clock,
             config,
@@ -330,18 +361,55 @@ impl Server {
         self.db.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn now_ms(&self) -> i64 {
+    pub(crate) fn now_ms(&self) -> i64 {
         ms(self.clock.now())
     }
 
-    fn random<const N: usize>(&self) -> Result<[u8; N], NoRandom> {
+    /// The open mirror, if any (lock order: the database first, then the mirror).
+    pub(crate) fn mirror_guard(&self) -> MutexGuard<'_, Option<Mirror>> {
+        self.mirror.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn mirror_path_guard(&self) -> MutexGuard<'_, Option<PathBuf>> {
+        self.mirror_path
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Take a one-shot fault.
+    pub(crate) fn take_fault(&self, pick: impl FnOnce(&mut Faults) -> &mut bool) -> bool {
+        let mut f = self.faults.lock().unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(pick(&mut f))
+    }
+
+    /// Inject faults (crash-point tests only).
+    #[doc(hidden)]
+    pub fn inject_faults(&self, faults: Faults) {
+        *self.faults.lock().unwrap_or_else(PoisonError::into_inner) = faults;
+    }
+
+    /// Inject a mirror fault (tests only).
+    #[doc(hidden)]
+    pub fn set_mirror_fault(&self, fault: Option<MirrorFault>) {
+        if let Some(m) = self.mirror_guard().as_mut() {
+            m.fault = fault;
+        }
+    }
+
+    /// The mirror is open and writable as far as the server knows.
+    #[must_use]
+    pub fn mirror_open(&self) -> bool {
+        self.mirror_guard().is_some()
+    }
+
+    pub(crate) fn random<const N: usize>(&self) -> Result<[u8; N], NoRandom> {
         let mut out = [0u8; N];
         // Fail closed: a value the generator did not fill is never issued.
         self.rng.fill(&mut out)?;
         Ok(out)
     }
 
-    fn user_zone(conn: &Connection, user: &[u8; 16]) -> rusqlite::Result<UserZone> {
+    pub(crate) fn user_zone(conn: &Connection, user: &[u8; 16]) -> rusqlite::Result<UserZone> {
         let zone: String = conn.query_row(
             "SELECT zone FROM users WHERE user_id = ?1",
             [user.as_slice()],
@@ -419,7 +487,7 @@ impl Server {
         .map_err(|_| AdminError::Storage)
     }
 
-    fn revoke_in(
+    pub(crate) fn revoke_in(
         &self,
         conn: &Connection,
         device: &[u8; 16],
@@ -512,6 +580,7 @@ impl Server {
             None,
         )?;
         tx.commit()?;
+        self.mirror_sync(&conn, &user);
         logging::log(
             "device_confirmed",
             &[
@@ -553,6 +622,7 @@ impl Server {
         };
         audit::record(&tx, now, event, Some(&user), Some(device), None)?;
         tx.commit()?;
+        self.mirror_sync(&conn, &user);
         logging::log(
             "device_revoked",
             &[
@@ -561,6 +631,10 @@ impl Server {
                 ("reason", V::Name("admin")),
             ],
         );
+        drop(conn);
+        // During hold the revoked device leaves the evidence set: the user may now be
+        // complete (contract T-S26).
+        self.try_release(&user)?;
         Ok(())
     }
 
@@ -597,6 +671,7 @@ impl Server {
             None,
         )?;
         tx.commit()?;
+        self.mirror_sync(&conn, user);
         Ok(pending.len())
     }
 
@@ -633,7 +708,8 @@ impl Server {
     pub fn devices(&self) -> Result<Vec<DeviceRow>, AdminError> {
         let conn = self.db();
         let mut stmt = conn.prepare(
-            "SELECT device_ref, user_id, label, state, created_at, confirmed_at, last_seen, revoke_reason
+            "SELECT device_ref, user_id, label, state, created_at, confirmed_at, last_seen, revoke_reason,
+                    regressed_at
              FROM devices ORDER BY created_at, device_ref",
         )?;
         let rows = stmt
@@ -649,6 +725,7 @@ impl Server {
                     confirmed_at: r.get(5)?,
                     last_seen: r.get(6)?,
                     revoke_reason: r.get(7)?,
+                    regressed_at: r.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -844,6 +921,7 @@ impl Server {
                 Some(ip),
             )?;
             tx.commit()?;
+            self.mirror_sync(&conn, &user);
             Ok((user, alias, device, token, entry.seq))
         })();
         match outcome {
@@ -982,25 +1060,25 @@ impl Server {
                 .collect::<rusqlite::Result<Vec<_>>>()
             })
             .map_err(store_err)?;
-        let mut entries = chain::entries_after(&conn, &dev.user_id, after_seq, ENTRY_PAGE + 1)
-            .map_err(store_err)?;
-        let more = entries.len() > ENTRY_PAGE;
-        entries.truncate(ENTRY_PAGE);
-        // No new head is sent to a user in recovery hold (architecture 5.3).
-        let head = if hold {
-            None
+        // No entries and no new head for a user in recovery hold (architecture 5.3). A
+        // head never covers an entry the mirror does not hold: it is issued at
+        // `mirror_hwm`, after trying to mirror anything outstanding.
+        let (entries, more, head) = if hold {
+            (Vec::new(), false, None)
         } else {
-            Some(
-                chain::signed_head(
-                    &conn,
-                    &self.keys,
-                    &dev.user_id,
-                    u64::try_from(now).unwrap_or(0),
-                )
-                .map_err(store_err)?
-                .to_wire(),
-            )
+            self.mirror_sync(&conn, &dev.user_id);
+            let upto = Self::mirrored_seq(&conn, &dev.user_id);
+            let mut entries =
+                chain::entries_after(&conn, &dev.user_id, after_seq, upto, ENTRY_PAGE + 1)
+                    .map_err(store_err)?;
+            let more = entries.len() > ENTRY_PAGE;
+            entries.truncate(ENTRY_PAGE);
+            if !entries.is_empty() && self.take_fault(|f| &mut f.tamper_next_entries) {
+                entries[0].at_ms += 1;
+            }
+            (entries, more, self.mirrored_head(&conn, &dev.user_id))
         };
+        let _ = now;
         Ok(StateResponse::Confirmed {
             alias,
             confirmed_on,
@@ -1008,6 +1086,7 @@ impl Server {
             entries,
             more,
             head,
+            hold,
         })
     }
 
@@ -1038,6 +1117,7 @@ impl Server {
             tx.commit()
         })();
         res.map_err(|_| WireError::CannotRecord)?;
+        self.mirror_sync(&conn, &dev.user_id);
         logging::log(
             "device_revoked",
             &[
@@ -1089,9 +1169,14 @@ impl Server {
             [now - SESSION_IDLE_MS],
         )?;
         tx.commit()?;
+        for (_, u) in &expired {
+            self.mirror_sync(&conn, u);
+        }
+        drop(conn);
         if !expired.is_empty() {
             logging::log("pending_expired", &[("count", V::N(expired.len() as u64))]);
         }
+        self.recovery_maintenance()?;
         Ok(expired.len())
     }
 }

@@ -464,11 +464,15 @@ fn t_s8_another_users_ids_anywhere_in_a_request_change_nothing() {
                     let devs: Vec<_> = devices.into_iter().map(|d| (d.device_ref, d.label, d.confirmed)).collect();
                     prop_assert_eq!(&devs, &x_before.1);
                     prop_assert!(!resp.contains(&y_ids[0]) && !resp.contains(&y_ids[1]));
-                } else {
-                    // Sync arrives in V1-5b; today these answer protocol_unsupported for X
-                    // and never act on Y's ids.
+                } else if path == "/v1/update/manifest" {
+                    // The update manifest arrives in V1-6.
                     prop_assert_eq!(status, 404);
                     prop_assert!(resp.contains("protocol_unsupported"));
+                } else {
+                    // Strict schemas: a request naming another user's ids is refused as a
+                    // whole, before anything is read or written, and says nothing of Y.
+                    prop_assert_eq!(status, 400, "{} {}", method, resp);
+                    prop_assert!(!resp.contains(&y_ids[0]) && !resp.contains(&y_ids[1]));
                 }
                 Ok(())
             },
@@ -478,6 +482,8 @@ fn t_s8_another_users_ids_anywhere_in_a_request_change_nothing() {
     assert_eq!(y_after.0, y_before.0);
     assert_eq!(y_after.1, y_before.1);
     assert_eq!(y_after.2, y_before.2, "Y's chain is unchanged");
+    let x_after = state_of(&x);
+    assert_eq!(x_after.2, x_before.2, "nothing was recorded for X either");
     // Unpair with Y's ids in the body revokes only X.
     let body = format!("{{\"device_ref\":\"{}\"}}", y_ids[1]);
     let req = format!(

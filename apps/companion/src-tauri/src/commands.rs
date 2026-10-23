@@ -411,6 +411,49 @@ pub async fn server_unpair(shell: ShellState<'_>) -> Result<LinkView, String> {
     server_link::unpair(shell.inner().clone()).await
 }
 
+/// Switch an optional category on (after its notice) or off.
+///
+/// # Errors
+/// The reason, worded for the user.
+#[tauri::command]
+pub async fn server_share_set(
+    shell: ShellState<'_>,
+    category: String,
+    enabled: bool,
+) -> Result<LinkView, String> {
+    server_link::set_sharing(shell.inner().clone(), category, enabled).await
+}
+
+/// Dismiss a sharing notice.
+///
+/// # Errors
+/// A store failure, worded for the user.
+#[tauri::command]
+pub fn server_notice_dismiss(shell: ShellState<'_>, id: u64) -> Result<LinkView, String> {
+    server_link::dismiss_notice(&shell, id)
+}
+
+/// Today's record for a category exactly as it would be sent.
+///
+/// # Errors
+/// The reason, worded for the user.
+#[tauri::command]
+pub fn server_share_preview(
+    shell: ShellState<'_>,
+    category: String,
+) -> Result<Option<String>, String> {
+    server_link::preview(&shell, &category)
+}
+
+/// "Restore from server".
+///
+/// # Errors
+/// A store failure, worded for the user.
+#[tauri::command]
+pub async fn server_restore(shell: ShellState<'_>) -> Result<LinkView, String> {
+    server_link::restore(shell.inner().clone()).await
+}
+
 /// "Server address": the IP address to try when the server moved (empty clears it).
 ///
 /// # Errors

@@ -2,14 +2,24 @@
 // Sharing: pairing with the office server (slice V1-5a). The user pastes the slip from
 // the administrator; this PC then shows the server's six words and its own check code to
 // read out, and stays "waiting for confirmation" until the administrator confirms it.
-// Every optional category stays off; switching them on arrives with sync (V1-5b).
+// Once confirmed (V1-5b) each optional category can be switched on after its notice and
+// off at once; notices about other PCs' changes never block anything; "Preview" shows
+// today's record exactly as sent; "Restore from server" reads the user's shared history.
 // Backup: "Export my data" writes one encrypted file to the Documents folder; "Import a
 // backup" replaces all HealthierYou data on this PC with a file's (never merges), keeps
 // every deletion from both sides, and restarts the app.
 import { useEffect, useState } from 'preact/hooks';
 import { call, on, report, stageBackup } from '../shared/ipc';
 import type { BackupSummary, ImportFinished, LinkView, SettingsPage } from '../shared/types';
-import { checkCodeText, newPcs, slipInput, slipLooksComplete, statusLine } from './pairing';
+import {
+  checkCodeText,
+  enableNotice,
+  newPcs,
+  shareLine,
+  slipInput,
+  slipLooksComplete,
+  statusLine,
+} from './pairing';
 
 const MIN_PASSWORD = 8;
 
@@ -32,30 +42,137 @@ export function SharingTab({ page }: { page: SettingsPage }) {
         </p>
       ) : null}
       {link ? <ServerLink link={link} onChange={setLink} onError={setError} /> : null}
-      <section aria-labelledby="share-h">
-        <h3 id="share-h">Optional sharing</h3>
-        <p>
-          All off.{' '}
-          {paired
-            ? 'Switching a category on comes with a later update.'
-            : 'Each category can be switched on only after this PC is paired with the office server.'}
-        </p>
-        <ul class="lib">
-          {page.sharing.map((s) => (
-            <li key={s.category}>
-              <label class="check">
-                <input type="checkbox" role="switch" checked={s.enabled} disabled />
-                {s.label}: {s.enabled ? 'on' : 'off'}
-              </label>
-            </li>
-          ))}
-        </ul>
-        <p class="note">
-          Details are never sent: meditation, recovery plans, reflections, individual events and
-          camera images stay on this PC.
-        </p>
-      </section>
+      {link && link.state === 'confirmed' ? (
+        <Sharing link={link} onChange={setLink} onError={setError} />
+      ) : (
+        <section aria-labelledby="share-h">
+          <h3 id="share-h">Optional sharing</h3>
+          <p>
+            All off.{' '}
+            {paired
+              ? 'Categories can be switched on once your administrator confirms this PC.'
+              : 'Each category can be switched on only after this PC is paired with the office server.'}
+          </p>
+          <ul class="lib">
+            {page.sharing.map((s) => (
+              <li key={s.category}>
+                <label class="check">
+                  <input type="checkbox" role="switch" checked={s.enabled} disabled />
+                  {s.label}: {s.enabled ? 'on' : 'off'}
+                </label>
+              </li>
+            ))}
+          </ul>
+          <p class="note">
+            Details are never sent: meditation, recovery plans, reflections, individual events and
+            camera images stay on this PC.
+          </p>
+        </section>
+      )}
     </main>
+  );
+}
+
+function Sharing({
+  link,
+  onChange,
+  onError,
+}: {
+  link: LinkView;
+  onChange: (v: LinkView) => void;
+  onError: (e: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState<{ label: string; text: string } | null>(null);
+  const run = (p: Promise<LinkView>) => {
+    setBusy(true);
+    onError('');
+    p.then(onChange)
+      .catch((err: unknown) => onError(String(err)))
+      .finally(() => setBusy(false));
+  };
+  const paused = link.hold || link.mismatch;
+  return (
+    <section aria-labelledby="share-h">
+      <h3 id="share-h">Optional sharing</h3>
+      {link.notices.map((n) => (
+        <div class="notice" role="status" key={n.id}>
+          <p>{n.text}</p>
+          <button type="button" class="btn" onClick={() => run(call('server_notice_dismiss', { id: n.id }))}>
+            OK
+          </button>
+        </div>
+      ))}
+      {paused ? (
+        <p class="note" role="status">
+          {link.hold ? 'Server recovering: sharing paused.' : 'Server history mismatch: sharing is paused.'}{' '}
+          You can still switch categories off.
+        </p>
+      ) : null}
+      <ul class="lib">
+        {link.sharing.map((s) => (
+          <li key={s.category}>
+            <label class="check">
+              <input
+                type="checkbox"
+                role="switch"
+                checked={s.enabled || s.waiting}
+                disabled={
+                  busy ||
+                  (paused && !s.enabled && !s.waiting) ||
+                  (!s.available && !s.enabled && !s.waiting)
+                }
+                onChange={(e) => {
+                  const on = e.currentTarget.checked;
+                  if (on && !window.confirm(enableNotice(s.label))) {
+                    e.currentTarget.checked = false;
+                    return;
+                  }
+                  run(call('server_share_set', { category: s.category, enabled: on }));
+                }}
+              />
+              {shareLine(s)}
+            </label>{' '}
+            <button
+              type="button"
+              class="btn"
+              hidden={!s.available}
+              disabled={busy}
+              onClick={() => {
+                call('server_share_preview', { category: s.category })
+                  .then((text) =>
+                    setPreview({ label: s.label, text: text ?? 'Nothing would be sent for today.' }),
+                  )
+                  .catch((err: unknown) => onError(String(err)));
+              }}
+            >
+              Preview
+            </button>
+          </li>
+        ))}
+      </ul>
+      {preview ? (
+        <div class="notice" role="status">
+          <p>
+            Today's {preview.label}, exactly as it would be sent:
+          </p>
+          <pre class="mono">{preview.text}</pre>
+          <button type="button" class="btn" onClick={() => setPreview(null)}>
+            Close
+          </button>
+        </div>
+      ) : null}
+      <p class="note">
+        Details are never sent: meditation, recovery plans, reflections, individual events and
+        camera images stay on this PC.
+      </p>
+      <p>
+        <button type="button" class="btn" disabled={busy || paused} onClick={() => run(call('server_restore'))}>
+          Restore from server
+        </button>{' '}
+        <span class="note">Copies the last 90 days of your shared daily totals here, read-only.</span>
+      </p>
+    </section>
   );
 }
 

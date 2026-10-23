@@ -4,9 +4,17 @@
 //! hy-server init            [--data-dir DIR] [--host NAME]   create keys and the database
 //! hy-server set-passphrase  [--data-dir DIR]                 read the admin passphrase from stdin
 //! hy-server fingerprint     [--data-dir DIR]                 print the fingerprint and six words
-//! hy-server serve           [--data-dir DIR] [--host NAME] [--api ADDR] [--admin ADDR]
+//! hy-server serve           [--data-dir DIR] --mirror FILE [--backups DIR] [--host NAME] [--api ADDR] [--admin ADDR]
+//! hy-server restore         [--data-dir DIR] --backup FILE    restore a server backup (service stopped)
 //! hy-server --version
 //! ```
+//!
+//! `--mirror` is the append-only copy of the control log (contract 7.3). It must be on
+//! another volume than the data folder (a second disk or a share), so that restoring an
+//! old database is detected at the next start. Server backups go to `--backups`
+//! (default `<data-dir>\backups`; copy them off the PC too). Backups open only with this
+//! server's `backup.key` (keys folder): keep a protected copy of the keys folder, because
+//! if that key is lost every existing backup is permanently unrecoverable.
 //!
 //! The data directory defaults to `%ProgramData%\HealthierYou\Server` on Windows and must
 //! be given elsewhere. Running as a Windows service under a virtual account, the folder
@@ -23,6 +31,7 @@ use hy_core::clock::SystemClock;
 use hy_core::protocol::words::fingerprint_phrase;
 use hy_core::protocol::{ADMIN_PORT, DEFAULT_PORT, hex};
 use hy_core::secret::Secret;
+use hy_server::backup::{self, BackupKey};
 use hy_server::keys::{ServerKeys, platform_protector, year_of};
 use hy_server::logging::{self, V};
 use hy_server::serve::{self, Limits};
@@ -34,10 +43,16 @@ struct Args {
     host: Option<String>,
     api: SocketAddr,
     admin: SocketAddr,
+    mirror: Option<PathBuf>,
+    backups: Option<PathBuf>,
+    backup: Option<PathBuf>,
 }
 
 fn usage() -> String {
-    "usage: hy-server <init|set-passphrase|fingerprint|serve> [--data-dir DIR] [--host NAME] [--api ADDR] [--admin ADDR]".into()
+    "usage: hy-server <init|set-passphrase|fingerprint|serve|restore> [--data-dir DIR] [--mirror FILE] [--backups DIR] [--backup FILE] [--host NAME] [--api ADDR] [--admin ADDR]\n\
+     Backups open only with backup.key in the keys folder. Keep a protected copy of the keys folder: \
+     if that key is lost, every existing backup is permanently unrecoverable."
+        .into()
 }
 
 fn parse() -> Result<Args, String> {
@@ -49,12 +64,18 @@ fn parse() -> Result<Args, String> {
         host: None,
         api: SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
         admin: SocketAddr::from(([127, 0, 0, 1], ADMIN_PORT)),
+        mirror: None,
+        backups: None,
+        backup: None,
     };
     while let Some(flag) = it.next() {
         let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
             "--data-dir" => args.data_dir = Some(PathBuf::from(value)),
             "--host" => args.host = Some(value),
+            "--mirror" => args.mirror = Some(PathBuf::from(value)),
+            "--backups" => args.backups = Some(PathBuf::from(value)),
+            "--backup" => args.backup = Some(PathBuf::from(value)),
             "--api" => args.api = value.parse().map_err(|_| "bad --api address".to_owned())?,
             "--admin" => {
                 args.admin = value
@@ -142,6 +163,18 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         "serve" => serve_cmd(&args, &dir, protector.as_ref()),
+        "restore" => {
+            let file = args.backup.as_ref().ok_or("give --backup FILE")?;
+            let key = BackupKey::load_or_create(&dir, protector.as_ref())
+                .map_err(|e| format!("cannot open the backup key: {e}"))?;
+            let now = chrono::Utc::now().timestamp_millis();
+            let id = backup::restore(&dir, file, &key, now).map_err(|e| e.to_string())?;
+            eprintln!(
+                "Restored snapshot {}. The previous database was kept next to it. At the next start the server compares it with the mirror; users whose history is newer than this backup are held for recovery.",
+                hex(&id[..4])
+            );
+            Ok(())
+        }
         _ => Err(usage()),
     }
 }
@@ -154,6 +187,16 @@ fn serve_cmd(
     if !serve::admin_address_ok(&args.admin) {
         return Err("the admin page is served on a loopback address only".into());
     }
+    let mirror = args
+        .mirror
+        .clone()
+        .ok_or("give --mirror FILE on another volume (a second disk or a share)")?;
+    hy_server::mirror::check_volume(dir, &mirror).map_err(|e| e.to_string())?;
+    let backups = args.backups.clone().unwrap_or_else(|| dir.join("backups"));
+    let backup_key = Arc::new(
+        BackupKey::load_or_create(dir, protector)
+            .map_err(|e| format!("cannot open the backup key: {e}"))?,
+    );
     let keys =
         ServerKeys::load(dir, protector).map_err(|e| format!("cannot open the keys: {e}"))?;
     let conn = db::open(&dir.join("server.db")).map_err(|e| format!("database: {e}"))?;
@@ -181,6 +224,8 @@ fn serve_cmd(
             ("key_id", V::Prefix(&server.keys.key_id)),
         ],
     );
+    let outcome = server.startup(&mirror)?;
+    eprintln!("hy-server: control-log mirror {outcome:?}");
     let rt = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
     rt.block_on(async move {
         let api = tokio::net::TcpListener::bind(args.api)
@@ -195,9 +240,16 @@ fn serve_cmd(
         tokio::spawn(async move {
             loop {
                 let m = maint.clone();
-                let _ = tokio::task::spawn_blocking(move || m.maintenance()).await;
+                let (dir, key) = (backups.clone(), backup_key.clone());
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = m.maintenance();
+                    if let Err(e) = backup::run_if_due(&m, &dir, &key) {
+                        logging::log("backup_failed", &[("error", V::Name(e.kind()))]);
+                    }
+                })
+                .await;
                 tokio::select! {
-                    () = tokio::time::sleep(Duration::from_secs(300)) => {}
+                    () = tokio::time::sleep(Duration::from_secs(60)) => {}
                     _ = maint_rx.changed() => return,
                 }
             }

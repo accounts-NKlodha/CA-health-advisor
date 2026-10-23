@@ -89,6 +89,14 @@ pub const MIGRATIONS: &[Migration] = &[
         // it and the rollback path restores the pre-upgrade copy instead.
         compat: Compat::Contract,
     },
+    Migration {
+        version: 6,
+        name: "link_scope",
+        sql: include_str!("../migrations/0006_link_scope.sql"),
+        // Contract: a v5 build would send operations and deletions queued under an
+        // earlier link, which this version binds to the link they were made under.
+        compat: Compat::Contract,
+    },
 ];
 
 /// The schema version this build writes.
@@ -421,6 +429,25 @@ mod tests {
     }
 
     #[test]
+    fn a_v5_build_refuses_a_v6_store_instead_of_sending_another_links_operations() {
+        assert_eq!(MIGRATIONS[5].compat, Compat::Contract);
+        let mut conn = mem();
+        migrate(&mut conn).unwrap();
+        let err = migrate_with(&mut conn, &MIGRATIONS[..5], MigrateOptions::default()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::SchemaTooNew {
+                    found: 6,
+                    required_reader: 6,
+                    supported: 5
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn a_v4_build_refuses_a_v5_store_instead_of_failing_its_sharing_writes() {
         // Rollback regression: v5 changes the queue guard, so a v4 reader must not open
         // it (it would accept the data and then fail every queued sharing write).
@@ -432,8 +459,8 @@ mod tests {
             matches!(
                 err,
                 Error::SchemaTooNew {
-                    found: 5,
-                    required_reader: 5,
+                    found: 6,
+                    required_reader: 6,
                     supported: 4
                 }
             ),
@@ -463,8 +490,8 @@ mod tests {
         assert_eq!(report.pre_migration_copy, None);
         let status = schema_status(&conn).unwrap();
         assert_eq!(status.version, latest_version());
-        // v5 is a contract step: readers older than v5 must refuse.
-        assert_eq!(status.required_reader, 5);
+        // v6 is a contract step: readers older than v6 must refuse.
+        assert_eq!(status.required_reader, 6);
         for t in [
             "store_meta",
             "events",
