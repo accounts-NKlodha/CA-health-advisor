@@ -1,8 +1,9 @@
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 
-// Three pages (architecture 4.1 and 7): the always-present pet page and the on-demand
-// keyboard panel in plain TypeScript, and the on-demand screens page in Preact. JSX is compiled by esbuild using tsconfig's
+// Four pages (architecture 4.1 and 7): the always-present pet page and the on-demand
+// keyboard panel in plain TypeScript, and the on-demand settings and review pages in
+// Preact. JSX is compiled by esbuild using tsconfig's
 // `jsxImportSource: "preact"`, so no Babel plugin is needed.
 // Assets are local only; the Tauri CSP forbids remote and inline scripts.
 export default defineConfig({
@@ -20,6 +21,7 @@ export default defineConfig({
         pet: resolve(import.meta.dirname, 'pet.html'),
         panel: resolve(import.meta.dirname, 'panel.html'),
         screens: resolve(import.meta.dirname, 'screens.html'),
+        review: resolve(import.meta.dirname, 'review.html'),
       },
     },
   },

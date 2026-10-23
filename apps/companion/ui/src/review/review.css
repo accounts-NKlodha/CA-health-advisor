@@ -1,0 +1,667 @@
+/* The review window (wireframes W13 and W14). Shares the settings window's tokens and
+   controls. Colours are the Okabe-Ito palette, always paired with a symbol, a pattern or
+   words: hatched means no data, stripes partly, an outline a measured zero, dashes the
+   month in progress. The graphics animate once on opening unless motion is off (the
+   in-app switch or Windows' setting); high contrast uses system colours. */
+@import '../screens/screens.css';
+
+:root {
+  --c-movement: #009e73;
+  --c-breaks: #e69f00;
+  --c-water: #0072b2;
+  --t-breaks: #8a5a00;
+  --hatch: #b9c4c9;
+  --nodata-line: #6f7d83;
+  --hero-bg: #e7f3f2;
+  --base: #d55e00;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --c-water: #56b4e9;
+    --t-breaks: #f0c060;
+    --hatch: #4a5862;
+    --nodata-line: #9aa8b0;
+    --hero-bg: #1c3236;
+    --base: #f0a060;
+  }
+}
+
+.review .top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.review .top h1 {
+  margin: 0;
+}
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.muted {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 12px;
+}
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 14px;
+}
+.callout {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  background: var(--surface);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 0 0 14px;
+}
+
+/* Hero band */
+.hero {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--hero-bg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+}
+.kicker {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.hero-title {
+  font-size: 1.5rem;
+  margin: 2px 0 4px;
+}
+.hero-cov {
+  margin: 0;
+  color: var(--muted);
+}
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+.pager-label {
+  font-weight: 600;
+  min-width: 9em;
+  text-align: center;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.btn[aria-pressed='true'] {
+  border-color: var(--accent);
+}
+
+/* Rings */
+.rings {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+@media (max-width: 760px) {
+  .rings {
+    grid-template-columns: 1fr;
+  }
+}
+.ring-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px;
+}
+.ring {
+  width: 120px;
+  height: 120px;
+  flex: none;
+}
+.ring-num {
+  font-size: 25px;
+  font-weight: 800;
+  fill: var(--fg);
+}
+.ring-unit {
+  font-size: 10.5px;
+  fill: var(--muted);
+}
+.ring-name {
+  font-weight: 700;
+}
+.movement .ring-name {
+  color: var(--c-movement);
+}
+.breaks .ring-name {
+  color: var(--t-breaks);
+}
+.water .ring-name {
+  color: var(--c-water);
+}
+.ring-sub,
+.ring-last {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.paper {
+  fill: var(--surface);
+}
+.hatch {
+  fill: var(--hatch);
+}
+.movement .stripe {
+  fill: var(--c-movement);
+}
+.breaks .stripe {
+  fill: var(--c-breaks);
+}
+.water .stripe {
+  fill: var(--c-water);
+}
+.seg {
+  stroke-width: 1.4;
+}
+.movement .seg.met {
+  fill: var(--c-movement);
+}
+.breaks .seg.met {
+  fill: var(--c-breaks);
+}
+.water .seg.met {
+  fill: var(--c-water);
+}
+.movement .seg.partly {
+  fill: url(#partly-movement);
+  stroke: var(--c-movement);
+}
+.breaks .seg.partly {
+  fill: url(#partly-breaks);
+  stroke: var(--c-breaks);
+}
+.water .seg.partly {
+  fill: url(#partly-water);
+  stroke: var(--c-water);
+}
+.seg.zero {
+  fill: var(--surface);
+  stroke-width: 2.2;
+}
+.movement .seg.zero {
+  stroke: var(--c-movement);
+}
+.breaks .seg.zero {
+  stroke: var(--c-breaks);
+}
+.water .seg.zero {
+  stroke: var(--c-water);
+}
+.seg.no_data {
+  stroke: var(--nodata-line);
+  stroke-dasharray: 3 2;
+}
+.movement .seg.no_data {
+  fill: url(#hatch-movement);
+}
+.breaks .seg.no_data {
+  fill: url(#hatch-breaks);
+}
+.water .seg.no_data {
+  fill: url(#hatch-water);
+}
+.seg.nothing_due,
+.seg.off,
+.seg.not_started,
+.seg.today,
+.seg.future {
+  fill: var(--bg);
+  stroke: var(--line);
+  stroke-dasharray: 1.5 2;
+}
+
+/* Day strip and day calendar: a symbol in every cell */
+.strip {
+  border-collapse: separate;
+  border-spacing: 4px;
+  margin: 0 0 6px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 6px;
+}
+.strip th {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 0 4px;
+  text-align: left;
+}
+.strip thead th {
+  text-align: center;
+}
+.strip thead th.non-work {
+  font-weight: 400;
+}
+.mk {
+  width: 40px;
+  height: 30px;
+  text-align: center;
+  border-radius: 6px;
+  font-weight: 700;
+  border: 1px solid transparent;
+}
+.mk.met {
+  color: #ffffff;
+}
+.movement .mk.met {
+  background: var(--c-movement);
+}
+.breaks .mk.met {
+  background: var(--c-breaks);
+  color: #1f2a30;
+}
+.water .mk.met {
+  background: var(--c-water);
+}
+.mk.partly {
+  border: 2px solid currentColor;
+}
+.movement .mk.partly {
+  color: var(--c-movement);
+}
+.breaks .mk.partly {
+  color: var(--t-breaks);
+}
+.water .mk.partly {
+  color: var(--c-water);
+}
+.mk.zero {
+  border: 2px solid var(--fg);
+  background: var(--surface);
+}
+.mk.no_data {
+  background: repeating-linear-gradient(45deg, var(--hatch) 0 3px, var(--surface) 3px 7px);
+  border: 1px dashed var(--nodata-line);
+}
+.mk.nothing_due,
+.mk.off,
+.mk.not_started,
+.mk.today,
+.mk.future {
+  color: var(--muted);
+  font-weight: 400;
+  border: 1px dashed var(--line);
+}
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  list-style: none;
+  padding: 0;
+  margin: 6px 0 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.legend .mk {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 20px;
+  color: var(--fg);
+}
+.legend .mk.met {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.highlights {
+  margin: 0;
+  padding-left: 18px;
+}
+.highlights li {
+  margin: 4px 0;
+  font-weight: 600;
+}
+.how {
+  margin: 10px 0;
+  color: var(--muted);
+}
+.how summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--fg);
+}
+.t {
+  border-collapse: collapse;
+  width: 100%;
+  background: var(--surface);
+  margin-bottom: 8px;
+}
+.t th,
+.t td {
+  border: 1px solid var(--line);
+  padding: 5px 8px;
+  text-align: left;
+  font-size: 13px;
+}
+.t.phone th {
+  font-weight: 400;
+  white-space: nowrap;
+}
+.plain {
+  overflow-x: auto;
+}
+
+/* Monthly chart */
+.month-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.month-head h2 {
+  margin: 0 0 8px;
+}
+.chips {
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.chart {
+  width: 100%;
+  max-width: 640px;
+  height: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  display: block;
+}
+.axis {
+  stroke: var(--line);
+}
+.bar.measured {
+  fill: var(--c-water);
+}
+.bar.zero {
+  fill: var(--surface);
+  stroke: var(--c-water);
+  stroke-width: 2;
+}
+.bar.none {
+  fill: url(#bar-hatch);
+  stroke: var(--nodata-line);
+  stroke-dasharray: 4 3;
+}
+.bar.empty {
+  fill: none;
+  stroke: var(--line);
+  stroke-dasharray: 2 3;
+}
+.bar.part {
+  stroke: var(--fg);
+  stroke-width: 2;
+  stroke-dasharray: 5 3;
+}
+.bar-num {
+  font-size: 13px;
+  font-weight: 700;
+  fill: var(--fg);
+}
+.bar-lab {
+  font-size: 12px;
+  font-weight: 600;
+  fill: var(--fg);
+}
+.bar-sub {
+  font-size: 10.5px;
+  fill: var(--muted);
+}
+.baseline line {
+  stroke: var(--base);
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+}
+.baseline text {
+  font-size: 11px;
+  fill: var(--base);
+  font-weight: 600;
+}
+.key {
+  display: inline-block;
+  width: 16px;
+  height: 12px;
+  border-radius: 2px;
+}
+.key.measured {
+  background: var(--c-water);
+}
+.key.zero {
+  border: 2px solid var(--c-water);
+}
+.key.none {
+  background: repeating-linear-gradient(45deg, var(--hatch) 0 3px, var(--surface) 3px 7px);
+  border: 1px dashed var(--nodata-line);
+}
+.key.part {
+  background: var(--c-water);
+  outline: 2px dashed var(--fg);
+}
+.key.base {
+  height: 0;
+  border-top: 2px dashed var(--base);
+}
+.days-head,
+.days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 44px));
+  gap: 4px;
+}
+.days-head span {
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+}
+.days {
+  list-style: none;
+  padding: 0;
+  margin: 4px 0 6px;
+}
+.day {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  height: 40px;
+  font-size: 12px;
+}
+.day .dn {
+  font-size: 10px;
+  font-weight: 400;
+}
+.day.met {
+  background: var(--c-water);
+}
+.start-1 {
+  grid-column-start: 2;
+}
+.start-2 {
+  grid-column-start: 3;
+}
+.start-3 {
+  grid-column-start: 4;
+}
+.start-4 {
+  grid-column-start: 5;
+}
+.start-5 {
+  grid-column-start: 6;
+}
+.start-6 {
+  grid-column-start: 7;
+}
+.day.partly {
+  color: var(--c-water);
+}
+
+/* One animation on opening, only when motion is allowed. */
+@keyframes grow {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.anim .seg {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: grow 0.45s ease-out both;
+}
+.anim .seg:nth-of-type(2) {
+  animation-delay: 80ms;
+}
+.anim .seg:nth-of-type(3) {
+  animation-delay: 160ms;
+}
+.anim .seg:nth-of-type(4) {
+  animation-delay: 240ms;
+}
+.anim .seg:nth-of-type(5) {
+  animation-delay: 320ms;
+}
+.anim .seg:nth-of-type(6) {
+  animation-delay: 400ms;
+}
+.anim .seg:nth-of-type(7) {
+  animation-delay: 480ms;
+}
+.anim .strip .mk,
+.anim .highlights li,
+.anim .bar {
+  animation: rise 0.4s ease-out both;
+  animation-delay: 200ms;
+}
+@media (prefers-reduced-motion: reduce) {
+  .anim .seg,
+  .anim .strip .mk,
+  .anim .highlights li,
+  .anim .bar {
+    animation: none;
+  }
+}
+
+/* High contrast: system colours; symbols and words carry every state. */
+@media (forced-colors: active) {
+  .ring,
+  .chart,
+  .mk,
+  .key {
+    forced-color-adjust: none;
+  }
+  .ring-num,
+  .ring-unit,
+  .bar-num,
+  .bar-lab,
+  .bar-sub,
+  .baseline text {
+    fill: CanvasText;
+  }
+  .paper {
+    fill: Canvas;
+  }
+  .hatch,
+  .stripe {
+    fill: CanvasText;
+  }
+  .seg,
+  .bar {
+    stroke: CanvasText;
+  }
+  .movement .seg.met,
+  .breaks .seg.met,
+  .water .seg.met,
+  .bar.measured {
+    fill: CanvasText;
+  }
+  .seg.zero,
+  .bar.zero {
+    fill: Canvas;
+    stroke: CanvasText;
+  }
+  .seg.nothing_due,
+  .seg.off,
+  .seg.not_started,
+  .seg.today,
+  .seg.future,
+  .bar.empty {
+    fill: Canvas;
+    stroke: GrayText;
+  }
+  .axis,
+  .baseline line {
+    stroke: CanvasText;
+  }
+  .mk {
+    background: Canvas;
+    color: CanvasText;
+    border: 1px solid CanvasText;
+  }
+  .movement .mk.met,
+  .breaks .mk.met,
+  .water .mk.met,
+  .day.met,
+  .legend .mk.met {
+    background: Highlight;
+    color: HighlightText;
+  }
+  .mk.no_data {
+    border-style: dashed;
+  }
+  .mk.nothing_due,
+  .mk.off,
+  .mk.not_started,
+  .mk.today,
+  .mk.future {
+    color: GrayText;
+    border-color: GrayText;
+  }
+  .key {
+    background: Canvas;
+    border: 2px solid CanvasText;
+  }
+  .key.measured {
+    background: CanvasText;
+  }
+}

@@ -158,6 +158,7 @@ function openContent(open: OpenView): HTMLElement | null {
           size: (pct) => void call('pet_edit', { edit: { kind: 'size', pct } }).catch(report),
           bring: () => void call('bring_pet').catch(report),
           hide: () => void call('hide_pet').catch(report),
+          review: () => void call('open_review').catch(report),
           settings: () => void call('open_settings').catch(report),
         },
         'menu-title',

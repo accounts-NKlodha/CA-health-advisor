@@ -13,7 +13,8 @@
       "capabilities": [
         "pet",
         "panel",
-        "screens"
+        "screens",
+        "review"
       ]
     },
     "windows": []

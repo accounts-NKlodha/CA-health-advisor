@@ -1,6 +1,7 @@
 // The keyboard pet panel (wireframe K1). The hotkey opens it and it takes focus on
 // purpose; Tab moves between actions, Escape closes it and the shell hands focus back to
-// the window that had it. Actions that open another window (Settings) leave focus there.
+// the window that had it. Actions that open another window (Settings, Weekly review)
+// leave focus there.
 // When the engine's bubble is open beside the pet (a reminder, a Pomodoro card, the
 // check-in), the panel shows the same bubble first so it can be answered by keyboard.
 import { renderProgress, renderRows } from '../shared/bubble';
@@ -130,6 +131,11 @@ function draw(v: PanelView, keepFocus: boolean): void {
       hide: () => {
         call('hide_pet')
           .then(() => close(true))
+          .catch(report);
+      },
+      review: () => {
+        call('open_review')
+          .then(() => close(false))
           .catch(report);
       },
       settings: () => {
