@@ -176,17 +176,14 @@ pub async fn redeem_slip(
     Err(last)
 }
 
-/// The addresses to try for a stored link, in order: the last address that passed the
-/// pin, the slip's host through the OS resolver, then a manual address (contract 5).
-pub async fn candidate_addresses(link: &ServerLink) -> Vec<SocketAddr> {
+/// The addresses known without a name lookup, in order: the last address that passed
+/// the pin, then the manual address. They are tried before the OS resolver is asked, so
+/// a failing or slow name lookup never delays recovery after the server's IP changed.
+#[must_use]
+pub fn known_addresses(link: &ServerLink) -> Vec<SocketAddr> {
     let mut out = Vec::new();
     if let Some(a) = link.last_ip.as_deref().and_then(|s| s.parse().ok()) {
         out.push(a);
-    }
-    for a in resolve(&link.host, link.port).await {
-        if !out.contains(&a) {
-            out.push(a);
-        }
     }
     if let Some(m) = link.manual_address.as_deref() {
         let parsed: Option<SocketAddr> = m
@@ -200,6 +197,54 @@ pub async fn candidate_addresses(link: &ServerLink) -> Vec<SocketAddr> {
         }
     }
     out
+}
+
+/// Every address to try for a stored link, in order: [`known_addresses`], then the
+/// slip's host through the OS resolver (contract 5).
+pub async fn candidate_addresses(link: &ServerLink) -> Vec<SocketAddr> {
+    let mut out = known_addresses(link);
+    for a in resolve(&link.host, link.port).await {
+        if !out.contains(&a) {
+            out.push(a);
+        }
+    }
+    out
+}
+
+/// Run `attempt` against each address in turn until one is reachable: the known
+/// addresses first, and only if none answers, the resolved ones (the lookup is bounded
+/// by the connect timeout).
+async fn try_addresses<T, F, Fut>(
+    link: &ServerLink,
+    opts: LinkOptions,
+    mut attempt: F,
+) -> Result<(T, SocketAddr), FlowError>
+where
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = Result<T, FlowError>>,
+{
+    let known = known_addresses(link);
+    for &addr in &known {
+        match attempt(addr).await {
+            Err(FlowError::Unreachable) => {}
+            Ok(v) => return Ok((v, addr)),
+            Err(e) => return Err(e),
+        }
+    }
+    let resolved = tokio::time::timeout(opts.connect_timeout, resolve(&link.host, link.port))
+        .await
+        .unwrap_or_default();
+    for addr in resolved {
+        if known.contains(&addr) {
+            continue;
+        }
+        match attempt(addr).await {
+            Err(FlowError::Unreachable) => {}
+            Ok(v) => return Ok((v, addr)),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(FlowError::Unreachable)
 }
 
 /// What a status check found.
@@ -226,16 +271,15 @@ pub async fn fetch_state(
     let token = vault
         .open(&link.token_blob)
         .map_err(|_| FlowError::RepairNeeded)?;
-    let mut last = FlowError::Unreachable;
-    for addr in candidate_addresses(link).await {
-        let client = LinkClient::new(link.pin, addr, opts)?;
-        match fetch_pages(&client, &token, after_seq).await {
-            Ok(state) => return Ok(Fetched { state, addr }),
-            Err(FlowError::Unreachable) => last = FlowError::Unreachable,
-            Err(e) => return Err(e),
+    let (state, addr) = try_addresses(link, opts, |addr| {
+        let token = &token;
+        async move {
+            let client = LinkClient::new(link.pin, addr, opts)?;
+            fetch_pages(&client, token, after_seq).await
         }
-    }
-    Err(last)
+    })
+    .await?;
+    Ok(Fetched { state, addr })
 }
 
 async fn fetch_pages(
@@ -292,16 +336,15 @@ pub async fn unpair_remote(
     let token = vault
         .open(&link.token_blob)
         .map_err(|_| FlowError::RepairNeeded)?;
-    let mut last = FlowError::Unreachable;
-    for addr in candidate_addresses(link).await {
-        let client = LinkClient::new(link.pin, addr, opts)?;
-        match client.unpair(&token).await {
-            Ok(()) => return Ok(()),
-            Err(LinkError::Unreachable) => last = FlowError::Unreachable,
-            Err(e) => return Err(e.into()),
+    try_addresses(link, opts, |addr| {
+        let token = &token;
+        async move {
+            let client = LinkClient::new(link.pin, addr, opts)?;
+            client.unpair(token).await.map_err(FlowError::from)
         }
-    }
-    Err(last)
+    })
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -344,7 +387,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn addresses_are_tried_last_good_first_then_the_name_then_the_manual_one() {
+    async fn known_addresses_come_first_and_never_wait_for_the_name_lookup() {
         let link = ServerLink {
             server_key_id: [0; 32],
             pin: [1; 32],
@@ -368,8 +411,17 @@ mod tests {
             .collect();
         assert_eq!(
             got,
-            ["10.0.0.7:8443", "127.0.0.1:8443", "192.168.1.20:8443"]
+            ["10.0.0.7:8443", "192.168.1.20:8443", "127.0.0.1:8443"]
         );
+        // The remembered and manual addresses need no lookup at all.
+        let known: Vec<String> = known_addresses(&ServerLink {
+            host: "no-such-host.invalid".into(),
+            ..link
+        })
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        assert_eq!(known, ["10.0.0.7:8443", "192.168.1.20:8443"]);
     }
 
     #[test]

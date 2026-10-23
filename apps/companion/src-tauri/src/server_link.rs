@@ -10,6 +10,9 @@
 //!   check code for the user to read out to the administrator. "Check again" asks the
 //!   server; the PC counts as confirmed only after a signed head and a verified chain
 //!   extension containing its own confirmation ([`hy_core::store::Store::apply_confirmed_state`]).
+//! - **Server address:** if the server's IP changed and its name cannot be found, the
+//!   user can enter its address. The remembered and manual addresses are tried before
+//!   any name lookup; every address must present the pinned certificate.
 //! - **Unpair:** the server is told when it can be reached, and the local unpair
 //!   transaction always runs. A revoked PC unpairs locally on its next check.
 //!
@@ -100,6 +103,8 @@ pub struct LinkView {
     pub check_code: Option<String>,
     /// The confirmation date.
     pub confirmed_on: Option<String>,
+    /// The address the user entered for when the server's IP changed, if any.
+    pub manual_address: Option<String>,
     /// The user's PCs (after confirmation).
     pub devices: Vec<PairedPc>,
     /// A message for the user about the last action, if any.
@@ -116,6 +121,7 @@ impl LinkView {
                 words: Vec::new(),
                 check_code: None,
                 confirmed_on: None,
+                manual_address: None,
                 devices: Vec::new(),
                 message,
             },
@@ -126,6 +132,7 @@ impl LinkView {
                 words: fingerprint_words(&l.pin).to_vec(),
                 check_code: Some(device_check_code(l.device_ref.as_bytes())),
                 confirmed_on: l.confirmed_on.map(|d| d.to_string()),
+                manual_address: l.manual_address.clone(),
                 devices,
                 message,
             },
@@ -273,6 +280,34 @@ pub async fn unpair(shell: Arc<Shell>) -> Result<LinkView, String> {
             .map_err(store_error)?;
     }
     view(&shell, message)
+}
+
+/// "Server address": an IP address (optionally with a port) to try when the server's
+/// address changed and its name cannot be found. Empty clears it. The address is only
+/// a place to look: the server must still present the pinned certificate there.
+///
+/// # Errors
+/// An address that is not an IP address, or a store failure, worded for the user.
+pub fn set_address(shell: &Shell, address: &str) -> Result<LinkView, String> {
+    let a = address.trim();
+    let value = if a.is_empty() {
+        None
+    } else if a.parse::<std::net::SocketAddr>().is_ok() || a.parse::<std::net::IpAddr>().is_ok() {
+        Some(a)
+    } else {
+        return Err("Enter an IP address such as 192.168.1.20 or 192.168.1.20:8443.".to_owned());
+    };
+    let paired = shell
+        .with_store(|s| s.server_link())
+        .map_err(store_error)?
+        .is_some();
+    if !paired {
+        return Err("Pair this PC first.".to_owned());
+    }
+    shell
+        .with_store(|s| s.set_link_manual_address(value))
+        .map_err(store_error)?;
+    view(shell, None)
 }
 
 /// The user saw the new-device notice for `device_ref`.

@@ -12,6 +12,7 @@ const view = (over) => ({
   words: [],
   check_code: null,
   confirmed_on: null,
+  manual_address: null,
   devices: [],
   message: null,
   ...over,

@@ -83,7 +83,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 5,
         name: "server_link",
         sql: include_str!("../migrations/0005_server_link.sql"),
-        compat: Compat::Expand,
+        // Contract, not expand: it replaces `outbox_guard` (nothing is queued until the
+        // PC is confirmed) and rebuilds the consent log with new kinds, so a v4 build
+        // would open the data and then fail its own sharing writes. A v4 build refuses
+        // it and the rollback path restores the pre-upgrade copy instead.
+        compat: Compat::Contract,
     },
 ];
 
@@ -417,6 +421,32 @@ mod tests {
     }
 
     #[test]
+    fn a_v4_build_refuses_a_v5_store_instead_of_failing_its_sharing_writes() {
+        // Rollback regression: v5 changes the queue guard, so a v4 reader must not open
+        // it (it would accept the data and then fail every queued sharing write).
+        assert_eq!(MIGRATIONS[4].compat, Compat::Contract);
+        let mut conn = mem();
+        migrate(&mut conn).unwrap();
+        let err = migrate_with(&mut conn, &MIGRATIONS[..4], MigrateOptions::default()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::SchemaTooNew {
+                    found: 5,
+                    required_reader: 5,
+                    supported: 4
+                }
+            ),
+            "{err}"
+        );
+        // A v4 store still opens with the v4 list (the pre-upgrade copy is usable).
+        let mut old = mem();
+        migrate_with(&mut old, &MIGRATIONS[..4], MigrateOptions::default()).unwrap();
+        let r = migrate_with(&mut old, &MIGRATIONS[..4], MigrateOptions::default()).unwrap();
+        assert_eq!((r.from, r.to), (4, 4));
+    }
+
+    #[test]
     fn checksum_ignores_line_endings_only() {
         assert_eq!(checksum("a;\nb;\n"), checksum("a;\r\nb;\r\n"));
         assert_ne!(checksum("a;\nb;\n"), checksum("a;\nc;\n"));
@@ -433,7 +463,8 @@ mod tests {
         assert_eq!(report.pre_migration_copy, None);
         let status = schema_status(&conn).unwrap();
         assert_eq!(status.version, latest_version());
-        assert_eq!(status.required_reader, 1);
+        // v5 is a contract step: readers older than v5 must refuse.
+        assert_eq!(status.required_reader, 5);
         for t in [
             "store_meta",
             "events",

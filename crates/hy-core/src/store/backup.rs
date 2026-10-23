@@ -28,6 +28,7 @@ use super::{Store, from_ms, parse_date};
 use crate::backup::{Contents, KdfParams, Summary, Table};
 use crate::error::{Error, Result};
 use crate::migrations;
+use crate::schema::ConsentKind;
 
 /// How an import treats a table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,7 +260,8 @@ impl Store {
         Ok((contents.seal(password, params)?, summary))
     }
 
-    /// Replace this PC's data with a backup file's ("Import a backup").
+    /// Replace this PC's data with a backup file's ("Import a backup"). A paired PC is
+    /// unpaired in the same transaction and every category is switched off.
     ///
     /// # Errors
     /// [`Error::Backup`] for a wrong password, a damaged or newer file, or a row the
@@ -347,6 +349,22 @@ impl Store {
                  WHERE key = 'created_at' AND CAST(value AS INTEGER) > ?2",
                 rusqlite::params![theirs.to_string(), theirs],
             )?;
+        }
+        // The imported data replaces this PC's, so its server link no longer describes
+        // it: unpair in the same transaction (the link's removal trigger clears the
+        // receipt, the device cache and the queue) and switch every category off. The PC
+        // pairs again from a new slip. A refused import rolls this back with the rest.
+        let paired: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM server_link)", [], |r| {
+            r.get(0)
+        })?;
+        let now = self.clock.now();
+        tx.execute(
+            "UPDATE sharing_policy SET enabled = 0, updated_at = ?1 WHERE enabled = 1",
+            [super::to_ms(now)],
+        )?;
+        if paired {
+            tx.execute("DELETE FROM server_link", [])?;
+            super::insert_consent(&tx, now, ConsentKind::Unpaired, None, None, None)?;
         }
         let summary = summary_of(&tx, c.exported_at)?;
         tx.commit()?;

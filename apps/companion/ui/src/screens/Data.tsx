@@ -69,6 +69,7 @@ function ServerLink({
   onError: (e: string) => void;
 }) {
   const [slip, setSlip] = useState('');
+  const [address, setAddress] = useState(link.manual_address ?? '');
   const [busy, setBusy] = useState(false);
   const run = (p: Promise<LinkView>) => {
     setBusy(true);
@@ -170,6 +171,32 @@ function ServerLink({
         </>
       ) : null}
       {link.message ? <p class="status" role="status">{link.message}</p> : null}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!busy) run(call('server_set_address', { address: address.trim() }));
+        }}
+      >
+        <label class="field">
+          <span>Server address (only if the office server moved and can't be found)</span>
+          <input
+            type="text"
+            spellcheck={false}
+            autocomplete="off"
+            placeholder="192.168.1.20"
+            value={address}
+            aria-describedby="address-note"
+            onInput={(e) => setAddress(e.currentTarget.value)}
+          />
+        </label>
+        <p class="note" id="address-note">
+          Leave empty to find it by name. Wherever it is, the server must prove it is the one you
+          paired with.
+        </p>
+        <button type="submit" class="btn" disabled={busy}>
+          Save address
+        </button>
+      </form>
       <p>
         <button type="button" class="btn" disabled={busy} onClick={() => run(call('server_refresh'))}>
           Check again

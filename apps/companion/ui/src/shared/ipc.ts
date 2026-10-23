@@ -77,6 +77,7 @@ interface Commands {
   server_refresh: { args: undefined; result: LinkView };
   server_unpair: { args: undefined; result: LinkView };
   server_notice_seen: { args: { deviceRef: string }; result: LinkView };
+  server_set_address: { args: { address: string }; result: LinkView };
 }
 
 type Name = keyof Commands;

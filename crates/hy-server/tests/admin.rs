@@ -5,7 +5,9 @@
 
 mod common;
 
-use common::{Harness, admin_login, admin_request, csrf_in, http, urlencode};
+use common::{
+    Harness, admin_login, admin_request, csrf_in, http, test_config, test_limits, urlencode,
+};
 use hy_core::clock::Clock;
 use hy_core::protocol::hex;
 use hy_core::protocol::words::{device_check_code, fingerprint_phrase};
@@ -202,6 +204,52 @@ async fn t_s12d_wrong_passphrases_get_exponential_backoff() {
     let cookie = admin_login(&h, PASS).await;
     assert!(!cookie.is_empty());
     assert_eq!(locked(&h).0, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t_s12e_simultaneous_wrong_passphrases_cannot_beat_the_backoff_or_pile_up_argon2() {
+    // A costlier Argon2 than the other tests so the checks would overlap if allowed.
+    let config = hy_server::Config {
+        argon2: (16 * 1024, 2, 1),
+        ..test_config()
+    };
+    let h = Harness::start_with(config, test_limits()).await;
+    h.server
+        .set_admin_passphrase(&Secret::new(PASS.to_owned()))
+        .unwrap();
+    let request = admin_request(
+        "POST",
+        "/login",
+        &host(&h),
+        Some(&origin(&h)),
+        None,
+        Some(&format!("passphrase={}", urlencode("wrong passphrase!"))),
+    );
+    let mut tasks = Vec::new();
+    for _ in 0..24 {
+        let (addr, req) = (h.admin, request.clone());
+        tasks.push(tokio::spawn(async move { http(addr, &req).await.0 }));
+    }
+    let mut statuses = Vec::new();
+    for t in tasks {
+        statuses.push(t.await.unwrap());
+    }
+    let wrong = statuses.iter().filter(|s| **s == 401).count();
+    let refused = statuses.iter().filter(|s| **s == 429).count();
+    // The clock does not move: after the first failure everything is locked, and an
+    // attempt during a running check is refused without one.
+    assert_eq!((wrong, refused), (1, 23), "{statuses:?}");
+    let failures: i64 = h
+        .server
+        .db()
+        .query_row("SELECT failures FROM admin WHERE id = 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(failures, 1);
+    assert_eq!(
+        h.server.peak_login_checks(),
+        1,
+        "one Argon2 check at a time"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

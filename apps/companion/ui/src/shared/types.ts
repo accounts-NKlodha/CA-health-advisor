@@ -449,6 +449,8 @@ export interface LinkView {
   /** This PC's check code, to read out. */
   check_code: string | null;
   confirmed_on: string | null;
+  /** The address the user entered for when the server's IP changed. */
+  manual_address: string | null;
   devices: PairedPc[];
   /** About the last action (offline, revoked, history mismatch...). */
   message: string | null;

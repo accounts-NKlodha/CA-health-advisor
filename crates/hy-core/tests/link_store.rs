@@ -408,3 +408,58 @@ fn unpairing_locally_removes_the_link_receipt_devices_and_queue_in_one_step() {
     );
     assert!(!s.store.unpair_locally().unwrap(), "already unpaired");
 }
+
+#[test]
+fn importing_a_backup_onto_a_confirmed_pc_unpairs_it_in_the_same_transaction() {
+    let mut s = setup();
+    s.server.push(EntryBody::DeviceConfirmed {
+        device_ref: *s.me.as_bytes(),
+    });
+    s.store
+        .apply_confirmed_state(&s.server.state(0, vec![device(s.me, "PC-1")]))
+        .unwrap();
+    let op = s
+        .store
+        .request_enable(Category::Hydration, "notice-1")
+        .unwrap();
+    s.store
+        .accept_enable(
+            op,
+            3,
+            chrono::NaiveDate::from_ymd_opt(2026, 10, 23).unwrap(),
+        )
+        .unwrap();
+    assert!(s.store.sharing_policy(Category::Hydration).unwrap().enabled);
+
+    let clock: Arc<dyn Clock> = Arc::new(ManualClock::new(
+        Utc.with_ymd_and_hms(2026, 10, 22, 6, 0, 0).unwrap(),
+    ));
+    let other = Store::open_in_memory(clock).unwrap();
+    let contents = other.backup_contents().unwrap();
+
+    // A refused import changes nothing: the PC stays paired and sharing stays on.
+    let mut refused = contents.clone();
+    refused.schema_version += 1;
+    assert!(s.store.import_contents(&refused).is_err());
+    let mut bad_table = contents.clone();
+    bad_table
+        .tables
+        .insert("server_link".into(), contents.tables["settings"].clone());
+    assert!(s.store.import_contents(&bad_table).is_err());
+    assert!(s.store.server_link().unwrap().is_some());
+    assert!(s.store.head_receipt().unwrap().is_some());
+    assert!(s.store.sharing_policy(Category::Hydration).unwrap().enabled);
+
+    s.store.import_contents(&contents).unwrap();
+    assert!(s.store.server_link().unwrap().is_none());
+    assert!(s.store.head_receipt().unwrap().is_none());
+    assert!(s.store.paired_devices().unwrap().is_empty());
+    for c in Category::ALL.iter().copied() {
+        assert!(!s.store.sharing_policy(c).unwrap().enabled, "{c:?}");
+    }
+    assert!(s.store.outbox().unwrap().is_empty());
+    assert_eq!(
+        s.store.consent_log().unwrap().last().unwrap().kind,
+        ConsentKind::Unpaired
+    );
+}

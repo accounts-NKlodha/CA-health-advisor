@@ -19,6 +19,7 @@
 
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use axum::Router;
@@ -320,43 +321,63 @@ struct LoginForm {
     passphrase: String,
 }
 
+fn too_many(wait_s: i64) -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        page(
+            "Wait",
+            &format!("<p class=\"warn\">Too many failed sign-ins. Try again in {wait_s} s.</p>"),
+        ),
+    )
+        .into_response()
+}
+
+/// Sign in. Only one passphrase check runs at a time, process-wide: a sign-in that finds
+/// one running is refused at once (never queued), so concurrent wrong attempts can
+/// neither run many 64 MiB Argon2 jobs nor all read the same failure count. The count
+/// and the lock are read again after the permit is taken and the failure is written
+/// from that fresh value before the permit is released.
 async fn login(State(st): State<AdminState>, Form(form): Form<LoginForm>) -> Response {
     let pass = Secret::new(form.passphrase);
+    let Ok(_permit) = st.server.login_gate.try_acquire() else {
+        return too_many(1);
+    };
     let now = st.server.clock.now().timestamp_millis();
-    let row: Option<(String, i64, i64)> = st
+    let row: Option<(String, i64)> = st
         .server
         .db()
         .query_row(
-            "SELECT passphrase_hash, failures, locked_until FROM admin WHERE id = 1",
+            "SELECT passphrase_hash, locked_until FROM admin WHERE id = 1",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
         .unwrap_or(None);
-    let Some((stored, failures, locked_until)) = row else {
+    let Some((stored, locked_until)) = row else {
         return to_login();
     };
     if now < locked_until {
-        let wait = (locked_until - now + 999) / 1000;
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            page(
-                "Wait",
-                &format!("<p class=\"warn\">Too many failed sign-ins. Try again in {wait} s.</p>"),
-            ),
-        )
-            .into_response();
+        return too_many((locked_until - now + 999) / 1000);
     }
-    let ok = tokio::task::spawn_blocking(move || verify_passphrase(&stored, &pass))
-        .await
-        .unwrap_or(false);
+    let server = st.server.clone();
+    let ok = tokio::task::spawn_blocking(move || {
+        let (running, peak) = &server.login_checks;
+        let n = running.fetch_add(1, Ordering::SeqCst) + 1;
+        peak.fetch_max(n, Ordering::SeqCst);
+        let ok = verify_passphrase(&stored, &pass);
+        running.fetch_sub(1, Ordering::SeqCst);
+        ok
+    })
+    .await
+    .unwrap_or(false);
     let conn = st.server.db();
     if !ok {
-        let failures = failures + 1;
-        let backoff = 1i64 << (failures - 1).clamp(0, 10);
+        // Counted from the stored value, inside the permit.
         let _ = conn.execute(
-            "UPDATE admin SET failures = ?1, locked_until = ?2 WHERE id = 1",
-            params![failures, now + backoff.min(MAX_BACKOFF_S) * 1000],
+            "UPDATE admin SET failures = failures + 1,
+                 locked_until = ?1 + 1000 * min(?2, 1 << min(failures, 10))
+             WHERE id = 1",
+            params![now, MAX_BACKOFF_S],
         );
         let _ = audit::record(&conn, now, AuditEvent::AdminLoginFailed, None, None, None);
         return (
@@ -581,7 +602,7 @@ async fn dashboard(State(st): State<AdminState>, headers: HeaderMap) -> Response
 fn admin_error(e: AdminError) -> Response {
     let status = match e {
         AdminError::NotFound => StatusCode::NOT_FOUND,
-        AdminError::Storage => StatusCode::SERVICE_UNAVAILABLE,
+        AdminError::Storage | AdminError::NoRandom => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::CONFLICT,
     };
     (

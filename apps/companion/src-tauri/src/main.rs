@@ -182,6 +182,7 @@ fn main() {
             commands::server_refresh,
             commands::server_unpair,
             commands::server_notice_seen,
+            commands::server_set_address,
         ])
         .setup(setup)
         .build(tauri::generate_context!());

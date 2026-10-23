@@ -411,6 +411,15 @@ pub async fn server_unpair(shell: ShellState<'_>) -> Result<LinkView, String> {
     server_link::unpair(shell.inner().clone()).await
 }
 
+/// "Server address": the IP address to try when the server moved (empty clears it).
+///
+/// # Errors
+/// A malformed address or a store failure, worded for the user.
+#[tauri::command]
+pub fn server_set_address(shell: ShellState<'_>, address: String) -> Result<LinkView, String> {
+    server_link::set_address(&shell, &address)
+}
+
 /// The user saw the new-device notice for a PC.
 ///
 /// # Errors

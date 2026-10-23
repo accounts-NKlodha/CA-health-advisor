@@ -6,6 +6,7 @@
 //! revocation takes effect on the next request (6.3).
 
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -129,6 +130,8 @@ pub enum AdminError {
     Hold,
     /// The database failed.
     Storage,
+    /// The system random generator failed: nothing was issued.
+    NoRandom,
 }
 
 impl std::fmt::Display for AdminError {
@@ -144,7 +147,46 @@ impl std::fmt::Display for AdminError {
             }
             Self::Hold => "This user's shared history is in recovery hold.",
             Self::Storage => "The server database failed. Nothing was changed.",
+            Self::NoRandom => {
+                "The server could not generate a secure random value. Nothing was issued."
+            }
         })
+    }
+}
+
+/// The system random generator failed. Every caller fails closed: no slip, token,
+/// device id, user id or salt is issued from a value that was not filled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoRandom;
+
+impl From<NoRandom> for AdminError {
+    fn from(_: NoRandom) -> Self {
+        Self::NoRandom
+    }
+}
+
+impl From<NoRandom> for Refusal {
+    fn from(_: NoRandom) -> Self {
+        Self::Wire(WireError::CannotRecord)
+    }
+}
+
+/// Where the server's random bytes come from: the system generator, or a fault-injected
+/// source in tests.
+#[doc(hidden)]
+pub trait Entropy: Send + Sync {
+    /// Fill `out` entirely, or return [`NoRandom`].
+    ///
+    /// # Errors
+    /// [`NoRandom`] if the generator failed.
+    fn fill(&self, out: &mut [u8]) -> Result<(), NoRandom>;
+}
+
+struct SystemEntropy(SystemRandom);
+
+impl Entropy for SystemEntropy {
+    fn fill(&self, out: &mut [u8]) -> Result<(), NoRandom> {
+        self.0.fill(out).map_err(|_| NoRandom)
     }
 }
 
@@ -220,7 +262,12 @@ pub struct Server {
     pub clock: Arc<dyn Clock>,
     /// Settings.
     pub config: Config,
-    rng: SystemRandom,
+    rng: Box<dyn Entropy>,
+    /// One admin passphrase check at a time (each Argon2 run takes 64 MiB): a sign-in
+    /// that finds it taken is refused at once, never queued.
+    pub(crate) login_gate: tokio::sync::Semaphore,
+    /// Passphrase checks running now and the most ever seen at once (for the bound test).
+    pub(crate) login_checks: (AtomicUsize, AtomicUsize),
 }
 
 impl std::fmt::Debug for Server {
@@ -252,8 +299,24 @@ impl Server {
             keys,
             clock,
             config,
-            rng: SystemRandom::new(),
+            rng: Box::new(SystemEntropy(SystemRandom::new())),
+            login_gate: tokio::sync::Semaphore::new(1),
+            login_checks: (AtomicUsize::new(0), AtomicUsize::new(0)),
         }
+    }
+
+    /// The most admin passphrase checks that ever ran at once (tests: always at most 1).
+    #[doc(hidden)]
+    pub fn peak_login_checks(&self) -> usize {
+        self.login_checks.1.load(Ordering::SeqCst)
+    }
+
+    /// Replace the random source (fault-injection tests only).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_entropy(mut self, rng: Box<dyn Entropy>) -> Self {
+        self.rng = rng;
+        self
     }
 
     /// The database connection (single writer).
@@ -265,12 +328,11 @@ impl Server {
         ms(self.clock.now())
     }
 
-    fn random<const N: usize>(&self) -> [u8; N] {
+    fn random<const N: usize>(&self) -> Result<[u8; N], NoRandom> {
         let mut out = [0u8; N];
-        // aws-lc's system RNG does not fail on supported platforms; if it ever did, an
-        // all-zero value would be refused by the unique constraints rather than reused.
-        let _ = self.rng.fill(&mut out);
-        out
+        // Fail closed: a value the generator did not fill is never issued.
+        self.rng.fill(&mut out)?;
+        Ok(out)
     }
 
     fn user_zone(conn: &Connection, user: &[u8; 16]) -> rusqlite::Result<UserZone> {
@@ -293,7 +355,7 @@ impl Server {
         if !label_ok(alias, MAX_LABEL) {
             return Err(AdminError::BadAlias);
         }
-        let user: [u8; 16] = self.random();
+        let user: [u8; 16] = self.random()?;
         let now = self.now_ms();
         let conn = self.db();
         conn.execute(
@@ -330,7 +392,7 @@ impl Server {
         if outstanding >= MAX_OUTSTANDING_SLIPS {
             return Err(AdminError::TooManySlips);
         }
-        let secret: [u8; SLIP_SECRET_LEN] = self.random();
+        let secret: [u8; SLIP_SECRET_LEN] = self.random()?;
         tx.execute(
             "INSERT INTO slips (slip_hash, user_id, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
             params![
@@ -596,7 +658,7 @@ impl Server {
         if passphrase.expose().chars().count() < 12 {
             return Err(AdminError::BadAlias);
         }
-        let salt: [u8; 16] = self.random();
+        let salt: [u8; 16] = self.random()?;
         let stored = crate::admin::hash_passphrase(passphrase, &salt, self.config.argon2)
             .ok_or(AdminError::Storage)?;
         let now = self.now_ms();
@@ -738,9 +800,9 @@ impl Server {
                     None,
                 )?;
             }
-            let token = Secret::new(self.random::<TOKEN_LEN>());
+            let token = Secret::new(self.random::<TOKEN_LEN>()?);
             let verifier = token_verifier(token.expose());
-            let device: [u8; 16] = self.random();
+            let device: [u8; 16] = self.random()?;
             tx.execute(
                 "INSERT INTO devices (device_ref, user_id, origin_device, label, app_version,
                      windows_build, token_verifier, state, created_at)
