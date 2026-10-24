@@ -14,13 +14,14 @@ use hy_core::coach::movement::PROVISIONAL_NOTICE;
 use hy_core::coach::water::WaterPace;
 use hy_core::coach::{
     ActiveRoutine, Bubble as CoachBubble, CheckInAnswer, Chip, ChipStatus, CoachView, GuideAction,
-    GuideStage, GuideView, HiddenReason, Input, PauseLength, PetMode, PhoneInput, PomodoroPause,
-    PomodoroPhase, PomodoroPreset, PomodoroView, RecoveryAction, RecoveryPlan, RecoveryView,
-    Reflection, ReminderReason, Response, Servings, WaterEdit, WaterEntry, WaterInput,
+    GuideStage, GuideView, HiddenReason, Input, MeditationAction, MeditationView, PauseLength,
+    PetMode, PhoneInput, PomodoroPause, PomodoroPhase, PomodoroPreset, PomodoroView,
+    RecoveryAction, RecoveryPlan, RecoveryView, Reflection, ReminderReason, Response, Servings,
+    WaterEdit, WaterEntry, WaterInput,
 };
 use hy_core::schema::{
-    Activity, EventPayload, GoalKind, PhoneLabel, ReminderOutcome, RoutineOutcome, RoutineVariant,
-    SessionState, StepOutcome,
+    Activity, EventPayload, GoalKind, MeditationVersion, PhoneLabel, ReminderOutcome,
+    RoutineOutcome, RoutineVariant, SessionState, StepOutcome,
 };
 use hy_core::store::Store;
 use proptest::prelude::*;
@@ -232,7 +233,25 @@ fn all_bubbles() -> Vec<CoachBubble> {
             at: NaiveTime::from_hms_opt(11, 52, 0).unwrap(),
             label: None,
         },
+        CoachBubble::MeditationInvite,
+        CoachBubble::Meditation(meditation_view(0, false, false)),
+        CoachBubble::Meditation(MeditationView {
+            version: MeditationVersion::EyesOpen,
+            ..meditation_view(4, true, false)
+        }),
+        CoachBubble::Meditation(meditation_view(4, false, true)),
     ]
+}
+
+fn meditation_view(part: u32, paused: bool, done: bool) -> MeditationView {
+    MeditationView {
+        minutes: 5,
+        version: MeditationVersion::Breath,
+        part,
+        paused,
+        part_left: Duration::from_secs(60),
+        done,
+    }
 }
 
 fn entry_id(n: u128) -> Uuid {
@@ -3033,6 +3052,98 @@ fn the_review_offer_routes_its_three_answers() {
     });
     let b = present::bubble(v.bubble.as_ref().unwrap(), &v);
     assert!(b.actions.iter().all(|a| a.id != "review_later"));
+}
+
+#[test]
+fn the_meditation_cards_offer_their_choices_and_route_them() {
+    let v = view(PetMode::Idle);
+    let k = BubbleKind::MeditationInvite;
+    assert_eq!(BubbleKind::parse(&k.id(4)), Some(k));
+    let b = present::bubble(&CoachBubble::MeditationInvite, &v);
+    assert_eq!(b.title, "A short pause?");
+    assert_eq!(
+        b.actions.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+        vec![
+            "meditate_2",
+            "meditate_5",
+            "meditate_10",
+            "meditate_not_today"
+        ]
+    );
+    // 5 minutes is the one offered first.
+    let primary: Vec<&str> = b
+        .actions
+        .iter()
+        .filter(|a| a.style == crate::shell::ActionStyle::Primary)
+        .map(|a| a.id.as_str())
+        .collect();
+    assert_eq!(primary, vec!["meditate_5"]);
+    assert!(b.note.as_deref().unwrap().contains("Provisional"));
+    assert_eq!(
+        bubble_command(k, "meditate_10"),
+        Some(Input::Meditation(MeditationAction::Start(10)))
+    );
+    assert_eq!(
+        bubble_command(k, "meditate_not_today"),
+        Some(Input::Meditation(MeditationAction::NotToday))
+    );
+    for junk in ["meditate_3", "meditate_next", "meditate_", "ok"] {
+        assert_eq!(bubble_command(k, junk), None, "{junk}");
+    }
+
+    let k = BubbleKind::Meditation;
+    let b = present::bubble(
+        &CoachBubble::Meditation(meditation_view(0, false, false)),
+        &v,
+    );
+    assert_eq!(b.title, "Settle");
+    assert!(b.continues);
+    let p = b.progress.as_ref().unwrap();
+    assert_eq!((p.value, p.max), (1, 5));
+    assert_eq!(p.label, "Part 1 of 5 (5-minute pause)");
+    assert_eq!(
+        all_actions(&b),
+        vec![
+            "meditate_next",
+            "meditate_pause",
+            "meditate_stop",
+            "meditate_switch"
+        ]
+    );
+    // The last part says Finish; paused shows Resume and says so.
+    let b = present::bubble(
+        &CoachBubble::Meditation(meditation_view(4, true, false)),
+        &v,
+    );
+    assert_eq!(b.actions[0].label, "Finish");
+    assert_eq!(b.actions[1].id, "meditate_resume");
+    assert!(b.lines.iter().any(|l| l.starts_with("Paused")));
+    // The eyes-open version never mentions the breath, and offers the breath version back.
+    let eyes = CoachBubble::Meditation(MeditationView {
+        version: MeditationVersion::EyesOpen,
+        ..meditation_view(1, false, false)
+    });
+    let b = present::bubble(&eyes, &v);
+    assert!(b.lines.iter().all(|l| !l.to_lowercase().contains("breath")));
+    assert_eq!(b.actions[3].label, "Breath version");
+    // The last screen.
+    let b = present::bubble(
+        &CoachBubble::Meditation(meditation_view(4, false, true)),
+        &v,
+    );
+    assert_eq!(b.title, "Done. Back to work whenever you are ready.");
+    assert_eq!(all_actions(&b), vec!["ok"]);
+    for (id, want) in [
+        ("meditate_next", MeditationAction::Next),
+        ("meditate_pause", MeditationAction::Pause),
+        ("meditate_resume", MeditationAction::Resume),
+        ("meditate_switch", MeditationAction::Switch),
+        ("meditate_stop", MeditationAction::Stop),
+        ("ok", MeditationAction::Close),
+    ] {
+        assert_eq!(bubble_command(k, id), Some(Input::Meditation(want)), "{id}");
+    }
+    assert_eq!(bubble_command(k, "meditate_5"), None);
 }
 
 #[test]

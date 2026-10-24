@@ -12,6 +12,8 @@
 //! - [`movement`]: the guided movement routine's bundled content (provisional, pending
 //!   the content review).
 //! - [`recovery`]: the deadline day and the one pending recovery-day plan.
+//! - [`meditation`]: the meditation pause's bundled text (V2-4; provisional, pending the
+//!   content review).
 //! - [`types`]: inputs, the view, and notices.
 //!
 //! Persistence: the engine state, the reminder events and the per-day tracker tallies of
@@ -21,19 +23,22 @@
 pub mod config;
 pub mod driver;
 pub mod engine;
+pub mod meditation;
 pub mod movement;
 pub mod recovery;
 pub mod types;
 pub mod water;
 
-pub use config::{CoachConfig, Intensity, MovementVersion, PomodoroPreset, ReviewTime};
+pub use config::{
+    CoachConfig, Intensity, MeditationTime, MovementVersion, PomodoroPreset, ReviewTime,
+};
 pub use driver::Coach;
 pub use engine::{ActivityState, Context, DayTally, Engine, EngineState, StepOutput};
 pub use recovery::{RecoveryAction, RecoveryPlan, RecoveryView, Reflection};
 pub use types::{
     ActiveRoutine, Bubble, CheckInAnswer, Chip, ChipStatus, CoachView, Confirmation, FocusEnd,
-    GuideAction, GuideStage, GuideView, HiddenReason, Hold, Input, InputOutcome, Notice,
-    PauseLength, PetMode, PhoneInput, PomodoroPause, PomodoroPhase, PomodoroView, ReminderReason,
-    Response, ReviewAnswer, WaterEdit, WaterInput,
+    GuideAction, GuideStage, GuideView, HiddenReason, Hold, Input, InputOutcome, MeditationAction,
+    MeditationView, Notice, PauseLength, PetMode, PhoneInput, PomodoroPause, PomodoroPhase,
+    PomodoroView, ReminderReason, Response, ReviewAnswer, WaterEdit, WaterInput,
 };
 pub use water::{Servings, WaterEntry, WaterPace, WaterSnapshot};

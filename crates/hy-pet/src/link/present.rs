@@ -9,13 +9,14 @@
 use std::time::Duration;
 
 use chrono::{NaiveDate, NaiveTime, Weekday};
+use hy_core::coach::meditation::{self, MEDITATION_MINUTES, MEDITATION_PARTS};
 use hy_core::coach::movement::{
     INTRO_SAFETY, PROVISIONAL, PROVISIONAL_NOTICE, STEP_SAFETY, routine_for,
 };
 use hy_core::coach::water::{WATER_DEFAULT_SERVING_ML, WATER_STEP_ML};
 use hy_core::coach::{
-    Bubble as CoachBubble, Chip, ChipStatus, CoachView, GuideStage, GuideView, PetMode,
-    PomodoroPause, PomodoroPhase, PomodoroView, RecoveryPlan, ReminderReason, WaterEdit,
+    Bubble as CoachBubble, Chip, ChipStatus, CoachView, GuideStage, GuideView, MeditationView,
+    PetMode, PomodoroPause, PomodoroPhase, PomodoroView, RecoveryPlan, ReminderReason, WaterEdit,
 };
 use hy_core::schema::{Activity, PhoneLabel, RoutineOutcome, RoutineVariant, SessionState};
 use uuid::Uuid;
@@ -159,6 +160,21 @@ pub mod action {
     pub const REVIEW_LATER: &str = "review_later";
     /// "Skip this week".
     pub const REVIEW_SKIP: &str = "review_skip";
+    // Meditation invitation and pause (B12, V2-4).
+    /// Prefix of a length on the invitation: `meditate_2`, `meditate_5`, `meditate_10`.
+    pub const MEDITATE_PREFIX: &str = "meditate_";
+    /// "Not today" on the invitation.
+    pub const MEDITATE_NOT_TODAY: &str = "meditate_not_today";
+    /// "Next" in the pause.
+    pub const MEDITATE_NEXT: &str = "meditate_next";
+    /// "Pause" in the pause.
+    pub const MEDITATE_PAUSE: &str = "meditate_pause";
+    /// "Resume" in the pause.
+    pub const MEDITATE_RESUME: &str = "meditate_resume";
+    /// The other version (breath-focused or eyes open).
+    pub const MEDITATE_SWITCH: &str = "meditate_switch";
+    /// "Stop" in the pause.
+    pub const MEDITATE_STOP: &str = "meditate_stop";
 
     // Pet menu, keyboard panel and tray (B1, B5, B6, T1).
     /// "Show waiting reminder" or "Show Pomodoro card".
@@ -263,6 +279,10 @@ pub enum BubbleKind {
     PhoneNote,
     /// The weekly review offer.
     ReviewOffer,
+    /// The meditation invitation.
+    MeditationInvite,
+    /// The meditation pause.
+    Meditation,
 }
 
 impl BubbleKind {
@@ -288,11 +308,13 @@ impl BubbleKind {
             CoachBubble::WaterPanel { .. } => Self::WaterPanel,
             CoachBubble::PhoneNote { .. } => Self::PhoneNote,
             CoachBubble::ReviewOffer { .. } => Self::ReviewOffer,
+            CoachBubble::MeditationInvite => Self::MeditationInvite,
+            CoachBubble::Meditation(_) => Self::Meditation,
         }
     }
 
     /// The fixed keys (every kind but a reminder, whose key carries its offer).
-    const FIXED: [(Self, &'static str); 17] = [
+    const FIXED: [(Self, &'static str); 19] = [
         (Self::PomodoroBreak, "pomodoro-break"),
         (Self::PomodoroRoundDone, "pomodoro-round"),
         (Self::PomodoroPaused, "pomodoro-paused"),
@@ -310,6 +332,8 @@ impl BubbleKind {
         (Self::WaterPanel, "water-panel"),
         (Self::PhoneNote, "phone-note"),
         (Self::ReviewOffer, "review-offer"),
+        (Self::MeditationInvite, "meditation-invite"),
+        (Self::Meditation, "meditation"),
     ];
 
     fn key(self) -> String {
@@ -1176,6 +1200,93 @@ pub fn bubble(b: &CoachBubble, view: &CoachView) -> Bubble {
                 actions,
             )
         }
+        CoachBubble::MeditationInvite => {
+            let mut actions: Vec<_> = MEDITATION_MINUTES
+                .iter()
+                .map(|m| {
+                    act(
+                        &format!("{}{m}", action::MEDITATE_PREFIX),
+                        &format!("{m} min"),
+                        if *m == meditation::DEFAULT_MINUTES {
+                            Primary
+                        } else {
+                            Normal
+                        },
+                    )
+                })
+                .collect();
+            actions.push(act(action::MEDITATE_NOT_TODAY, "Not today", Link));
+            Bubble {
+                note: meditation_note(),
+                ..card(
+                    meditation::INVITATION_TITLE,
+                    vec![meditation::INVITATION_LINE.to_owned()],
+                    actions,
+                )
+            }
+        }
+        CoachBubble::Meditation(m) => meditation_card(&m),
+    }
+}
+
+fn meditation_note() -> Option<String> {
+    meditation::PROVISIONAL.then(|| meditation::PROVISIONAL_NOTICE.to_owned())
+}
+
+/// The meditation pause's card (wireframe B12): one part at a time, with Next, Pause or
+/// Resume, Stop and the other version; then the last screen. No countdown is drawn (the
+/// card would change every few seconds); the part number shows the way through.
+fn meditation_card(m: &MeditationView) -> Bubble {
+    use ActionStyle::{Link, Normal, Primary};
+    if m.done {
+        return Bubble {
+            title: meditation::DONE_TITLE.to_owned(),
+            actions: vec![act(action::OK, "OK", Primary)],
+            note: meditation_note(),
+            ..Bubble::default()
+        };
+    }
+    let parts = meditation::parts(m.version);
+    let index = usize::try_from(m.part).unwrap_or(0).min(parts.len() - 1);
+    let part = parts[index];
+    let mut lines: Vec<String> = part.lines.iter().map(|l| (*l).to_owned()).collect();
+    if m.paused {
+        lines.push("Paused. Resume when you are ready.".to_owned());
+    }
+    let last = m.part + 1 >= MEDITATION_PARTS;
+    Bubble {
+        title: part.title.to_owned(),
+        lines,
+        progress: Some(BubbleProgress {
+            value: m.part + 1,
+            max: MEDITATION_PARTS,
+            label: format!(
+                "Part {} of {MEDITATION_PARTS} ({}-minute pause)",
+                m.part + 1,
+                m.minutes
+            ),
+        }),
+        actions: vec![
+            act(
+                action::MEDITATE_NEXT,
+                if last { "Finish" } else { "Next" },
+                Primary,
+            ),
+            if m.paused {
+                act(action::MEDITATE_RESUME, "Resume", Normal)
+            } else {
+                act(action::MEDITATE_PAUSE, "Pause", Normal)
+            },
+            act(action::MEDITATE_STOP, "Stop", Normal),
+            act(
+                action::MEDITATE_SWITCH,
+                meditation::switch_label(m.version),
+                Link,
+            ),
+        ],
+        note: meditation_note(),
+        continues: true,
+        ..Bubble::default()
     }
 }
 

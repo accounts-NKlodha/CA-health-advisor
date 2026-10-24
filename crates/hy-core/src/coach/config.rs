@@ -205,6 +205,16 @@ impl Default for ReviewTime {
     }
 }
 
+/// The daily meditation invitation (V2-4; wireframe W11, CAL-01): off until the user sets
+/// a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeditationTime {
+    /// Local time of the invitation, minute precision; `None` is off.
+    #[serde(with = "crate::time::hhmm_opt")]
+    pub at: Option<NaiveTime>,
+}
+
 /// The user's coaching settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -228,6 +238,9 @@ pub struct CoachConfig {
     /// When the weekly review is offered (wireframe B9; slice V1-4).
     #[serde(default)]
     pub review: ReviewTime,
+    /// The daily meditation invitation (V2-4), off until a time is set.
+    #[serde(default)]
+    pub meditation: MeditationTime,
 }
 
 impl Default for CoachConfig {
@@ -241,6 +254,7 @@ impl Default for CoachConfig {
             pomodoro_auto_start: false,
             movement_version: MovementVersion::Ask,
             review: ReviewTime::default(),
+            meditation: MeditationTime::default(),
         }
     }
 }
@@ -257,6 +271,13 @@ impl CoachConfig {
         }
         if self.review.at.second() != 0 || self.review.at.nanosecond() != 0 {
             return Err(Error::invalid("the review time uses whole minutes"));
+        }
+        if self
+            .meditation
+            .at
+            .is_some_and(|t| t.second() != 0 || t.nanosecond() != 0)
+        {
+            return Err(Error::invalid("the meditation time uses whole minutes"));
         }
         Ok(())
     }
@@ -387,6 +408,40 @@ mod tests {
         assert_eq!(c.movement_version, MovementVersion::Ask);
         assert_eq!(c.review, ReviewTime::default());
         assert!(c.pomodoro_auto_start);
+    }
+
+    #[test]
+    fn the_meditation_invitation_is_off_until_a_time_is_set() {
+        let c = CoachConfig::default();
+        assert_eq!(c.meditation.at, None);
+        let v = serde_json::to_value(c).unwrap();
+        assert_eq!(v["meditation"]["at"], serde_json::Value::Null);
+        let set = CoachConfig {
+            meditation: MeditationTime {
+                at: NaiveTime::from_hms_opt(15, 30, 0),
+            },
+            ..CoachConfig::default()
+        };
+        let v = serde_json::to_value(set).unwrap();
+        assert_eq!(v["meditation"]["at"], "15:30");
+        assert_eq!(serde_json::from_value::<CoachConfig>(v).unwrap(), set);
+        // Settings saved before V2-4 load with the invitation off.
+        let mut old = serde_json::to_value(CoachConfig::default()).unwrap();
+        old.as_object_mut().unwrap().remove("meditation");
+        assert_eq!(
+            serde_json::from_value::<CoachConfig>(old)
+                .unwrap()
+                .meditation,
+            MeditationTime::default()
+        );
+        let bad = CoachConfig {
+            meditation: MeditationTime {
+                at: NaiveTime::from_hms_opt(15, 30, 10),
+            },
+            ..CoachConfig::default()
+        };
+        assert!(bad.validate().is_err());
+        assert!(serde_json::from_str::<MeditationTime>(r#"{"at":"25:00"}"#).is_err());
     }
 
     #[test]

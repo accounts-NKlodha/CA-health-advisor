@@ -414,6 +414,26 @@ pub(crate) mod hhmm {
     }
 }
 
+/// Serde for an optional minute-precision local time as `"HH:MM"` or `null`.
+pub(crate) mod hhmm_opt {
+    use chrono::NaiveTime;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    #[allow(clippy::ref_option)] // serde's `with` passes the field by reference
+    pub fn serialize<S: Serializer>(t: &Option<NaiveTime>, s: S) -> Result<S::Ok, S::Error> {
+        match t {
+            Some(t) => super::hhmm::serialize(t, s),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<NaiveTime>, D::Error> {
+        #[derive(Deserialize)]
+        struct Wrap(#[serde(with = "super::hhmm")] NaiveTime);
+        Ok(Option::<Wrap>::deserialize(d)?.map(|w| w.0))
+    }
+}
+
 /// The user's work hours (RHY-01, WAT-02; wireframes W1 step 4 and W5).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
