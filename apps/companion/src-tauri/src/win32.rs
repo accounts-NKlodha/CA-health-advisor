@@ -20,6 +20,12 @@
 //!
 //! - The server link's token is sealed with user-scope DPAPI (`CryptProtectData`, V1-5
 //!   contract 6.1): only this Windows user on this PC can open it.
+//! - Install and update (slice V1-6): the standard Open dialog for choosing an update
+//!   file, running an installer through the shell (`ShellExecuteExW`, so Windows applies
+//!   its usual checks to a downloaded file: nothing is bypassed) and waiting for it,
+//!   waiting for a process to end, the per-user Run value for start at sign-in, a named
+//!   mutex that says the app is running, a yes/no message box, and the process's DPI
+//!   awareness for the self-test.
 //!
 //! Window handles cross this module as `isize` so callers need no unsafe code.
 
@@ -434,4 +440,318 @@ pub fn unprotect_user(sealed: &[u8], entropy: &[u8]) -> std::io::Result<Secret<V
         return Err(std::io::Error::last_os_error());
     }
     Ok(Secret::new(dpapi_take(&out)))
+}
+
+// ------------------------------------------------------------ install and update (V1-6)
+
+use std::ffi::{OsStr, OsString};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
+
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, GetLastError};
+use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+use windows_sys::Win32::System::Registry::{
+    HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_BINARY, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW,
+    RegSetKeyValueW,
+};
+use windows_sys::Win32::System::Threading::{
+    CreateMutexW, GetExitCodeProcess, INFINITE, OpenMutexW, OpenProcess, PROCESS_SYNCHRONIZE,
+    SYNCHRONIZATION_SYNCHRONIZE, WaitForSingleObject,
+};
+use windows_sys::Win32::UI::Controls::Dialogs::{
+    GetOpenFileNameW, OFN_DONTADDTORECENT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
+    OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+};
+use windows_sys::Win32::UI::HiDpi::{
+    GetAwarenessFromDpiAwarenessContext, GetThreadDpiAwarenessContext,
+};
+use windows_sys::Win32::UI::Shell::{
+    SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    IDYES, MB_ICONWARNING, MB_OK, MB_SETFOREGROUND, MB_YESNO, MessageBoxW, SW_SHOWNORMAL,
+};
+
+/// A NUL-terminated UTF-16 copy of `s`.
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
+
+/// A NUL-terminated UTF-16 copy of an OS string (a path).
+fn wide_os(s: &OsStr) -> Vec<u16> {
+    s.encode_wide().chain(Some(0)).collect()
+}
+
+/// Ask for a HealthierYou installer with the standard Open dialog, owned by `owner` (0
+/// for none). Runs on the calling thread, which must not be the UI thread: the dialog has
+/// its own message loop. `None` if the user cancelled.
+pub fn choose_installer(owner: isize, title: &str) -> Option<PathBuf> {
+    // Filter pairs are NUL-separated and the list ends with a second NUL.
+    let filter: Vec<u16> = "HealthierYou installer (*.exe)\0*.exe\0\0"
+        .encode_utf16()
+        .collect();
+    let title = wide(title);
+    let mut buf = vec![0u16; 32_768];
+    // SAFETY: COM is initialised for this thread only and released below if it was. The
+    // OPENFILENAMEW structure is fully zeroed then filled; every pointer in it (filter,
+    // title, file buffer with its length) points to a live local for the duration of the
+    // call. The dialog writes at most `nMaxFile` UTF-16 units into `buf`.
+    unsafe {
+        let co = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED.cast_unsigned());
+        let mut ofn: OPENFILENAMEW = std::mem::zeroed();
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+            ofn.nMaxFile = buf.len() as u32;
+        }
+        ofn.hwndOwner = hwnd(owner);
+        ofn.lpstrFilter = filter.as_ptr();
+        ofn.lpstrFile = buf.as_mut_ptr();
+        ofn.lpstrTitle = title.as_ptr();
+        ofn.Flags = OFN_FILEMUSTEXIST
+            | OFN_PATHMUSTEXIST
+            | OFN_EXPLORER
+            | OFN_NOCHANGEDIR
+            | OFN_DONTADDTORECENT
+            | OFN_HIDEREADONLY;
+        let ok = GetOpenFileNameW(&raw mut ofn) != 0;
+        if co >= 0 {
+            CoUninitialize();
+        }
+        if !ok {
+            return None;
+        }
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(PathBuf::from(OsString::from_wide(&buf[..len])))
+}
+
+/// How running a program through the shell ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellRun {
+    /// It ran and exited with this code.
+    Exited(u32),
+    /// The shell did not start it: the user declined a Windows prompt (1223), or a policy,
+    /// SmartScreen or antivirus blocked it. The Win32 error code.
+    NotStarted(u32),
+}
+
+/// Run `file` with `params` through the shell (`ShellExecuteExW`, verb "open") and wait
+/// for it to exit. The shell applies Windows' usual checks to a file marked as downloaded
+/// (Attachment Manager, SmartScreen), exactly as a double-click would; nothing here
+/// suppresses them.
+pub fn shell_run_and_wait(file: &Path, params: &str, dir: &Path) -> ShellRun {
+    let verb = wide("open");
+    let file = wide_os(file.as_os_str());
+    let params = wide(params);
+    let dir = wide_os(dir.as_os_str());
+    // SAFETY: the structure is zeroed then filled with pointers to live locals that
+    // outlive the call. With SEE_MASK_NOCLOSEPROCESS the shell returns a process handle,
+    // which is waited on and closed exactly once here.
+    unsafe {
+        let mut sei: SHELLEXECUTEINFOW = std::mem::zeroed();
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            sei.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+        }
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+        sei.lpVerb = verb.as_ptr();
+        sei.lpFile = file.as_ptr();
+        sei.lpParameters = params.as_ptr();
+        sei.lpDirectory = dir.as_ptr();
+        sei.nShow = SW_SHOWNORMAL;
+        if ShellExecuteExW(&raw mut sei) == 0 {
+            return ShellRun::NotStarted(GetLastError());
+        }
+        if sei.hProcess.is_null() {
+            // Handed to an already-running process (not the case for an .exe).
+            return ShellRun::Exited(0);
+        }
+        WaitForSingleObject(sei.hProcess, INFINITE);
+        let mut code = 0u32;
+        if GetExitCodeProcess(sei.hProcess, &raw mut code) == 0 {
+            code = u32::MAX;
+        }
+        CloseHandle(sei.hProcess);
+        ShellRun::Exited(code)
+    }
+}
+
+/// Wait up to `timeout` for process `pid` to end. True if it has ended (or never
+/// existed).
+pub fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
+    let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
+    // SAFETY: OpenProcess has no pointer arguments; a returned handle is waited on and
+    // closed exactly once.
+    unsafe {
+        let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if h.is_null() {
+            return true;
+        }
+        let r = WaitForSingleObject(h, ms);
+        CloseHandle(h);
+        r == 0
+    }
+}
+
+/// The named mutex that says a HealthierYou companion is running in this session.
+const RUNNING_MUTEX: &str = "Local\\HealthierYou.Companion.Running";
+
+/// Record that the companion is running (for the lifetime of this process).
+pub fn mark_running() {
+    let name = wide(RUNNING_MUTEX);
+    // SAFETY: a null security descriptor and a live name. The handle is deliberately kept
+    // open until the process ends, which is what marks the app as running.
+    unsafe {
+        let _ = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+    }
+}
+
+/// Whether a companion is running in this session (one that called [`mark_running`]).
+pub fn companion_running() -> bool {
+    let name = wide(RUNNING_MUTEX);
+    // SAFETY: a live name; a returned handle is closed at once.
+    unsafe {
+        let h = OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr());
+        if h.is_null() {
+            return false;
+        }
+        CloseHandle(h);
+        true
+    }
+}
+
+/// Ask a yes/no question in a standard message box (before any window exists). True for
+/// Yes.
+pub fn ask_yes_no(title: &str, text: &str) -> bool {
+    let (title, text) = (wide(title), wide(text));
+    // SAFETY: live, NUL-terminated strings; no owner window.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND,
+        ) == IDYES
+    }
+}
+
+/// Tell the user something in a standard message box (before any window exists).
+pub fn tell(title: &str, text: &str) {
+    let (title, text) = (wide(title), wide(text));
+    // SAFETY: as in `ask_yes_no`.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONWARNING | MB_SETFOREGROUND,
+        );
+    }
+}
+
+/// The per-user Run key (start at sign-in, architecture 4.1).
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+/// Where Windows records that the user switched a startup app off (Task Manager or
+/// Settings > Apps > Startup).
+const STARTUP_APPROVED_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+
+/// The command in the per-user Run value `name`, if there is one.
+pub fn run_value(name: &str) -> Option<String> {
+    let key = wide(RUN_KEY);
+    let value = wide(name);
+    let mut buf = vec![0u16; 2048];
+    let mut bytes = u32::try_from(buf.len() * 2).unwrap_or(0);
+    // SAFETY: live, NUL-terminated key and value names; `buf` holds `bytes` bytes and
+    // RegGetValueW writes at most that many (it NUL-terminates REG_SZ data).
+    let r = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr().cast(),
+            &raw mut bytes,
+        )
+    };
+    if r != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..len]))
+}
+
+/// Write the per-user Run value `name` = `command`.
+///
+/// # Errors
+/// The registry error.
+pub fn set_run_value(name: &str, command: &str) -> std::io::Result<()> {
+    let key = wide(RUN_KEY);
+    let value = wide(name);
+    let data = wide(command);
+    let len = u32::try_from(data.len() * 2).map_err(std::io::Error::other)?;
+    // SAFETY: live, NUL-terminated strings; `data` holds `len` bytes including the NUL.
+    let r = unsafe {
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            REG_SZ,
+            data.as_ptr().cast(),
+            len,
+        )
+    };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(r.cast_signed()))
+    }
+}
+
+/// Remove the per-user Run value `name` (no error if it is not there).
+///
+/// # Errors
+/// The registry error.
+pub fn delete_run_value(name: &str) -> std::io::Result<()> {
+    let key = wide(RUN_KEY);
+    let value = wide(name);
+    // SAFETY: live, NUL-terminated strings.
+    let r = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), value.as_ptr()) };
+    if r == 0 || r == ERROR_FILE_NOT_FOUND {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(r.cast_signed()))
+    }
+}
+
+/// Whether the user switched startup app `name` off in Windows (Task Manager or
+/// Settings). Windows keeps that choice separately from the Run value; an odd first byte
+/// means "off".
+pub fn startup_switched_off(name: &str) -> bool {
+    let key = wide(STARTUP_APPROVED_KEY);
+    let value = wide(name);
+    let mut buf = [0u8; 32];
+    let mut bytes = u32::try_from(buf.len()).unwrap_or(0);
+    // SAFETY: live, NUL-terminated names; `buf` holds `bytes` bytes.
+    let r = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_BINARY,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr().cast(),
+            &raw mut bytes,
+        )
+    };
+    r == 0 && bytes > 0 && buf[0] & 1 == 1
+}
+
+/// The calling thread's DPI awareness: 2 is per-monitor (the manifest asks for
+/// per-monitor v2).
+pub fn dpi_awareness() -> i32 {
+    // SAFETY: no arguments beyond the context the first call returns.
+    unsafe { GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()) }
 }

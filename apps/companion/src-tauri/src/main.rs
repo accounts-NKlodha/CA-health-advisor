@@ -15,7 +15,12 @@
 //!   the store's per-day tallies and events (`hy_core::review`), with phone-report label
 //!   corrections;
 //! - pairing with the office server (slice V1-5a) in [`server_link`]: the slip, the six
-//!   words and check code for the administrator, "Check again" and unpair.
+//!   words and check code for the administrator, "Check again" and unpair;
+//! - install and update (slice V1-6) in [`update`]: start at sign-in, installing a signed
+//!   update file with the previous version kept and put back if the new one does not
+//!   start, and going back to the pre-upgrade copy of the data when an older version
+//!   cannot read the newer one. The same program is the update helper and answers the
+//!   command-line update steps.
 //!
 //! The tracker, coaching engine and suppression (V1-2) drive the pet through
 //! `hy_pet::shell::PetShell`, implemented by [`shell::ShellHandle`]. [`coach`] runs the
@@ -33,6 +38,7 @@ mod selftest;
 mod server_link;
 mod shell;
 mod tray;
+mod update;
 mod view;
 #[cfg(windows)]
 mod win32;
@@ -49,6 +55,7 @@ use tauri::{Manager, RunEvent};
 
 use crate::coach::{CoachRunner, SHUTDOWN_WAIT};
 use crate::shell::Shell;
+use crate::update::{Dirs, Updater};
 
 /// The store's location under the per-user local data folder (architecture 6.1).
 fn store_path(local_data: PathBuf) -> PathBuf {
@@ -62,7 +69,10 @@ fn selftest_report() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+fn setup(
+    app: &mut tauri::App,
+    version: hy_core::update::Version,
+) -> Result<(), Box<dyn std::error::Error>> {
     let selftest = selftest_report();
     // The self-test never touches the user's data: it uses a fresh store in the temp
     // folder.
@@ -71,11 +81,25 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         app.path().local_data_dir()?
     };
+    #[cfg(windows)]
+    win32::mark_running();
+    let dirs = Dirs::under(&data_root);
     let path = store_path(data_root);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let store = Store::open(&path, Arc::new(SystemClock::new()))?;
+    let store = match Store::open(&path, Arc::new(SystemClock::new())) {
+        // An older version after a rollback, facing data a newer one changed: offer the
+        // copy taken before that upgrade, or close without changing anything.
+        Err(hy_core::Error::SchemaTooNew { .. }) if selftest.is_none() => {
+            if !update::offer_data_rollback(&path, version) {
+                std::process::exit(1);
+            }
+            Store::open(&path, Arc::new(SystemClock::new()))?
+        }
+        other => other?,
+    };
+    app.manage(Arc::new(Updater::new(version, dirs)));
     let (library, refused) = Library::builtin()?;
     for e in &refused {
         eprintln!("HealthierYou: pet pack refused: {e}");
@@ -141,6 +165,18 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn main() {
+    let context = tauri::generate_context!();
+    // The version the installer and the update rules know this build by (tauri.conf.json).
+    let version = context
+        .package_info()
+        .version
+        .to_string()
+        .parse()
+        .unwrap_or(hy_core::update::Version::new(0, 0, 0));
+    // The update helper and the command-line update steps run without any window.
+    if let Some(code) = update::command_line(version) {
+        std::process::exit(code);
+    }
     let app = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             commands::pet_bootstrap,
@@ -192,9 +228,13 @@ fn main() {
             commands::server_notice_dismiss,
             commands::server_share_preview,
             commands::server_restore,
+            commands::app_page,
+            commands::update_choose,
+            commands::update_install,
+            commands::set_autostart,
         ])
-        .setup(setup)
-        .build(tauri::generate_context!());
+        .setup(move |app| setup(app, version))
+        .build(context);
     match app {
         Ok(app) => app.run(|app, event| match event {
             // Closing the settings window or the panel must not quit: the pet and tray

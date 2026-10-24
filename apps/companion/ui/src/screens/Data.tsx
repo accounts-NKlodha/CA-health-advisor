@@ -517,8 +517,7 @@ export function BackupTab({ page }: { page: SettingsPage }) {
       <Export dir={page.backup_dir} />
       <Import />
       <p class="note">
-        Updates and installing a previous version from a file come with the installer in a later
-        update.
+        Updates and going back to the previous version are in App &amp; updates.
       </p>
     </main>
   );

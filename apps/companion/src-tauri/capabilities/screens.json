@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "screens",
-  "description": "The settings window (created on open, destroyed on close): pet library and edits, hotkey, bring pet above clock, reminders, water and workweek, movement programme, focus and Pomodoro, accessibility, sharing status, pairing with the office server (status, pair, check again, unpair, new-PC notice, server address), sharing switches, notices, preview and restore from the server, backup export and import, and links to the reviews and setup.",
+  "description": "The settings window (created on open, destroyed on close): pet library and edits, hotkey, bring pet above clock, reminders, water and workweek, movement programme, focus and Pomodoro, accessibility, sharing status, pairing with the office server (status, pair, check again, unpair, new-PC notice, server address), sharing switches, notices, preview and restore from the server, backup export and import, links to the reviews and setup, and App & updates (version, start at sign-in, installing a signed update file).",
   "windows": [
     "screens"
   ],
@@ -31,6 +31,10 @@
     "allow-server-share-set",
     "allow-server-notice-dismiss",
     "allow-server-share-preview",
-    "allow-server-restore"
+    "allow-server-restore",
+    "allow-app-page",
+    "allow-update-choose",
+    "allow-update-install",
+    "allow-set-autostart"
   ]
 }

@@ -51,11 +51,45 @@ const COMMANDS: &[&str] = &[
     "server_notice_dismiss",
     "server_share_preview",
     "server_restore",
+    "app_page",
+    "update_choose",
+    "update_install",
+    "set_autostart",
 ];
 
+/// The update public keys this build trusts (slice V1-6), passed to the program as
+/// `HY_UPDATE_KEYS`: the `HY_UPDATE_PUBKEY` environment variable if it is set (the CI
+/// lifecycle test sets a key it makes for the run), otherwise the key lines of
+/// `release/update-keys.txt` (the owner's public key, committed once; never a secret
+/// key). With neither, the build has no key and refuses every update file.
+fn update_keys() -> String {
+    println!("cargo:rerun-if-env-changed=HY_UPDATE_PUBKEY");
+    if let Ok(k) = std::env::var("HY_UPDATE_PUBKEY") {
+        return k.split_whitespace().collect::<Vec<_>>().join(";");
+    }
+    let file =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../release/update-keys.txt");
+    println!("cargo:rerun-if-changed={}", file.display());
+    std::fs::read_to_string(&file)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
 fn main() {
+    println!("cargo:rustc-env=HY_UPDATE_KEYS={}", update_keys());
+    // The Windows application manifest: Tauri's default (common controls v6) plus
+    // per-monitor v2 DPI awareness from the first instruction, so Windows never
+    // bitmap-stretches the pet or the screens at 125 to 200% scaling (slice V1-6).
+    println!("cargo:rerun-if-changed=windows/app.manifest");
+    let windows =
+        tauri_build::WindowsAttributes::new().app_manifest(include_str!("windows/app.manifest"));
     tauri_build::try_build(
         tauri_build::Attributes::new()
+            .windows_attributes(windows)
             .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),
     )
     .expect("tauri build script");

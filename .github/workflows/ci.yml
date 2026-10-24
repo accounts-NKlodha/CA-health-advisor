@@ -4,10 +4,13 @@
 # over loopback TLS 1.3 against the companion's pinned client, T-P and T-S tests) and
 # simulator, plus the companion UI type check and build. The companion is a Windows product (Tauri 2 +
 # WebView2), so it is linted, tested and built on the Windows job, modelled on the
-# batch 1 feasibility workflow (spike/batch1). Installers and the bundled fixed WebView2
-# runtime are slice V1-6, so the Windows job builds the binary without bundling.
-# The Windows job then runs the built companion's scripted self-test (HY_SELFTEST) on the
-# runner's desktop: real pet window styles, placement at every size, Bring pet above
+# batch 1 feasibility workflow (spike/batch1). V1-6: the Windows job builds three real
+# per-user installers (A, B, and C whose bundled runtime is broken) with the Microsoft
+# fixed WebView2 runtime, signs them with keys made for the run, installs A, and runs
+# scripts/windows/Test-CompanionLifecycle.ps1: update A to B, C rolled back to B, refused
+# files, the downloaded-file mark, rollback to A, and uninstall with no registry residue.
+# Between install and lifecycle it runs the installed companion's scripted self-test
+# (HY_SELFTEST) on the runner's desktop: real pet window styles, placement at every size, Bring pet above
 # clock, tray hide and show, presentation hiding, bubble layout and the panel hotkey, then
 # the coaching engine end to end on a simulated clock (a due reminder as the single bubble,
 # the answer recorded in the store, a presentation hiding it with nothing replayed).
@@ -82,7 +85,7 @@ jobs:
   windows:
     name: Windows - clippy, tests, companion build
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     defaults:
       run:
         shell: pwsh
@@ -115,19 +118,79 @@ jobs:
       - name: Tests, whole workspace
         run: cargo test --workspace --locked
 
-      - name: Build the companion with the Tauri CLI (no installer until V1-6)
+      # V1-6: the real installers. The bundled fixed WebView2 runtime comes from Microsoft
+      # (its signature is checked); the update-signing keys are made for this run only and
+      # thrown away with the runner, so these builds can never update a real install.
+      - name: Fetch the fixed WebView2 runtime (Microsoft-signed)
+        run: |
+          $info = Join-Path $env:RUNNER_TEMP 'webview2-fixed.txt'
+          ./scripts/windows/Get-WebView2FixedRuntime.ps1 -Destination apps/companion/src-tauri/webview2-fixed -InfoFile $info
+          Get-Content $info
+
+      - name: Update-signing keys for this run only
         working-directory: apps/companion
         run: |
-          node ui/node_modules/@tauri-apps/cli/tauri.js build --no-bundle
-          $exe = Get-Item ../../target/release/hy-companion.exe
-          "hy-companion.exe size_mb=$([math]::Round($exe.Length / 1MB, 1)) sha256=$((Get-FileHash $exe.FullName -Algorithm SHA256).Hash)"
+          $k = Join-Path $env:RUNNER_TEMP 'hy-keys'
+          New-Item -ItemType Directory -Force $k | Out-Null
+          $tauri = 'ui/node_modules/@tauri-apps/cli/tauri.js'
+          node $tauri signer generate --ci -p ci-run -w "$k/key1"
+          if ($LASTEXITCODE -ne 0) { throw 'key 1 failed' }
+          node $tauri signer generate --ci -p ci-run -w "$k/key2"
+          if ($LASTEXITCODE -ne 0) { throw 'key 2 failed' }
+          # The companion builds with key 1 as its only trusted key (build.rs).
+          $pub = (Get-Content -Raw "$k/key1.pub").Trim()
+          "HY_UPDATE_PUBKEY=$pub" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
-      - name: Pet shell self-test on the runner's desktop (idle memory sampled, informational)
+      - name: Build and sign installers A, B and C (C cannot start, to test rollback)
+        working-directory: apps/companion
+        run: |
+          $tauri = 'ui/node_modules/@tauri-apps/cli/tauri.js'
+          $k = Join-Path $env:RUNNER_TEMP 'hy-keys'
+          $out = Join-Path $env:RUNNER_TEMP 'hy-installers'
+          $other = Join-Path $env:RUNNER_TEMP 'hy-other-key'
+          New-Item -ItemType Directory -Force $out, $other | Out-Null
+          $installerConfig = (Resolve-Path src-tauri/tauri.installer.json).Path
+          function Build-Installer([string]$v) {
+            $cfg = Join-Path $env:RUNNER_TEMP "version-$v.json"
+            "{ `"version`": `"$v`" }" | Set-Content -Encoding utf8NoBOM $cfg
+            node $tauri build --config $installerConfig --config $cfg
+            if ($LASTEXITCODE -ne 0) { throw "Building $v failed" }
+            $name = "HealthierYou_${v}_x64-setup.exe"
+            Copy-Item "../../target/release/bundle/nsis/$name" $out
+            node $tauri signer sign -f "$k/key1" -p ci-run --app-version $v (Join-Path $out $name)
+            if ($LASTEXITCODE -ne 0) { throw "Signing $v failed" }
+            $f = Get-Item (Join-Path $out $name)
+            "$name size_mb=$([math]::Round($f.Length / 1MB, 1)) sha256=$((Get-FileHash $f.FullName -Algorithm SHA256).Hash)"
+          }
+          Build-Installer '0.1.0'
+          Build-Installer '0.1.1'
+          # C: a fake runtime in place of the real one, so the new version never shows
+          # its window and never confirms its start.
+          $real = Join-Path $env:RUNNER_TEMP 'webview2-real'
+          Move-Item src-tauri/webview2-fixed $real
+          New-Item -ItemType Directory src-tauri/webview2-fixed | Out-Null
+          Set-Content src-tauri/webview2-fixed/msedgewebview2.exe 'not a runtime'
+          Build-Installer '0.1.2'
+          Remove-Item -Recurse -Force src-tauri/webview2-fixed
+          Move-Item $real src-tauri/webview2-fixed
+          # A copy of A signed with a key the companion does not trust.
+          Copy-Item (Join-Path $out 'HealthierYou_0.1.0_x64-setup.exe') $other
+          node $tauri signer sign -f "$k/key2" -p ci-run --app-version 0.1.0 (Join-Path $other 'HealthierYou_0.1.0_x64-setup.exe')
+          if ($LASTEXITCODE -ne 0) { throw 'Signing with key 2 failed' }
+          # Keep the bundle folder out of the build cache.
+          Remove-Item -Recurse -Force ../../target/release/bundle
+
+      - name: Install A per user (no admin rights used) and check it
+        run: ./scripts/windows/Test-CompanionLifecycle.ps1 -Phase Install -Installers (Join-Path $env:RUNNER_TEMP 'hy-installers') -Work (Join-Path $env:RUNNER_TEMP 'hy-lifecycle')
+
+      - name: Pet shell self-test of the installed app (idle memory sampled, informational)
         run: |
           $report = Join-Path $env:RUNNER_TEMP 'hy-selftest.json'
           $env:HY_SELFTEST = $report
           $env:HY_SELFTEST_IDLE_S = '20'
-          $p = Start-Process -FilePath target/release/hy-companion.exe -PassThru
+          # The installed app must use the bundled runtime, not the runner's WebView2.
+          $env:HY_SELFTEST_EXPECT_FIXED_RUNTIME = '1'
+          $p = Start-Process -FilePath (Join-Path $env:LOCALAPPDATA 'HealthierYou\hy-companion.exe') -PassThru
           $null = $p.Handle  # keep the handle so the exit code is readable
           function Get-Tree([int]$root) {
             $all = Get-CimInstance Win32_Process
@@ -163,6 +226,22 @@ jobs:
           if (Test-Path $report) { Get-Content $report } else { 'No self-test report was written' }
           "self-test exit code: $($p.ExitCode)"
           if ($p.ExitCode -ne 0) { throw "Pet shell self-test failed (exit code $($p.ExitCode))" }
+
+      - name: Update, rollback, refusals and uninstall of the installed app
+        run: ./scripts/windows/Test-CompanionLifecycle.ps1 -Phase Lifecycle -Installers (Join-Path $env:RUNNER_TEMP 'hy-installers') -OtherKeyDir (Join-Path $env:RUNNER_TEMP 'hy-other-key') -Work (Join-Path $env:RUNNER_TEMP 'hy-lifecycle')
+
+      - name: Keep installer A and the lifecycle results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: companion-installer-ci
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/hy-installers/HealthierYou_0.1.0_x64-setup.exe
+            ${{ runner.temp }}/hy-installers/HealthierYou_0.1.0_x64-setup.exe.sig
+            ${{ runner.temp }}/hy-lifecycle/*.csv
+            ${{ runner.temp }}/webview2-fixed.txt
 
       # The server's first start on Windows: keys sealed with machine-scope DPAPI, then
       # loaded back (V1-5a). Then the load simulator (V1-5b): the real server in process
