@@ -235,13 +235,12 @@ fn parse<T: for<'de> Deserialize<'de> + Serialize>(
     Ok(out)
 }
 
-/// Whether this version of the companion builds daily records for `category`. The
-/// others have schemas and server validation but nothing that produces them yet
-/// (tracked V1 work: outcomes and work session; posture summary with V2), so the
-/// companion shows them as "not yet sharing" and does not offer to switch them on.
+/// Whether this version of the companion builds daily records for `category`: every
+/// V1 category. `posture_summary` has a schema and server validation but no data until
+/// V2's posture checks, so the companion keeps it hidden and refuses to switch it on.
 #[must_use]
 pub const fn produced(category: Category) -> bool {
-    matches!(category, Category::Hydration | Category::PhoneReports)
+    !matches!(category, Category::PostureSummary)
 }
 
 /// Validate a payload against its category's schema and return its canonical form.

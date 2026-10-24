@@ -56,8 +56,9 @@ pub const PRODUCT_NAME: &str = "HealthierYou";
 pub const START_WAIT: Duration = Duration::from_secs(120);
 /// How long the helper waits for the app to close.
 const CLOSE_WAIT: Duration = Duration::from_secs(60);
-/// An attempt older than this with no helper is reported as unfinished.
-const STALE_ATTEMPT: Duration = Duration::from_secs(30 * 60);
+/// A staged attempt younger than this with no helper is left alone: its helper may still
+/// be starting.
+const STAGED_GRACE: Duration = Duration::from_secs(2 * 60);
 /// The marker file in the data folder that says the user switched start at sign-in off,
 /// so a reinstall does not switch it on again (read by the installer hooks).
 pub const AUTOSTART_OFF_MARKER: &str = "autostart-off";
@@ -230,6 +231,18 @@ struct Chosen {
     marked: bool,
 }
 
+/// Whether an update helper is running in this session.
+fn helper_running() -> bool {
+    #[cfg(windows)]
+    {
+        crate::win32::update_helper_running()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 /// The update manager, kept by the app (`app.manage`).
 #[derive(Debug)]
 pub struct Updater {
@@ -267,24 +280,65 @@ impl Updater {
         UpdateState::load(&self.dirs.updates).unwrap_or_default()
     }
 
-    /// An attempt left with no helper (the PC restarted mid-update, say) is reported once
-    /// as unfinished. An attempt that this version completes is confirmed instead.
+    /// An attempt left with no helper (the PC restarted mid-update, or the helper was
+    /// ended) is settled once, so it never blocks later updates:
+    /// - while a helper runs, it is the helper's to finish;
+    /// - if the version now running is the attempt's target and the installer had run
+    ///   (installing or waiting for the start), the update took effect: it is recorded as
+    ///   updated and the previous-version copy is cleared;
+    /// - otherwise it is recorded as not finished, with the version that is running.
+    ///
+    /// A just-staged attempt is left alone for a short grace period (its helper may still
+    /// be starting).
     fn settle_stale_attempt(&self) {
+        self.settle_attempt(helper_running());
+    }
+
+    fn settle_attempt(&self, helper_alive: bool) {
         let mut st = self.state();
-        let Some(a) = &st.attempt else { return };
-        if a.phase == Phase::AwaitingStart && a.to == self.version {
-            return; // The helper is waiting for this start; the pet page confirms it.
+        let Some(a) = st.attempt.clone() else { return };
+        if helper_alive {
+            return;
         }
         let age = Duration::from_millis(
             u64::try_from(now_ms().saturating_sub(a.started_at_ms)).unwrap_or(0),
         );
-        if age > STALE_ATTEMPT {
+        if a.phase == Phase::Staged && age < STAGED_GRACE {
+            return;
+        }
+        let took_effect =
+            a.to == self.version && matches!(a.phase, Phase::Installing | Phase::AwaitingStart);
+        if took_effect {
+            st.finish(
+                OutcomeKind::Updated,
+                format!(
+                    "Version {} started. The update was finished when HealthierYou next started.",
+                    a.to
+                ),
+                now_ms(),
+            );
+            if st.save(&self.dirs.updates).is_ok() {
+                let _ = std::fs::remove_dir_all(self.dirs.previous());
+                let _ = std::fs::remove_dir_all(self.dirs.staged());
+                let _ = std::fs::remove_file(self.dirs.updates.join(update::CONFIRM_FILE));
+                log(
+                    &self.dirs,
+                    &format!("settled: updated to {} without the helper", a.to),
+                );
+            }
+        } else {
+            // A rollback cut short keeps its previous-version copy for the next attempt.
             let detail = format!(
                 "The update to {} did not finish. Version {} is running.",
                 a.to, self.version
             );
             st.finish(OutcomeKind::Failed, detail, now_ms());
-            let _ = st.save(&self.dirs.updates);
+            if st.save(&self.dirs.updates).is_ok() {
+                log(
+                    &self.dirs,
+                    &format!("settled: the update to {} did not finish", a.to),
+                );
+            }
         }
     }
 
@@ -363,6 +417,7 @@ impl Updater {
             return Err(why);
         }
         let keys = self.keys.as_ref().map_err(Clone::clone)?;
+        self.settle_stale_attempt();
         let st = self.state();
         if st.attempt.is_some() {
             return Err("An update is already in progress.".into());
@@ -632,6 +687,18 @@ fn cli_check_install(
     code
 }
 
+/// Verify the staged installer with the built-in keys, for the attempt's version.
+fn reverify_staged(installer: &Path, to: Version) -> Result<(), String> {
+    let keys = TrustedKeys::parse(BUILT_IN_KEYS).map_err(|e| e.to_string())?;
+    let sig =
+        update::read_signature_file(&update::sig_path_for(installer)).map_err(|e| e.to_string())?;
+    let release = update::verify_release(&keys, installer, &sig).map_err(|e| e.to_string())?;
+    if release.product != Product::Companion || release.version != to {
+        return Err(format!("it is now version {}", release.version));
+    }
+    Ok(())
+}
+
 /// What the helper's installer run did.
 enum InstallRun {
     /// The installer finished with exit code 0.
@@ -658,6 +725,8 @@ fn run_helper(dirs: &Dirs, parent: u32, install: &Path) -> i32 {
     let Some(attempt) = st.attempt.clone() else {
         return 5;
     };
+    #[cfg(windows)]
+    crate::win32::mark_update_helper();
     log(dirs, &format!("helper: {} -> {}", attempt.from, attempt.to));
     if !wait_for_exit(parent, CLOSE_WAIT) {
         st.finish(
@@ -684,8 +753,25 @@ fn run_helper(dirs: &Dirs, parent: u32, install: &Path) -> i32 {
         return 7;
     }
     let entry_saved = export_uninstall_entry(dirs);
-    set_phase(dirs, &mut st, Phase::Installing);
     let installer = dirs.staged().join(&attempt.installer);
+    // Check the staged file again just before it runs: time has passed since the app
+    // checked it (closing, the backup), and the updates folder is the user's own.
+    if let Err(why) = reverify_staged(&installer, attempt.to) {
+        st.finish(
+            OutcomeKind::Failed,
+            format!(
+                "The staged installer no longer passed its check ({why}), so nothing was installed."
+            ),
+            now_ms(),
+        );
+        let _ = st.save(&dirs.updates);
+        let _ = std::fs::remove_dir_all(dirs.previous());
+        let _ = std::fs::remove_dir_all(dirs.staged());
+        log(dirs, "helper: staged installer refused before running");
+        start_program(install);
+        return 9;
+    }
+    set_phase(dirs, &mut st, Phase::Installing);
     let outcome = match run_installer(&installer, &dirs.staged()) {
         InstallRun::NotStarted(why) => {
             st.finish(OutcomeKind::Blocked, why, now_ms());
@@ -906,9 +992,59 @@ pub fn offer_data_rollback(db: &Path, version: Version) -> bool {
     match update::restore_pre_migration_copy(db, &copy, now_ms()) {
         Ok(_) => true,
         Err(e) => {
+            let text = match &e.state {
+                update::RestoreState::Unchanged => format!(
+                    "The earlier copy could not be put back: {}. Your current data was not changed. HealthierYou will close.",
+                    e.reason
+                ),
+                update::RestoreState::SetAside(aside) => format!(
+                    "The earlier copy could not be put back: {}.\n\nYour current data is safe in the data folder as \"{}\". HealthierYou will not start with empty data: next time it starts it offers to put that file back.",
+                    e.reason,
+                    aside
+                        .file_name()
+                        .map(|n| n.to_string_lossy())
+                        .unwrap_or_default()
+                ),
+            };
+            tell_user("HealthierYou", &text);
+            false
+        }
+    }
+}
+
+/// Before the store opens: if a restore last time set the database aside and could not
+/// move it back, offer to put it back. Returns false if the app must close (it then
+/// never opens, and so never creates, an empty database).
+pub fn settle_incomplete_restore(db: &Path) -> bool {
+    let Some(aside) = update::incomplete_restore(db) else {
+        return true;
+    };
+    let name = aside
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if db.exists() {
+        // A database was put in place by hand: the marker is out of date.
+        let _ = std::fs::remove_file(PathBuf::from(format!(
+            "{}.restore-incomplete",
+            db.display()
+        )));
+        return true;
+    }
+    let question = format!(
+        "Last time HealthierYou could not finish going back to an earlier copy of your data. Your data is safe in the data folder as \"{name}\".\n\nPut it back now? Choose No to close without changing anything."
+    );
+    if !ask_user("HealthierYou: your data", &question) {
+        return false;
+    }
+    match update::recover_incomplete_restore(db) {
+        Ok(()) => true,
+        Err(e) => {
             tell_user(
                 "HealthierYou",
-                &format!("The earlier copy could not be put back ({e}). Nothing was changed."),
+                &format!(
+                    "Your data could not be put back ({e}). It is still safe as \"{name}\". HealthierYou will close."
+                ),
             );
             false
         }
@@ -974,5 +1110,122 @@ mod tests {
         );
         assert!(u.start_install().is_err());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn temp_dirs(name: &str) -> (PathBuf, Dirs) {
+        let root = std::env::temp_dir().join(format!("hy-settle-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dirs = Dirs::under(&root);
+        std::fs::create_dir_all(&dirs.updates).unwrap();
+        (root, dirs)
+    }
+
+    fn seed(dirs: &Dirs, phase: Phase, from: Version, to: Version, age: Duration) {
+        let started = now_ms() - i64::try_from(age.as_millis()).unwrap();
+        let st = UpdateState {
+            previous_version: None,
+            attempt: Some(Attempt {
+                from,
+                to,
+                plan: Plan::Upgrade,
+                installer: format!("HealthierYou_{to}_x64-setup.exe"),
+                started_at_ms: started,
+                phase,
+                token: "t0k3n".into(),
+                marked_from_internet: false,
+            }),
+            last: None,
+        };
+        st.save(&dirs.updates).unwrap();
+    }
+
+    const V0: Version = Version::new(0, 1, 0);
+    const V1: Version = Version::new(0, 1, 1);
+
+    #[test]
+    fn a_restart_after_the_install_but_before_the_helper_finished_is_settled_as_updated() {
+        // The installer ran, the new version started and confirmed, then the PC restarted
+        // (or the helper was ended) before the helper recorded the outcome.
+        let (root, dirs) = temp_dirs("restart");
+        seed(&dirs, Phase::AwaitingStart, V0, V1, Duration::from_secs(90));
+        Confirmation {
+            version: V1,
+            token: "t0k3n".into(),
+        }
+        .save(&dirs.updates)
+        .unwrap();
+        std::fs::create_dir_all(dirs.previous().join("program")).unwrap();
+        let u = Updater::new(V1, dirs.clone());
+        u.settle_attempt(false);
+        let st = UpdateState::load(&dirs.updates).unwrap();
+        assert!(st.attempt.is_none(), "the attempt no longer blocks updates");
+        let last = st.last.unwrap();
+        assert_eq!(last.kind, OutcomeKind::Updated);
+        assert_eq!((last.from, last.to), (V0, V1));
+        assert_eq!(
+            st.previous_version,
+            Some(V0),
+            "going back to the old version stays possible"
+        );
+        assert!(!dirs.previous().exists());
+        assert!(!dirs.updates.join(update::CONFIRM_FILE).exists());
+        // The next check is not refused as "already in progress" (it is refused here only
+        // because tests do not run from an installed copy).
+        let err = u
+            .check(Path::new("HealthierYou_0.1.2_x64-setup.exe"))
+            .unwrap_err();
+        assert!(!err.contains("already in progress"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_install_cut_short_after_the_installer_ran_is_settled_by_the_running_version() {
+        let (root, dirs) = temp_dirs("installing");
+        seed(&dirs, Phase::Installing, V0, V1, Duration::from_secs(10));
+        Updater::new(V1, dirs.clone()).settle_attempt(false);
+        let st = UpdateState::load(&dirs.updates).unwrap();
+        assert!(st.attempt.is_none());
+        assert_eq!(st.last.unwrap().kind, OutcomeKind::Updated);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_attempt_whose_target_is_not_running_is_settled_as_not_finished() {
+        let (root, dirs) = temp_dirs("old");
+        seed(&dirs, Phase::AwaitingStart, V0, V1, Duration::from_secs(10));
+        std::fs::create_dir_all(dirs.previous().join("program")).unwrap();
+        Updater::new(V0, dirs.clone()).settle_attempt(false);
+        let st = UpdateState::load(&dirs.updates).unwrap();
+        assert!(st.attempt.is_none());
+        let last = st.last.unwrap();
+        assert_eq!(last.kind, OutcomeKind::Failed);
+        assert!(last.detail.contains("did not finish"));
+        assert_eq!(st.previous_version, None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_live_helper_or_a_just_staged_attempt_is_left_alone() {
+        let (root, dirs) = temp_dirs("live");
+        let u = Updater::new(V1, dirs.clone());
+        seed(&dirs, Phase::AwaitingStart, V0, V1, Duration::from_secs(10));
+        u.settle_attempt(true);
+        assert!(UpdateState::load(&dirs.updates).unwrap().attempt.is_some());
+        seed(&dirs, Phase::Staged, V0, V1, Duration::from_secs(5));
+        u.settle_attempt(false);
+        assert!(UpdateState::load(&dirs.updates).unwrap().attempt.is_some());
+        // An old staged attempt whose helper never ran is settled.
+        seed(
+            &dirs,
+            Phase::Staged,
+            V0,
+            V1,
+            STAGED_GRACE + Duration::from_secs(1),
+        );
+        u.settle_attempt(false);
+        let st = UpdateState::load(&dirs.updates).unwrap();
+        assert!(st.attempt.is_none());
+        assert_eq!(st.last.unwrap().kind, OutcomeKind::Failed);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

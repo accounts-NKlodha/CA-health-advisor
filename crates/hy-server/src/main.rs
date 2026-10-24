@@ -15,8 +15,12 @@
 //! another volume than the data folder (a second disk or a share), so that restoring an
 //! old database is detected at the next start. Server backups go to `--backups`
 //! (default `<data-dir>\backups`; copy them off the PC too). Backups open only with this
-//! server's `backup.key` (keys folder): keep a protected copy of the keys folder, because
-//! if that key is lost every existing backup is permanently unrecoverable.
+//! server's `backup.key` (keys folder): if that key is lost every existing backup is
+//! permanently unrecoverable. The keys are protected with machine-scope DPAPI, so a copy
+//! of the keys folder opens only on this same Windows installation: it is not a way to move
+//! or rebuild the server. A replacement server, an OS reinstall or keys that cannot be
+//! opened take the full reset: new keys (`init` on a fresh data folder), every PC re-pairs
+//! with a new slip, and the old backups cannot be opened (`docs/Server_Operations.md`).
 //!
 //! The data directory defaults to `%ProgramData%\HealthierYou\Server` on Windows and must
 //! be given elsewhere. Running as a Windows service under a virtual account, the folder
@@ -56,8 +60,11 @@ struct Args {
 
 fn usage() -> String {
     "usage: hy-server <init|set-passphrase|fingerprint|serve|restore> [--data-dir DIR] [--mirror FILE] [--backups DIR] [--backup FILE] [--host NAME] [--api ADDR] [--admin ADDR]\n\
-     Backups open only with backup.key in the keys folder. Keep a protected copy of the keys folder: \
-     if that key is lost, every existing backup is permanently unrecoverable."
+     Backups open only with backup.key in the keys folder: if that key is lost, every existing backup is \
+     permanently unrecoverable. The keys are protected for this Windows installation only (machine DPAPI): \
+     a copy of the keys folder is not a way to move or rebuild the server. A replacement server, an OS \
+     reinstall or keys that cannot be opened mean a full reset: new keys, every PC re-pairs with a new slip, \
+     and the old backups cannot be opened."
         .into()
 }
 
@@ -356,5 +363,16 @@ fn main() -> ExitCode {
             eprintln!("hy-server: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_usage_text_gives_the_reset_route_for_lost_or_moved_keys() {
+        let u = super::usage();
+        assert!(u.contains("permanently unrecoverable"));
+        assert!(u.contains("not a way to move or rebuild the server"));
+        assert!(u.contains("every PC re-pairs with a new slip"));
     }
 }

@@ -118,10 +118,14 @@ fn log_request(
     logging::log("request", &fields);
 }
 
+/// Run `f` on a blocking thread, counted by `server` as work in flight (see
+/// [`Server::run_blocking`]).
 async fn blocking<T: Send + 'static>(
+    server: &Server,
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, WireError> {
-    tokio::task::spawn_blocking(f)
+    server
+        .run_blocking(f)
         .await
         .map_err(|_| WireError::CannotRecord)
 }
@@ -130,7 +134,7 @@ async fn blocking<T: Send + 'static>(
 async fn auth(server: &Arc<Server>, headers: &HeaderMap) -> Result<AuthedDevice, WireError> {
     let token = bearer(headers);
     let s = server.clone();
-    blocking(move || s.authenticate(token.as_ref())).await?
+    blocking(server, move || s.authenticate(token.as_ref())).await?
 }
 
 /// The router for the LAN listener.
@@ -163,7 +167,7 @@ async fn pair(
     let s = server.clone();
     let outcome: Result<_, Refusal> = async {
         let s1 = s.clone();
-        blocking(move || s1.count_pair_attempt(peer.ip())).await??;
+        blocking(&s, move || s1.count_pair_attempt(peer.ip())).await??;
         if declared_too_large(&headers, PAIR_BODY_LIMIT) {
             return Err(WireError::PayloadTooLarge.into());
         }
@@ -173,7 +177,7 @@ async fn pair(
         let req: PairRequest =
             serde_json::from_slice(&bytes).map_err(|_| WireError::SchemaInvalid)?;
         let s2 = s.clone();
-        blocking(move || s2.redeem(&req, peer.ip())).await?
+        blocking(&s, move || s2.redeem(&req, peer.ip())).await?
     }
     .await;
     // One answer time for every outcome (contract 4.4: timing-equalised).
@@ -227,7 +231,7 @@ async fn state(State(server): State<Arc<Server>>, headers: HeaderMap, uri: Uri) 
     let after = after_seq(&uri);
     let echo = echo_of(&headers);
     let s = server.clone();
-    match blocking(move || {
+    match blocking(&server, move || {
         s.check_echo(&dev, echo.as_deref())?;
         s.state_for(&dev, after)
     })
@@ -255,7 +259,10 @@ async fn unpair(State(server): State<Arc<Server>>, headers: HeaderMap) -> Respon
         }
     };
     let s = server.clone();
-    match blocking(move || s.unpair(&dev)).await.and_then(|r| r) {
+    match blocking(&server, move || s.unpair(&dev))
+        .await
+        .and_then(|r| r)
+    {
         Ok(()) => {
             log_request("unpair", start, StatusCode::OK, None, Some(&dev));
             json_response(&serde_json::json!({}))
@@ -354,7 +361,7 @@ async fn history(State(server): State<Arc<Server>>, headers: HeaderMap, uri: Uri
     let from = query_param(&uri, "from").unwrap_or_default().to_owned();
     let to = query_param(&uri, "to").unwrap_or_default().to_owned();
     let s = server.clone();
-    let result = blocking(move || {
+    let result = blocking(&server, move || {
         s.check_echo(&dev, echo.as_deref())?;
         s.history(&dev, &from, &to)
     })
@@ -373,7 +380,7 @@ async fn control(State(server): State<Arc<Server>>, headers: HeaderMap, body: Bo
     let result = match read_json::<ControlRequest>(&headers, body, BODY_LIMIT).await {
         Ok(req) => {
             let s = server.clone();
-            blocking(move || {
+            blocking(&server, move || {
                 s.check_echo(&dev, echo.as_deref())?;
                 s.control(&dev, &req)
             })
@@ -395,7 +402,7 @@ async fn upload(State(server): State<Arc<Server>>, headers: HeaderMap, body: Bod
     let result = match read_json::<UploadRequest>(&headers, body, BODY_LIMIT).await {
         Ok(req) => {
             let s = server.clone();
-            blocking(move || {
+            blocking(&server, move || {
                 s.check_echo(&dev, echo.as_deref())?;
                 s.upload(&dev, &req)
             })
@@ -423,7 +430,8 @@ async fn refuse_receipt(
     if !declared_too_large(headers, RECEIPT_BODY_LIMIT)
         && let Ok(bytes) = to_bytes(body, RECEIPT_BODY_LIMIT).await
     {
-        let _ = blocking(move || server.receipt_without_device(&bytes)).await;
+        let s = server.clone();
+        let _ = blocking(&server, move || s.receipt_without_device(&bytes)).await;
     }
     log_request("receipt", start, status_of(e), Some(e), dev.as_ref());
     error_response(e)
@@ -449,7 +457,7 @@ async fn receipt(State(server): State<Arc<Server>>, headers: HeaderMap, body: Bo
     let result = match read_json::<ReceiptRequest>(&headers, body, RECEIPT_BODY_LIMIT).await {
         Ok(req) => {
             let s = server.clone();
-            blocking(move || s.present_receipt(&dev, &req.head))
+            blocking(&server, move || s.present_receipt(&dev, &req.head))
                 .await
                 .and_then(|r| r)
         }
