@@ -265,6 +265,7 @@ jobs:
           Build-Server '0.1.1' target/release/hy-server.exe $other key2
 
       - name: Server install, service, upgrade, rollback and uninstall (administrator)
+        timeout-minutes: 25
         run: |
           # The control-log mirror must be on another volume than the data folder (C:).
           $sys = $env:SystemDrive.TrimEnd(':')

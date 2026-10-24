@@ -50,14 +50,21 @@ function Check([string]$Name, [bool]$Ok, [string]$Detail = '') {
   Write-Host ("[{0}] {1} {2}" -f $mark, $Name, $Detail)
 }
 function Installer([string]$Version, [string]$Dir = $Installers) { Join-Path $Dir ("HealthierYou-Server_{0}_x64-setup.exe" -f $Version) }
-function Run-Setup([string]$Path, [string[]]$Arguments) {
-  $p = Start-Process -FilePath $Path -ArgumentList $Arguments -PassThru -Wait
+# Wait for the started program alone (Start-Process -Wait also waits for what it starts).
+function Start-AndWait([string]$Path, [string[]]$Arguments, [int]$Minutes = 10) {
+  $p = Start-Process -FilePath $Path -ArgumentList $Arguments -PassThru
+  $null = $p.Handle  # keep the handle so the exit code is readable
+  if (-not $p.WaitForExit($Minutes * 60000)) {
+    $p | Stop-Process -Force -ErrorAction SilentlyContinue
+    return -1
+  }
   $p.ExitCode
 }
+function Run-Setup([string]$Path, [string[]]$Arguments) { Start-AndWait $Path $Arguments }
 function Invoke-Uninstall([string[]]$Arguments) {
   $u = Join-Path $Program 'uninstall.exe'
   if (-not (Test-Path $u)) { return $false }
-  Start-Process -FilePath $u -ArgumentList $Arguments -Wait | Out-Null
+  $null = Start-AndWait $u $Arguments
   # The uninstaller runs on from a temp copy (Au_.exe); wait for it.
   $deadline = (Get-Date).AddMinutes(3)
   while ((Get-Date) -lt $deadline) {
