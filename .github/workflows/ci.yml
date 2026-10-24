@@ -87,8 +87,10 @@ jobs:
           HY_CAPTURE_PCAP="$pcap" cargo test -p hy-server --test capture --locked
           pwsh -NoProfile -File scripts/windows/Test-NetworkCapture.ps1 -SelfTest
           pwsh -NoProfile -File scripts/windows/Test-NetworkCapture.ps1 -Analyze "$pcap" -ServerIp 192.168.50.10 -Canary CANARY_LABEL_5b1e,CANARY_ALIAS_7f3a
-          if pwsh -NoProfile -File scripts/windows/Test-NetworkCapture.ps1 -Analyze "$pcap" -ServerIp 192.168.50.10 -Canary hy/1; then
-            echo "the analyser missed the ALPN name, which is in clear in every ClientHello"; exit 1
+          # Exit 1 is FAIL (2 would be INCONCLUSIVE, 0 PASS): it must find the ALPN text.
+          rc=0; pwsh -NoProfile -File scripts/windows/Test-NetworkCapture.ps1 -Analyze "$pcap" -ServerIp 192.168.50.10 -Canary hy/1 || rc=$?
+          if [ "$rc" -ne 1 ]; then
+            echo "the analyser did not FAIL on the ALPN name, which is in clear in every ClientHello (exit $rc)"; exit 1
           fi
           pwsh -NoProfile -File scripts/windows/Test-Soak.ps1 -SelfTest
 

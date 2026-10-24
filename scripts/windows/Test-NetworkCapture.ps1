@@ -32,6 +32,14 @@
        -Canary) in no packet at all, to any address.
     4. Before pairing, nothing at all goes to the server from this PC.
 
+  Each phase is PASS, FAIL (a finding) or INCONCLUSIVE (evidence missing): PASS needs the
+  same companion process running from start to end, the connection audit switched on and
+  read back, the Security log read, audit events in the window, and in every phase after
+  pairing the companion's own connection to the server and at least one complete TLS
+  connection (both hellos, whole records, no missing segment). A connection with a gap,
+  a cut-off record or one direction missing is checked as far as it goes but never counts
+  as verified. Exit code 0 PASS, 1 FAIL, 2 INCONCLUSIVE.
+
   What a capture cannot see: inside TLS, which fields each phase sends. That part of
   T-S23 (operational data only with every category off, only the schema's fields when one
   is on, nothing for a category after it is switched off) is proven by the CI test
@@ -227,6 +235,14 @@ function Get-TlsRecords([byte[]]$s) {
   return , $out
 }
 
+# Whether a stream is whole TLS records: the last record's declared length ends exactly at
+# the last byte (a record cut off by the end of the capture is not evidence).
+function Test-RecordsWhole([byte[]]$s) {
+  $at = 0
+  while ($at + 5 -le $s.Length) { $at += 5 + (Get-U16BE $s ($at + 3)) }
+  return ($at -eq $s.Length)
+}
+
 function Get-HelloExtensions([byte[]]$m, [bool]$client) {
   $ext = @{}
   $at = 4 + 2 + 32
@@ -245,11 +261,20 @@ function Get-HelloExtensions([byte[]]$m, [bool]$client) {
 }
 
 
-# Problems with one TLS connection (client-to-server and server-to-client bytes).
+# One TLS connection (client-to-server and server-to-client bytes): Problems are what the
+# bytes show is wrong (FAIL); Missing is evidence the bytes do not hold (INCONCLUSIVE). Only
+# a connection with neither is a verified TLS 1.3 connection: both hellos seen, whole
+# records in both directions.
 function Test-Tls13Only([byte[]]$up, [byte[]]$down) {
   $problems = New-Object System.Collections.Generic.List[string]
+  $missing = New-Object System.Collections.Generic.List[string]
   $u = Get-TlsRecords $up; $d = Get-TlsRecords $down
-  if ($u.Count -eq 0) { $problems.Add('no TLS records from the PC'); return , $problems }
+  if ($up.Length -and -not (Test-RecordsWhole $up)) { $missing.Add('the last TLS record from the PC is cut off') }
+  if ($down.Length -and -not (Test-RecordsWhole $down)) { $missing.Add('the last TLS record from the server is cut off') }
+  if ($u.Count -eq 0) {
+    $missing.Add('nothing from the PC in this connection (no ClientHello): the handshake is not proven')
+    return [pscustomobject]@{ Problems = $problems; Missing = $missing }
+  }
   $hellos = 0
   foreach ($r in $u) {
     if ($r.Type -eq 22 -and $r.Body.Length -gt 0 -and $r.Body[0] -eq 1) {
@@ -283,8 +308,9 @@ function Test-Tls13Only([byte[]]$up, [byte[]]$down) {
     if (($r.Type -eq 20 -and $r.Body.Length -eq 1) -or $r.Type -eq 23) { continue }
     $problems.Add("the server sent a clear TLS record of type $($r.Type) after its hello")
   }
-  if (-not $serverHello -and $d.Count -gt 0) { $problems.Add('no ServerHello') }
-  return , $problems
+  if ($d.Count -eq 0) { $missing.Add('nothing from the server in this connection (no ServerHello): the handshake is not proven') }
+  elseif (-not $serverHello) { $problems.Add('no ServerHello') }
+  return [pscustomobject]@{ Problems = $problems; Missing = $missing }
 }
 
 # ----------------------------------------------------------------------- analysis
@@ -313,10 +339,11 @@ function Find-Needle([byte[]]$bytes, [string[]]$needles) {
   return $null
 }
 
-# Analyse one capture: returns findings (FAIL), notes and counts. Addresses are reported
-# by role only.
+# Analyse one capture: returns findings (FAIL), missing evidence (INCONCLUSIVE), notes and
+# counts. Addresses are reported by role only.
 function Invoke-CaptureAnalysis([string]$Path, [string[]]$ServerIps, [int]$Port, [string[]]$Canaries, [string]$PhaseName) {
   $fails = New-Object System.Collections.Generic.List[string]
+  $missing = New-Object System.Collections.Generic.List[string]
   $notes = New-Object System.Collections.Generic.List[string]
   $frames = Read-CaptureFrames $Path
   $flows = @{}
@@ -357,15 +384,19 @@ function Invoke-CaptureAnalysis([string]$Path, [string[]]$ServerIps, [int]$Port,
       $n = Find-Needle $side[1] $ProtocolNeedles
       if ($n) { $fails.Add("readable protocol text ($n) $($side[0]) in clear") }
     }
-    if ($up.Gap -or $down.Gap) { $notes.Add('a connection with the server was captured with missing segments; it was checked up to the gap') }
-    $problems = Test-Tls13Only $up.Bytes $down.Bytes
-    if ($problems.Count) { foreach ($x in $problems) { $fails.Add("a connection with the server: $x") } } else { $tlsOk++ }
+    $t = Test-Tls13Only $up.Bytes $down.Bytes
+    foreach ($x in $t.Problems) { $fails.Add("a connection with the server: $x") }
+    foreach ($x in $t.Missing) { $missing.Add("a connection with the server: $x") }
+    if ($up.Gap -or $down.Gap) { $missing.Add('a connection with the server was captured with missing segments: checked up to the gap, not counted as verified') }
+    if (-not $t.Problems.Count -and -not $t.Missing.Count -and -not $up.Gap -and -not $down.Gap) { $tlsOk++ }
   }
+  if ($packets -eq 0) { $missing.Add('the capture holds no packets at all') }
+  if ($PhaseName -ne 'BeforePairing' -and $tlsOk -eq 0) { $missing.Add('no complete TLS connection with the server in this phase: the sync the phase asks for was not captured') }
   foreach ($proto in $internet.Keys) { $notes.Add("$($internet[$proto]) $proto packets of this PC with internet addresses (any program; the program audit says whether any was HealthierYou)") }
   return [pscustomobject]@{
     Phase = $PhaseName; Packets = $packets; ServerPackets = $serverPackets
     ServerConnections = $flows.Count; Tls13Connections = $tlsOk
-    Fails = @($fails | Select-Object -Unique); Notes = @($notes | Select-Object -Unique)
+    Fails = @($fails | Select-Object -Unique); Missing = @($missing | Select-Object -Unique); Notes = @($notes | Select-Object -Unique)
   }
 }
 
@@ -390,6 +421,63 @@ function Test-ProgramConnections($events, [string[]]$ServerIps, [int]$Port, [str
   }
   if ($PhaseName -eq 'BeforePairing' -and $toServer -gt 0) { $fails.Add('before pairing, the companion connected to the server') }
   return [pscustomobject]@{ Connections = $ours.Count; ToServer = $toServer; Fails = @($fails | Select-Object -Unique); Notes = @($notes | Select-Object -Unique) }
+}
+
+# The Filtering Platform audit events of a window. "No events" is an empty list; any other
+# failure to read the Security log is an error (the phase is then INCONCLUSIVE, not quiet).
+function Read-AuditEvents([datetime]$From, [datetime]$To) {
+  try {
+    $raw = @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 5156, 5157; StartTime = $From; EndTime = $To } -ErrorAction Stop)
+  }
+  catch {
+    if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { return [pscustomobject]@{ Events = @(); Error = $null } }
+    return [pscustomobject]@{ Events = @(); Error = $_.Exception.GetType().Name }
+  }
+  $events = @($raw | ForEach-Object {
+      $x = [xml]$_.ToXml()
+      $d = @{}; foreach ($n in $x.Event.EventData.Data) { $d[$n.Name] = $n.'#text' }
+      [pscustomobject]@{
+        Application = [string]$d['Application']
+        Direction   = $(if ($d['Direction'] -eq '%%14592') { 'inbound' } else { 'outbound' })
+        DestAddress = [string]$d['DestAddress']; DestPort = [int]$d['DestPort']; Protocol = [int]$d['Protocol']
+        Allowed     = ($_.Id -eq 5156)
+      }
+    })
+  return [pscustomobject]@{ Events = $events; Error = $null }
+}
+
+# One phase's verdict. FAIL: something the evidence shows is wrong. INCONCLUSIVE: evidence
+# the phase needs is missing (no PASS without it). PASS: neither.
+#   $Cap    Invoke-CaptureAnalysis result.
+#   $Audit  $null for a wire-only analysis (-Analyze), else the program audit of the phase:
+#           Enabled (the audit policy was switched on and read back), Error (reading the
+#           Security log failed), Events (the window's events).
+#   $CompanionRunning  the same companion process ran from the start to the end of the phase.
+function Get-PhaseVerdict($Cap, $Audit, [bool]$CompanionRunning, [string[]]$ServerIps, [int]$Port) {
+  $fails = @($Cap.Fails)
+  $missing = @($Cap.Missing)
+  $prog = $null
+  if ($null -ne $Audit) {
+    if (-not $Audit.Enabled) { $missing += 'the connection audit could not be switched on and read back, so no program attribution is possible' }
+    elseif ($Audit.Error) { $missing += "the Security log could not be read ($($Audit.Error)), so no program attribution is possible" }
+    else {
+      $events = @($Audit.Events)
+      $prog = Test-ProgramConnections $events $ServerIps $Port $Cap.Phase
+      $fails += @($prog.Fails)
+      if ($events.Count -eq 0) { $missing += 'the connection audit recorded no connection by any program in this window, so it shows nothing' }
+      elseif ($Cap.Phase -ne 'BeforePairing' -and $prog.ToServer -eq 0) { $missing += 'the connection audit shows no connection by the companion to the server in this phase (the steps were not done, or the companion is not the one installed)' }
+    }
+    if (-not $CompanionRunning) { $missing += 'the companion was not running from the start to the end of this phase' }
+  }
+  $verdict = if ($fails.Count) { 'FAIL' } elseif ($missing.Count) { 'INCONCLUSIVE' } else { 'PASS' }
+  return [pscustomobject]@{ Phase = $Cap.Phase; Verdict = $verdict; Fails = $fails; Missing = $missing; Programs = $prog }
+}
+
+function Get-OverallVerdict([string[]]$Verdicts) {
+  if (-not $Verdicts -or $Verdicts.Count -eq 0) { return 'INCONCLUSIVE' }
+  if ($Verdicts -contains 'FAIL') { return 'FAIL' }
+  if ($Verdicts -contains 'INCONCLUSIVE') { return 'INCONCLUSIVE' }
+  return 'PASS'
 }
 
 # ----------------------------------------------------------------------- self-test
@@ -461,15 +549,15 @@ function Invoke-SelfTest {
     @((New-Frame $pc $srv 'TCP' $cport $port 999 2 @()), (New-Frame $pc $srv 'TCP' $cport $port 1000 0x18 $up), (New-Frame $srv $pc 'TCP' $port $cport 5000 0x18 $down))
   }
   $cases = @(
-    @{ Name = 'genuine TLS 1.3'; Frames = (Conn ([byte[]]($ch + $app)) ([byte[]]($sh + $app))); Pass = $true; Want = '' },
-    @{ Name = 'TLS 1.2 also offered'; Frames = (Conn ([byte[]]((New-Hello $true @(0x0304, 0x0303) @()) + $app)) ([byte[]]($sh + $app))); Pass = $false; Want = 'offers versions' },
-    @{ Name = 'no supported_versions (TLS 1.2 client)'; Frames = (Conn ([byte[]]((New-Hello $true @() @()) + $app)) ([byte[]]($sh + $app))); Pass = $false; Want = 'no supported_versions' },
-    @{ Name = 'server picks TLS 1.2'; Frames = (Conn ([byte[]]($ch + $app)) ([byte[]]((New-Hello $false @(0x0303) @()) + $app))); Pass = $false; Want = 'chose version 0303' },
-    @{ Name = 'early data offered'; Frames = (Conn ([byte[]]((New-Hello $true @(0x0304) @(42)) + $app)) ([byte[]]($sh + $app))); Pass = $false; Want = 'early data' },
-    @{ Name = 'plain HTTP to the server port'; Frames = (Conn ($Latin1.GetBytes("POST /v1/upload HTTP/1.1`r`nAuthorization: Bearer x`r`n`r`n")) ([byte[]]@())); Pass = $false; Want = 'readable protocol text' },
-    @{ Name = 'server reached on another port'; Frames = (Conn ([byte[]]($ch + $app)) ([byte[]]($sh + $app)) 80); Pass = $false; Want = 'only TCP 8443' },
-    @{ Name = 'canary in clear to an internet address'; Frames = @(, (New-Frame $pc '8.8.8.8' 'UDP' 5353 53 0 0 ($Latin1.GetBytes('xxCAPTURE-PC-7F3Axx')))); Pass = $false; Want = 'canary text' },
-    @{ Name = 'before pairing, any packet to the server'; Frames = (Conn ([byte[]]($ch + $app)) ([byte[]]($sh + $app))); Pass = $false; Want = 'before pairing'; Phase = 'BeforePairing' }
+    @{ Name = 'genuine TLS 1.3'; Frames = (Conn ([byte[]]($ch + $app)) ([byte[]]($sh + $app))); Verdict = 'PASS'; Want = '' },
+    @{ Name = 'TLS 1.2 also offered'; Frames = (Conn ([byte[]]((New-Hello $true @(0x0304, 0x0303) @()) + $app)) ([byte[]]($sh + $app))); Verdict = 'FAIL'; Want = 'offers versions' },
+    @{ Name = 'no supported_versions (TLS 1.2 client)'; Frames = (Conn ([byte[]]((New-Hello $true @() @()) + $app)) ([byte[]]($sh + $app))); Verdict = 'FAIL'; Want = 'no supported_versions' },
+    @{ Name = 'server picks TLS 1.2'; Frames = (Conn ([byte[]]($ch + $app)) ([byte[]]((New-Hello $false @(0x0303) @()) + $app))); Verdict = 'FAIL'; Want = 'chose version 0303' },
+    @{ Name = 'early data offered'; Frames = (Conn ([byte[]]((New-Hello $true @(0x0304) @(42)) + $app)) ([byte[]]($sh + $app))); Verdict = 'FAIL'; Want = 'early data' },
+    @{ Name = 'plain HTTP to the server port'; Frames = (Conn ($Latin1.GetBytes("POST /v1/upload HTTP/1.1`r`nAuthorization: Bearer x`r`n`r`n")) ([byte[]]@())); Verdict = 'FAIL'; Want = 'readable protocol text' },
+    @{ Name = 'server reached on another port'; Frames = (Conn ([byte[]]($ch + $app)) ([byte[]]($sh + $app)) 80); Verdict = 'FAIL'; Want = 'only TCP 8443' },
+    @{ Name = 'canary in clear to an internet address'; Frames = @(, (New-Frame $pc '8.8.8.8' 'UDP' 5353 53 0 0 ($Latin1.GetBytes('xxCAPTURE-PC-7F3Axx')))); Verdict = 'FAIL'; Want = 'canary text' },
+    @{ Name = 'before pairing, any packet to the server'; Frames = (Conn ([byte[]]($ch + $app)) ([byte[]]($sh + $app))); Verdict = 'FAIL'; Want = 'before pairing'; Phase = 'BeforePairing' }
   )
   # Out of order with a retransmission: the reassembly must still find a clean TLS 1.3 stream.
   $upBytes = [byte[]]($ch + $app)
@@ -480,18 +568,34 @@ function Invoke-SelfTest {
       (New-Frame $pc $srv 'TCP' 50002 8443 ([uint32](1000 + $half)) 0x18 $p2),
       (New-Frame $pc $srv 'TCP' 50002 8443 1000 0x18 $p1),
       (New-Frame $pc $srv 'TCP' 50002 8443 1000 0x18 $p1),
-      (New-Frame $srv $pc 'TCP' 8443 50002 5000 0x18 ([byte[]]($sh + $app)))); Pass = $true; Want = ''
+      (New-Frame $srv $pc 'TCP' 8443 50002 5000 0x18 ([byte[]]($sh + $app)))); Verdict = 'PASS'; Want = ''
   }
+  # Incomplete evidence is never PASS: the server's side missing, a gap after the hello, a
+  # record cut off, nothing captured at all.
+  $cases += @{ Name = 'a ClientHello with nothing from the server'; Frames = (Conn ([byte[]]($ch + $app)) ([byte[]]@())); Verdict = 'INCONCLUSIVE'; Want = 'nothing from the server' }
+  $cases += @{ Name = 'a gap after the ClientHello'; Frames = @(
+      (New-Frame $pc $srv 'TCP' 50003 8443 999 2 @()),
+      (New-Frame $pc $srv 'TCP' 50003 8443 1000 0x18 $ch),
+      (New-Frame $pc $srv 'TCP' 50003 8443 ([uint32](1000 + $ch.Length + 100)) 0x18 $app),
+      (New-Frame $srv $pc 'TCP' 8443 50003 5000 0x18 ([byte[]]($sh + $app)))); Verdict = 'INCONCLUSIVE'; Want = 'missing segments'
+  }
+  $cases += @{ Name = 'a record cut off by the end of the capture'; Frames = (Conn ([byte[]]($ch + (Get-Slice $app 0 12))) ([byte[]]($sh + $app))); Verdict = 'INCONCLUSIVE'; Want = 'cut off' }
+  $cases += @{ Name = 'an empty capture (active phase)'; Frames = @(); Verdict = 'INCONCLUSIVE'; Want = 'no packets' }
+  $cases += @{ Name = 'an empty capture (before pairing)'; Frames = @(); Verdict = 'INCONCLUSIVE'; Want = 'no packets'; Phase = 'BeforePairing' }
+  $cases += @{ Name = 'an active phase with no server connection'; Frames = @(, (New-Frame $pc '192.168.50.30' 'UDP' 5353 5353 0 0 ([byte[]](1..20)))); Verdict = 'INCONCLUSIVE'; Want = 'no complete TLS connection' }
+  $cases += @{ Name = 'before pairing, other traffic only'; Frames = @(, (New-Frame $pc '192.168.50.30' 'UDP' 5353 5353 0 0 ([byte[]](1..20)))); Verdict = 'PASS'; Want = ''; Phase = 'BeforePairing' }
   $failed = 0
   foreach ($c in $cases) {
     $file = Join-Path $dir 'case.pcapng'
     [IO.File]::WriteAllBytes($file, (New-PcapNg $c.Frames))
     $phaseName = if ($c.ContainsKey('Phase')) { $c.Phase } else { 'PairedOff' }
     $r = Invoke-CaptureAnalysis $file @($srv) 8443 @('CAPTURE-PC-7F3A') $phaseName
-    $passed = ($r.Fails.Count -eq 0)
-    $ok = ($passed -eq $c.Pass) -and ($c.Pass -or (($r.Fails -join ' | ') -like "*$($c.Want)*"))
+    $v = Get-PhaseVerdict $r $null $true @($srv) 8443
+    $said = @($v.Fails) + @($v.Missing)
+    $ok = ($v.Verdict -eq $c.Verdict) -and ($c.Verdict -eq 'PASS' -or (($said -join ' | ') -like "*$($c.Want)*"))
+    if ($c.Verdict -ne 'PASS' -and $r.Tls13Connections -gt 0 -and $c.Verdict -eq 'INCONCLUSIVE') { $ok = $false }
     if (-not $ok) { $failed++ }
-    Write-Host ("[{0}] {1}: {2}" -f $(if ($ok) { 'ok' } else { 'WRONG' }), $c.Name, $(if ($passed) { 'no finding' } else { $r.Fails -join ' | ' }))
+    Write-Host ("[{0}] {1}: {2} {3}" -f $(if ($ok) { 'ok' } else { 'WRONG' }), $c.Name, $v.Verdict, ($said -join ' | '))
   }
   # The classic pcap format.
   $frames = Conn ([byte[]]($ch + $app)) ([byte[]]($sh + $app))
@@ -521,6 +625,42 @@ function Invoke-SelfTest {
     if (-not $ok) { $failed++ }
     Write-Host ("[{0}] program audit, {1}: {2}" -f $(if ($ok) { 'ok' } else { 'WRONG' }), $c.Name, $(if ($r.Fails.Count) { $r.Fails -join ' | ' } else { 'no finding' }))
   }
+  # A physical phase's verdict: PASS needs the companion running, the audit on and read,
+  # events in the window, the companion's own connection to the server and a verified TLS
+  # 1.3 connection on the wire.
+  $file = Join-Path $dir 'good.pcapng'
+  [IO.File]::WriteAllBytes($file, (New-PcapNg (Conn ([byte[]]($ch + $app)) ([byte[]]($sh + $app)))))
+  $good = Invoke-CaptureAnalysis $file @($srv) 8443 @() 'PairedOff'
+  $file = Join-Path $dir 'empty.pcapng'
+  [IO.File]::WriteAllBytes($file, (New-PcapNg @()))
+  $empty = Invoke-CaptureAnalysis $file @($srv) 8443 @() 'PairedOff'
+  $emptyBefore = Invoke-CaptureAnalysis $file @($srv) 8443 @() 'BeforePairing'
+  $file = Join-Path $dir 'quiet.pcapng'
+  [IO.File]::WriteAllBytes($file, (New-PcapNg @(, (New-Frame $pc '192.168.50.30' 'UDP' 5353 5353 0 0 ([byte[]](1..20))))))
+  $quietBefore = Invoke-CaptureAnalysis $file @($srv) 8443 @() 'BeforePairing'
+  $on = [pscustomobject]@{ Enabled = $true; Error = $null; Events = $ev }
+  $others = @($ev | Where-Object { $_.Application -notlike '*healthieryou*' })
+  $phases = @(
+    @{ Name = 'full evidence'; Cap = $good; Audit = $on; Running = $true; Want = 'PASS' },
+    @{ Name = 'the companion absent'; Cap = $good; Audit = $on; Running = $false; Want = 'INCONCLUSIVE' },
+    @{ Name = 'the audit could not be switched on'; Cap = $good; Audit = [pscustomobject]@{ Enabled = $false; Error = $null; Events = @() }; Running = $true; Want = 'INCONCLUSIVE' },
+    @{ Name = 'the Security log could not be read'; Cap = $good; Audit = [pscustomobject]@{ Enabled = $true; Error = 'UnauthorizedAccessException'; Events = @() }; Running = $true; Want = 'INCONCLUSIVE' },
+    @{ Name = 'no audit events at all'; Cap = $good; Audit = [pscustomobject]@{ Enabled = $true; Error = $null; Events = @() }; Running = $true; Want = 'INCONCLUSIVE' },
+    @{ Name = 'no companion connection in the audit'; Cap = $good; Audit = [pscustomobject]@{ Enabled = $true; Error = $null; Events = $others }; Running = $true; Want = 'INCONCLUSIVE' },
+    @{ Name = 'an empty capture'; Cap = $empty; Audit = $on; Running = $true; Want = 'INCONCLUSIVE' },
+    @{ Name = 'an empty capture before pairing'; Cap = $emptyBefore; Audit = [pscustomobject]@{ Enabled = $true; Error = $null; Events = $others }; Running = $true; Want = 'INCONCLUSIVE' },
+    @{ Name = 'before pairing, quiet with full evidence'; Cap = $quietBefore; Audit = [pscustomobject]@{ Enabled = $true; Error = $null; Events = $others }; Running = $true; Want = 'PASS' },
+    @{ Name = 'the companion absent and a finding'; Cap = $good; Audit = [pscustomobject]@{ Enabled = $true; Error = $null; Events = @($ev + [pscustomobject]@{ Application = '\device\x\healthieryou\hy-companion.exe'; Direction = 'outbound'; DestAddress = '20.1.2.3'; DestPort = 443; Protocol = 6; Allowed = $true }) }; Running = $false; Want = 'FAIL' }
+  )
+  foreach ($c in $phases) {
+    $v = Get-PhaseVerdict $c.Cap $c.Audit $c.Running @($srv) 8443
+    $ok = $v.Verdict -eq $c.Want
+    if (-not $ok) { $failed++ }
+    Write-Host ("[{0}] phase verdict, {1}: {2} {3}" -f $(if ($ok) { 'ok' } else { 'WRONG' }), $c.Name, $v.Verdict, ((@($v.Fails) + @($v.Missing)) -join ' | '))
+  }
+  $overallOk = ((Get-OverallVerdict @('PASS', 'INCONCLUSIVE', 'PASS')) -eq 'INCONCLUSIVE') -and ((Get-OverallVerdict @('INCONCLUSIVE', 'FAIL')) -eq 'FAIL') -and ((Get-OverallVerdict @()) -eq 'INCONCLUSIVE') -and ((Get-OverallVerdict @('PASS', 'PASS')) -eq 'PASS')
+  if (-not $overallOk) { $failed++ }
+  Write-Host ("[{0}] overall verdict: any FAIL fails, then any INCONCLUSIVE, no phases is INCONCLUSIVE" -f $(if ($overallOk) { 'ok' } else { 'WRONG' }))
   Remove-Item -Recurse -Force $dir
   if ($failed) { throw "Capture analyser self-test: $failed case(s) wrong" }
   Write-Host 'Capture analyser self-test: all cases right.'
@@ -530,24 +670,29 @@ function Invoke-SelfTest {
 
 $Lines = New-Object System.Collections.Generic.List[string]
 function Add-Line([string]$Text) { $Lines.Add($Text); Write-Host $Text }
-function Write-PhaseResult($cap, $prog) {
-  $fails = @($cap.Fails); if ($prog) { $fails += @($prog.Fails) }
-  Add-Line ("[{0}] T-S23 phase {1}" -f $(if ($fails.Count) { 'FAIL' } else { 'PASS' }), $cap.Phase)
-  Add-Line ("       packets {0}; with the server {1}; server connections {2}, TLS 1.3 only {3}" -f $cap.Packets, $cap.ServerPackets, $cap.ServerConnections, $cap.Tls13Connections)
+function Write-PhaseResult($cap, $v) {
+  $prog = $v.Programs
+  Add-Line ("[{0}] T-S23 phase {1}" -f $v.Verdict, $cap.Phase)
+  Add-Line ("       packets {0}; with the server {1}; server connections {2}, verified TLS 1.3 only {3}" -f $cap.Packets, $cap.ServerPackets, $cap.ServerConnections, $cap.Tls13Connections)
   if ($prog) { Add-Line ("       HealthierYou program connections {0}, to the server {1}" -f $prog.Connections, $prog.ToServer) }
-  foreach ($f in $fails) { Add-Line "       FAIL: $f" }
+  foreach ($f in $v.Fails) { Add-Line "       FAIL: $f" }
+  foreach ($m in $v.Missing) { Add-Line "       MISSING EVIDENCE: $m" }
   foreach ($n in @($cap.Notes) + $(if ($prog) { @($prog.Notes) } else { @() })) { Add-Line "       note: $n" }
-  return ($fails.Count -eq 0)
+  return $v.Verdict
 }
 
 if ($SelfTest) { Invoke-SelfTest; return }
 
 if ($PSCmdlet.ParameterSetName -eq 'Analyze') {
   $r = Invoke-CaptureAnalysis (Resolve-Path $Analyze).Path $ServerIp $ServerPort $Canary $Phase
-  $ok = Write-PhaseResult $r $null
+  $v = Get-PhaseVerdict $r $null $true $ServerIp $ServerPort
+  $verdict = Write-PhaseResult $r $v
+  Add-Line 'This is the wire only: which program made each connection needs the connection audit of a physical run.'
   Add-Line 'Content inside TLS (which fields each phase sends) is proven by the CI test crates/hy-server/tests/capture.rs, not by a capture.'
+  Add-Line "Overall: $verdict"
   if ($Report) { $Lines | Set-Content -Encoding UTF8 $Report; $r | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 ($Report + '.json') }
-  if (-not $ok) { exit 1 }
+  if ($verdict -eq 'FAIL') { exit 1 }
+  if ($verdict -ne 'PASS') { exit 2 }
   return
 }
 
@@ -563,13 +708,18 @@ if (-not $ips.Count) { throw "The server name $Server does not resolve on this P
 $os = Get-CimInstance Win32_OperatingSystem
 Add-Line "HealthierYou network capture (T-S23) - $((Get-Date).ToString('yyyy-MM-dd HH:mm'))"
 Add-Line ("Windows: {0} build {1}; server resolved to {2} address(es); server port TCP {3}; canary given: {4}" -f $os.Caption, $os.BuildNumber, $ips.Count, $ServerPort, [bool]$Canary.Count)
-$companion = @(Get-Process -Name 'hy-companion' -ErrorAction SilentlyContinue)
+function Get-CompanionIds { return @(Get-Process -Name 'hy-companion' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id }) }
+$companion = Get-CompanionIds
 Add-Line "Companion running: $([bool]$companion.Count)"
+if (-not $companion.Count) { Write-Warning 'The companion is not running: start it (every phase needs it running, or the phase is INCONCLUSIVE).' }
 Add-Line ''
 
 # The Filtering Platform connection audit, by GUID so it works in any Windows language.
 $sub = '{0CCE9226-69AE-11D9-BED3-505054503030}'
-$before = (auditpol /get /subcategory:$sub /r | ConvertFrom-Csv | Select-Object -First 1).'Inclusion Setting'
+function Get-AuditSetting {
+  try { return [string]((auditpol /get /subcategory:$sub /r | ConvertFrom-Csv | Select-Object -First 1).'Inclusion Setting') } catch { return '' }
+}
+$before = Get-AuditSetting
 $guidance = @{
   BeforePairing = 'Install the companion but do not pair it (Settings > Sharing shows "Not paired"). Leave it running.'
   Pending       = 'Pair now: Settings > Sharing > paste the slip, use the -Canary text as the PC name. Do NOT let the administrator confirm yet. Click "Check again" once.'
@@ -577,10 +727,11 @@ $guidance = @{
   CategoryOn    = 'Switch on Water sharing (Settings > Sharing). Log a glass of water from the pet menu. Click "Check again" twice.'
   AfterDisable  = 'Switch Water sharing off again. Log another glass of water. Click "Check again" twice.'
 }
-$allOk = $true
 $results = @()
 try {
   auditpol /set /subcategory:$sub /success:enable /failure:enable | Out-Null
+  $auditEnabled = ($LASTEXITCODE -eq 0) -and ((Get-AuditSetting) -match 'Success and Failure')
+  if (-not $auditEnabled) { Write-Warning 'The connection audit could not be switched on: every phase will be INCONCLUSIVE.' }
   foreach ($ph in $Phases) {
     Write-Host ''
     Write-Host "Phase $ph" -ForegroundColor Cyan
@@ -590,6 +741,7 @@ try {
     $pcap = Join-Path $Out "phase-$ph.pcapng"
     Remove-Item -Force $etl, $pcap -ErrorAction SilentlyContinue
     pktmon filter remove | Out-Null
+    $idsAtStart = Get-CompanionIds
     $start = Get-Date
     pktmon start --capture --comp nics --pkt-size 0 --file-name $etl | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'pktmon could not start' }
@@ -599,24 +751,16 @@ try {
     }
     finally { pktmon stop | Out-Null }
     $end = Get-Date
+    $idsAtEnd = Get-CompanionIds
+    $running = @($idsAtStart | Where-Object { $idsAtEnd -contains $_ }).Count -gt 0
     pktmon etl2pcap $etl --out $pcap | Out-Null
     if (-not (Test-Path $pcap)) { throw "pktmon could not convert the capture for $ph" }
     $cap = Invoke-CaptureAnalysis $pcap $ips $ServerPort $Canary $ph
-    $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 5156, 5157; StartTime = $start; EndTime = $end.AddSeconds(2) } -ErrorAction SilentlyContinue | ForEach-Object {
-        $x = [xml]$_.ToXml()
-        $d = @{}; foreach ($n in $x.Event.EventData.Data) { $d[$n.Name] = $n.'#text' }
-        [pscustomobject]@{
-          Application = [string]$d['Application']
-          Direction   = $(if ($d['Direction'] -eq '%%14592') { 'inbound' } else { 'outbound' })
-          DestAddress = [string]$d['DestAddress']; DestPort = [int]$d['DestPort']; Protocol = [int]$d['Protocol']
-          Allowed     = ($_.Id -eq 5156)
-        }
-      })
-    $prog = Test-ProgramConnections $events $ips $ServerPort $ph
-    if (-not $events.Count) { $prog.Notes += 'no connection audit events were recorded in this window (check that the audit policy could be set)' }
-    $ok = Write-PhaseResult $cap $prog
-    $allOk = $allOk -and $ok
-    $results += [pscustomobject]@{ Phase = $ph; Pass = $ok; Capture = $cap; Programs = $prog }
+    $read = Read-AuditEvents $start $end.AddSeconds(2)
+    $audit = [pscustomobject]@{ Enabled = $auditEnabled; Error = $read.Error; Events = $read.Events }
+    $v = Get-PhaseVerdict $cap $audit $running $ips $ServerPort
+    $verdict = Write-PhaseResult $cap $v
+    $results += [pscustomobject]@{ Phase = $ph; Verdict = $verdict; Capture = $cap; Programs = $v.Programs; Missing = $v.Missing }
   }
 }
 finally {
@@ -627,9 +771,11 @@ finally {
 Add-Line ''
 Add-Line 'What this capture proves: the endpoints and port, TLS 1.3 only, nothing readable on the wire, and (from the program audit) no other connection by the companion or its WebView2.'
 Add-Line 'What it cannot see: which fields are inside TLS. T-S23''s content conditions are proven by the CI test crates/hy-server/tests/capture.rs on the real client and server.'
-Add-Line "Overall: $(if ($allOk) { 'PASS' } else { 'FAIL' })"
+$overall = Get-OverallVerdict @($results | ForEach-Object { $_.Verdict })
+Add-Line "Overall: $overall$(if ($overall -eq 'INCONCLUSIVE') { ' (evidence missing in a phase: fix what it names and run that phase again)' })"
 Add-Line 'The report names no user, PC, path, IP address or device id. The .etl and .pcapng files hold raw traffic of this PC: keep them, do not share them.'
 $Lines | Set-Content -Encoding UTF8 $Report
 $results | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 ($Report + '.json')
 Write-Host "`nReport written."
-if (-not $allOk) { exit 1 }
+if ($overall -eq 'FAIL') { exit 1 }
+if ($overall -ne 'PASS') { exit 2 }
