@@ -12,8 +12,11 @@
 ;     folder is remembered in the data folder (mirror-location.txt, kept on uninstall)
 ;     and is the default for a reinstall; before the service is pointed at a mirror,
 ;     hy-server check-mirror confirms it is the data's own (or that there is no data yet).
-;     Anything else is refused and nothing changes (exit 6). Moving the mirror is: copy
-;     control-log.mirror to the new folder, then run setup with /MIRROR= that folder;
+;     It runs the startup comparison without its effects on the stopped server, so a
+;     stale copy (behind what the server recorded as mirrored) or a forked one is refused
+;     too. Anything else is refused and nothing changes (exit 6). Moving the mirror is:
+;     with the service stopped (uninstall keeping the data), copy control-log.mirror to
+;     the new folder, then run setup with /MIRROR= that folder;
 ;   - opens TCP 8443 inbound for hy-server.exe on the private and domain profiles only.
 ;     The admin page (8444) listens on loopback only and gets no rule;
 ;   - on an upgrade, has the INSTALLED server check this installer's .sig and the version
@@ -279,7 +282,7 @@ Function MirrorPage
   ${EndIf}
   nsDialogs::Create 1018
   Pop $0
-  ${NSD_CreateLabel} 0 0 100% 60u "The server keeps an append-only copy of its control log (the mirror) on ANOTHER volume than C:: a second disk or a network share. It is how a restored old database is detected. Choose that folder (kept server data must use its own mirror: to move it, copy control-log.mirror to the new folder first):"
+  ${NSD_CreateLabel} 0 0 100% 60u "The server keeps an append-only copy of its control log (the mirror) on ANOTHER volume than C:: a second disk or a network share. It is how a restored old database is detected. Choose that folder (kept server data must use its own, current mirror: to move it, copy control-log.mirror while the service is stopped):"
   Pop $0
   ${NSD_CreateText} 0 64u 100% 12u "$Mirror"
   Pop $MirrorField
@@ -482,7 +485,7 @@ Section "Install"
     ${If} $Upgrade = 1
       !insertmacro StartService
     ${EndIf}
-    !insertmacro Fail 6 "The server data in $DataDir belongs with its own control-log mirror, and $Mirror\${MIRROR_FILE} is not it, so nothing was changed. Use the mirror folder the data was set up with, or copy its control-log.mirror to the new folder first. $1"
+    !insertmacro Fail 6 "The server data in $DataDir belongs with its own control-log mirror, and $Mirror\${MIRROR_FILE} is not it, so nothing was changed. Use the mirror folder the data was set up with. To move it: uninstall keeping the data (or stop the service), copy control-log.mirror to the new folder, then run setup with /MIRROR= that folder. $1"
   ${EndIf}
 
   ${If} $Upgrade = 1

@@ -285,6 +285,7 @@ async fn run(tmp: &Path) -> Result<String, Fail> {
         &backups,
         &UnprotectedForTests,
         true,
+        None,
     )
     .await
 }
@@ -298,6 +299,7 @@ async fn run_in(
     backups: &Path,
     protector: &dyn KeyProtector,
     restore: bool,
+    stale_copy: Option<&Path>,
 ) -> Result<String, Fail> {
     let (dir, mirror, backups) = (
         dir.to_path_buf(),
@@ -381,6 +383,14 @@ async fn run_in(
     for day in 0..DAYS {
         let today = clock.now().date_naive();
         if day == 3 {
+            if let Some(copy) = stale_copy {
+                // A copy of the mirror taken while the server runs, before the changes
+                // below are mirrored: the stale copy the installer must refuse (V1-6b).
+                if let Some(d) = copy.parent() {
+                    std::fs::create_dir_all(d).map_err(fail)?;
+                }
+                std::fs::copy(&mirror, copy).map_err(fail)?;
+            }
             // User 1 deletes yesterday (on its first PC); user 2 switches hydration off
             // (on its second PC), so today and later are never shared.
             let y = today - chrono::Duration::days(1);
@@ -521,9 +531,16 @@ fn main() -> std::process::ExitCode {
         [] => None,
         // `hy-sim seed <data dir> <mirror file>`: a populated server data folder with
         // this machine's real key protection, for the installer tests (slice V1-6b).
-        [cmd, dir, mirror] if cmd == "seed" => Some((dir.clone(), mirror.clone())),
+        [cmd, dir, mirror] if cmd == "seed" => Some((dir.clone(), mirror.clone(), None)),
+        // `... seed <data dir> <mirror file> <stale copy>`: also a copy of the mirror
+        // taken mid-week, behind what the server later mirrored.
+        [cmd, dir, mirror, stale] if cmd == "seed" => {
+            Some((dir.clone(), mirror.clone(), Some(stale.clone())))
+        }
         _ => {
-            eprintln!("usage: hy-sim [seed <data dir> <mirror file> | count <data dir>]");
+            eprintln!(
+                "usage: hy-sim [seed <data dir> <mirror file> [<stale mirror copy>] | count <data dir>]"
+            );
             return std::process::ExitCode::FAILURE;
         }
     };
@@ -540,7 +557,7 @@ fn main() -> std::process::ExitCode {
     };
     let out = match &seed {
         None => rt.block_on(run(&tmp)),
-        Some((dir, mirror)) => {
+        Some((dir, mirror, stale)) => {
             let protector = platform_protector();
             rt.block_on(run_in(
                 Path::new(dir),
@@ -548,6 +565,7 @@ fn main() -> std::process::ExitCode {
                 &tmp.join("backups"),
                 protector.as_ref(),
                 false,
+                stale.as_deref().map(Path::new),
             ))
         }
     };

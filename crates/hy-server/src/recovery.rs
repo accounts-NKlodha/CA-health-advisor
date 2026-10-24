@@ -116,7 +116,7 @@ fn hex16(s: &str) -> Option<[u8; 16]> {
     v.try_into().ok()
 }
 
-fn users_of(conn: &Connection) -> rusqlite::Result<Vec<[u8; 16]>> {
+pub(crate) fn users_of(conn: &Connection) -> rusqlite::Result<Vec<[u8; 16]>> {
     conn.prepare("SELECT user_id FROM users ORDER BY created_at, user_id")?
         .query_map([], |r| id16(r.get(0)?))?
         .collect()

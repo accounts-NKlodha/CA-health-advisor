@@ -21,8 +21,9 @@
     failure, TCP 8443 with a private/domain firewall rule, the admin page on loopback;
   - upgrades checked by the installed server: another key, no .sig and the same version
     again are refused (exit 3), nothing changed;
-  - another mirror on an upgrade and on a reinstall that keeps the data is refused
-    (exit 6), nothing changed; a reinstall without /MIRROR uses the remembered one; a
+  - another mirror, or a stale copy of the data's own mirror (taken while the server
+    ran, behind what it later mirrored), on an upgrade and on a reinstall that keeps the
+    data is refused (exit 6), nothing changed; a reinstall without /MIRROR uses the remembered one; a
     copied mirror (a verified move) is accepted;
   - the program copy cannot be made: refused before anything is replaced (exit 7);
   - S3 does not start: the previous program is back and running (exit 4);
@@ -115,6 +116,9 @@ function Show-ServiceError {
 
 $Mirror = $Mirror.TrimEnd('\')
 $Mirror2 = "$Mirror-moved"
+# A copy of the data's own mirror taken mid-week while the seeding server ran: same id
+# and key, valid chains, but behind what the server later mirrored.
+$MirrorStale = "$Mirror-stale"
 $MirrorFile = 'control-log.mirror'
 $Users = 'S-1-5-32-545'
 
@@ -190,9 +194,10 @@ try {
   Check 'clean runner: no service before' ((Service-State) -eq 'Missing')
 
   # --------------------------------- a populated data folder from before the install
-  $seedOut = (& $Sim seed $Data (Join-Path $Mirror $MirrorFile) 2>&1) -join ' '
+  $seedOut = (& $Sim seed $Data (Join-Path $Mirror $MirrorFile) (Join-Path $MirrorStale $MirrorFile) 2>&1) -join ' '
   Check 'seed: hy-sim seeded a data folder and mirror' ($LASTEXITCODE -eq 0) $seedOut
   $script:Seed = Counts
+  Check 'seed: a stale copy of the same mirror kept' (Test-Path (Join-Path $MirrorStale $MirrorFile))
   Check 'seed: users, devices and summaries present' ($script:Seed.ok -and $script:Seed.users -gt 0 -and $script:Seed.summaries -gt 0) $script:Seed.text
   $cert1 = Hash (Join-Path $Data 'keys\tls.cert.der')
   Open-Up
@@ -248,6 +253,10 @@ try {
   Check 'upgrade refused, another mirror: nothing changed, running' ((Hash $Exe) -eq $exe1 -and (RegValue $SettingsKey 'MirrorFolder') -eq $Mirror -and (Wait-Running)) "$(RegValue $SettingsKey 'MirrorFolder')"
   Check 'upgrade refused, another mirror: the service still uses the data''s mirror' ((Service-Config).PathName -like "*$Mirror\$MirrorFile*")
   Check-Data 'upgrade refused, another mirror'
+  $code = Run-Setup (Installer $VersionB) @('/S', "/MIRROR=$MirrorStale")
+  Check 'upgrade refused: a stale copy of the data''s own mirror (exit 6)' ($code -eq 6) "exit $code"
+  Check 'upgrade refused, stale copy: nothing changed, running on the data''s mirror' ((Hash $Exe) -eq $exe1 -and (RegValue $SettingsKey 'MirrorFolder') -eq $Mirror -and (Wait-Running) -and (Service-Config).PathName -like "*$Mirror\$MirrorFile*")
+  Check-Data 'upgrade refused, stale copy'
 
   # ------------------------------------------------------------------ upgrade S2
   $code = Run-Setup (Installer $VersionB) @('/S')
@@ -353,6 +362,10 @@ try {
   Check 'reinstall refused: another mirror (exit 6)' ($code -eq 6) "exit $code"
   Check 'reinstall refused: nothing installed' ((Service-State) -eq 'Missing' -and -not (Test-Path $UninstallKey) -and -not (Test-Path $Exe))
   Check-Data 'reinstall refused'
+  $code = Run-Setup (Installer $VersionB) @('/S', "/MIRROR=$MirrorStale")
+  Check 'reinstall refused: a stale copy of the data''s own mirror (exit 6)' ($code -eq 6) "exit $code"
+  Check 'reinstall refused, stale copy: nothing installed' ((Service-State) -eq 'Missing' -and -not (Test-Path $UninstallKey) -and -not (Test-Path $Exe))
+  Check-Data 'reinstall refused, stale copy'
 
   # ------------------------- reinstall without /MIRROR uses the remembered mirror
   Open-Up
@@ -384,7 +397,7 @@ try {
   Check 'uninstall /DELETEDATA: data folder removed' (-not (Test-Path (Join-Path $env:ProgramData 'HealthierYou')))
   Check 'uninstall /DELETEDATA: mirror removed' (-not (Test-Path (Join-Path $Mirror2 $MirrorFile)))
   Check 'uninstall /DELETEDATA: no registry keys left' (-not (Test-Path $UninstallKey) -and -not (Test-Path 'HKLM:\Software\HealthierYou'))
-  Remove-Item -Recurse -Force $Mirror -ErrorAction SilentlyContinue
+  Remove-Item -Recurse -Force $Mirror, $MirrorStale -ErrorAction SilentlyContinue
 
   # ----------------------------------------------- fresh install with no data
   $code = Run-Setup (Installer $VersionB) @('/S', "/MIRROR=$Mirror")
