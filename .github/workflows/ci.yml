@@ -9,6 +9,13 @@
 # fixed WebView2 runtime, signs them with keys made for the run, installs A, and runs
 # scripts/windows/Test-CompanionLifecycle.ps1: update A to B, C rolled back to B, refused
 # files, the downloaded-file mark, rollback to A, and uninstall with no registry residue.
+# V1-6b: it builds four server installers (S4 is a test release that changes the database
+# then fails) and runs scripts/windows/Test-ServerLifecycle.ps1 as administrator over a
+# data folder seeded by hy-sim: the service under its virtual account, the exact data
+# folder rights (over a folder opened to Users), the firewall rule, signature and version
+# checked upgrades, the data kept bound to its mirror, verified copies before an upgrade,
+# rollback of the program and of the database, an incomplete rollback that keeps
+# everything, and uninstall keeping or deleting the data, then a fresh install.
 # Between install and lifecycle it runs the installed companion's scripted self-test
 # (HY_SELFTEST) on the runner's desktop: real pet window styles, placement at every size, Bring pet above
 # clock, tray hide and show, presentation hiding, bubble layout and the panel hotkey, then
@@ -85,7 +92,7 @@ jobs:
   windows:
     name: Windows - clippy, tests, companion build
     runs-on: windows-latest
-    timeout-minutes: 75
+    timeout-minutes: 100
     defaults:
       run:
         shell: pwsh
@@ -239,14 +246,58 @@ jobs:
         timeout-minutes: 25
         run: ./scripts/windows/Test-CompanionLifecycle.ps1 -Phase Lifecycle -Installers (Join-Path $env:RUNNER_TEMP 'hy-installers') -OtherKeyDir (Join-Path $env:RUNNER_TEMP 'hy-other-key') -Work (Join-Path $env:RUNNER_TEMP 'hy-lifecycle')
 
-      - name: Keep installer A and the lifecycle results
+      # V1-6b: the office server's per-machine installer and Windows service.
+      - name: Build and sign server installers S1 to S4 (S3 cannot start, S4 changes the database then fails)
+        run: |
+          cargo build --release --locked -p hy-server -p hy-sim
+          $k = Join-Path $env:RUNNER_TEMP 'hy-keys'
+          $out = Join-Path $env:RUNNER_TEMP 'hy-server-installers'
+          $other = Join-Path $env:RUNNER_TEMP 'hy-server-other-key'
+          $bin = Join-Path $env:RUNNER_TEMP 'hy-server-bin'
+          New-Item -ItemType Directory -Force $out, $other, $bin | Out-Null
+          Copy-Item target/release/hy-server.exe (Join-Path $bin 'hy-server.exe')
+          Copy-Item target/release/hy-sim.exe (Join-Path $bin 'hy-sim.exe')
+          # The S4 test release: the real server built with the CI-only hook that applies
+          # a Contract migration older servers refuse, then fails to start.
+          $env:HY_SERVER_TEST_SCHEMA_CHANGE_THEN_FAIL = '1'
+          cargo build --release --locked -p hy-server
+          if ($LASTEXITCODE -ne 0) { throw 'Building the S4 test server failed' }
+          Remove-Item Env:HY_SERVER_TEST_SCHEMA_CHANGE_THEN_FAIL
+          Copy-Item target/release/hy-server.exe (Join-Path $bin 'hy-server-schema-then-fail.exe')
+          $tauri = 'apps/companion/ui/node_modules/@tauri-apps/cli/tauri.js'
+          $bad = Join-Path $env:RUNNER_TEMP 'not-a-server.exe'
+          Set-Content $bad 'not a program'
+          function Build-Server([string]$v, [string]$exe, [string]$dir, [string]$key) {
+            ./scripts/windows/Build-ServerInstaller.ps1 -Version $v -ServerExe $exe -OutDir $dir
+            node $tauri signer sign -f "$k/$key" -p ci-run --app-version $v (Join-Path $dir "HealthierYou-Server_${v}_x64-setup.exe")
+            if ($LASTEXITCODE -ne 0) { throw "Signing server $v failed" }
+          }
+          $real = Join-Path $bin 'hy-server.exe'
+          Build-Server '0.1.0' $real $out key1
+          Build-Server '0.1.1' $real $out key1
+          Build-Server '0.1.2' $bad $out key1
+          Build-Server '0.1.3' (Join-Path $bin 'hy-server-schema-then-fail.exe') $out key1
+          Build-Server '0.1.1' $real $other key2
+
+      - name: Server install, service, upgrade, rollback and uninstall (administrator)
+        timeout-minutes: 35
+        run: |
+          # The control-log mirror must be on another volume than the data folder (C:).
+          $sys = $env:SystemDrive.TrimEnd(':')
+          $drive = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Name -ne $sys -and $_.Free -gt 1GB } | Select-Object -First 1
+          if (-not $drive) { throw 'No second volume on this runner for the mirror' }
+          ./scripts/windows/Test-ServerLifecycle.ps1 -Installers (Join-Path $env:RUNNER_TEMP 'hy-server-installers') -OtherKeyDir (Join-Path $env:RUNNER_TEMP 'hy-server-other-key') -Mirror "$($drive.Root)hy-server-mirror" -Work (Join-Path $env:RUNNER_TEMP 'hy-lifecycle') -Sim (Join-Path $env:RUNNER_TEMP 'hy-server-bin\hy-sim.exe')
+
+      - name: Keep installers A and S1 and the lifecycle results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: companion-installer-ci
+          name: installers-ci
           retention-days: 7
           if-no-files-found: ignore
           path: |
+            ${{ runner.temp }}/hy-server-installers/HealthierYou-Server_0.1.0_x64-setup.exe
+            ${{ runner.temp }}/hy-server-installers/HealthierYou-Server_0.1.0_x64-setup.exe.sig
             ${{ runner.temp }}/hy-installers/HealthierYou_0.1.0_x64-setup.exe
             ${{ runner.temp }}/hy-installers/HealthierYou_0.1.0_x64-setup.exe.sig
             ${{ runner.temp }}/hy-lifecycle/*.csv

@@ -529,6 +529,90 @@ pub fn check_volume_with(
     }
 }
 
+/// How a server database is bound to a mirror file (checked by the installer before it
+/// points the service at a mirror, slice V1-6b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binding {
+    /// No database yet: the first start creates the mirror.
+    NoData,
+    /// A database that has never recorded a mirror, and no mirror file there: the first
+    /// start creates it.
+    NotYetBound,
+    /// The mirror file is the one this database recorded (same id, this server's key,
+    /// every chain verifies) and startup would accept it: no history differs from the
+    /// database's at a common entry, and it is not behind what the database recorded as
+    /// mirrored (`mirror_hwm`). A shorter mirror at or above that mark is re-appended at
+    /// startup; a longer one (an older database) puts the users on recovery hold.
+    Matches,
+}
+
+/// The startup comparison ([`crate::Server::startup`]) without its effects: refuse a
+/// mirror that startup would answer with the global discard path. Run against a stopped
+/// server, so no acknowledgement can move the high-water mark after the check.
+fn startup_compatible(
+    conn: &rusqlite::Connection,
+    key_id: &[u8; 32],
+    scan: &Scan,
+) -> Result<(), String> {
+    let read = |e: rusqlite::Error| format!("the server database cannot be read: {e}");
+    let mut users: std::collections::BTreeSet<[u8; 16]> = crate::recovery::users_of(conn)
+        .map_err(read)?
+        .into_iter()
+        .collect();
+    users.extend(scan.tails.keys().copied());
+    for u in &users {
+        let (db_tail, _) = crate::chain::tail(conn, key_id, u).map_err(read)?;
+        let (m_tail, _) = scan.tail(u);
+        let common = db_tail.min(m_tail);
+        if common > 0
+            && crate::chain::hash_at(conn, key_id, u, common).map_err(read)?
+                != scan.hash_at(u, common)
+        {
+            return Err("the mirror at this location has a different history from the server data (a fork or another copy of the server); starting with it would discard every user's shared data".into());
+        }
+        if db_tail > m_tail && m_tail < crate::Server::mirrored_seq(conn, u) {
+            return Err("the mirror at this location is an older copy: it ends before entries the server already recorded as mirrored, so starting with it would discard every user's shared data. Copy the current mirror again while the service is stopped".into());
+        }
+    }
+    Ok(())
+}
+
+/// Check that the mirror at `mirror` is the one the database at `db_path` is bound to.
+/// A refusal means starting the server against `mirror` would take the global discard
+/// path (every PC revoked, shared data cleared) or stay stopped, so the installer must
+/// not use it.
+///
+/// # Errors
+/// Why the mirror does not belong to this data, worded for an administrator.
+pub fn check_binding(db_path: &Path, key_id: &[u8; 32], mirror: &Path) -> Result<Binding, String> {
+    if !db_path.exists() {
+        return Ok(Binding::NoData);
+    }
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("the server database cannot be opened: {e}"))?;
+    let stored: Option<String> = rusqlite::OptionalExtension::optional(conn.query_row(
+        "SELECT value FROM meta WHERE key = 'mirror_id'",
+        [],
+        |r| r.get(0),
+    ))
+    .map_err(|e| format!("the server database cannot be read: {e}"))?;
+    let stored = stored.map(|s| s.to_ascii_lowercase());
+    match (scan(mirror, key_id), stored) {
+        (Err(MirrorError::Missing), None) => Ok(Binding::NotYetBound),
+        (Ok(_), None) => Err("a mirror file is already at this location but the server data has never used one; choose an empty folder".into()),
+        (Err(MirrorError::Missing), Some(_)) => Err("the server data's mirror is not at this location (the file is missing); give the folder that holds it, or copy it here first".into()),
+        (Err(MirrorError::Unreadable), _) => Err("the mirror cannot be read (check the share and its permissions)".into()),
+        (Err(MirrorError::Corrupt), _) => Err("the mirror at this location is damaged".into()),
+        (Err(MirrorError::Foreign), _) => Err("the mirror at this location belongs to another server or key".into()),
+        (Ok(scan), Some(id)) if hex(&scan.header.mirror_id) == id => {
+            startup_compatible(&conn, key_id, &scan)?;
+            Ok(Binding::Matches)
+        }
+        (Ok(_), Some(_)) => Err("the mirror at this location belongs to other server data".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,5 +710,160 @@ mod tests {
             scan(&dir.path().join("none"), &key).unwrap_err(),
             MirrorError::Missing
         );
+    }
+
+    /// Put `entries` (one user's chain) into a server database, with the user.
+    fn store(conn: &rusqlite::Connection, entries: &[StoredEntry]) {
+        let user = entries[0].user_id;
+        conn.execute(
+            "INSERT OR IGNORE INTO users (user_id, alias, created_at) VALUES (?1, ?2, 1)",
+            rusqlite::params![user.as_slice(), hex(&user[..4])],
+        )
+        .unwrap();
+        for e in entries {
+            conn.execute(
+                "INSERT INTO control_log (user_id, seq, at_ms, kind, body, prev_hash, hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    e.user_id.as_slice(),
+                    i64::try_from(e.seq).unwrap(),
+                    i64::try_from(e.at_ms).unwrap(),
+                    e.kind,
+                    e.body,
+                    e.prev.as_slice(),
+                    e.hash.as_slice()
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    fn set_hwm(conn: &rusqlite::Connection, user: [u8; 16], seq: i64) {
+        conn.execute(
+            "INSERT OR REPLACE INTO mirror_hwm (user_id, seq) VALUES (?1, ?2)",
+            rusqlite::params![user.as_slice(), seq],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_installer_binding_check_accepts_only_the_datas_own_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("server.db");
+        let key = [9u8; 32];
+        let user = [2u8; 16];
+        let mirror = dir.path().join("m1").join("control-log.mirror");
+        std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
+        // No database: nothing to bind.
+        assert_eq!(check_binding(&db, &key, &mirror).unwrap(), Binding::NoData);
+        let conn = crate::db::open(&db).unwrap();
+        // A database that never used a mirror, and no file there.
+        assert_eq!(
+            check_binding(&db, &key, &mirror).unwrap(),
+            Binding::NotYetBound
+        );
+        let entries = chain(&key, user, 3);
+        let mut m = Mirror::create(&mirror, [1; 16], key, 5).unwrap();
+        m.append(&entries).unwrap();
+        drop(m);
+        // ... but a file already there is refused for unbound data.
+        assert!(check_binding(&db, &key, &mirror).is_err());
+        store(&conn, &entries);
+        set_hwm(&conn, user, 3);
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('mirror_id', ?1)",
+            [hex(&[1u8; 16])],
+        )
+        .unwrap();
+        assert_eq!(check_binding(&db, &key, &mirror).unwrap(), Binding::Matches);
+        // Another, empty destination: refused (it would take the global discard path).
+        let empty = dir.path().join("m2").join("control-log.mirror");
+        std::fs::create_dir_all(empty.parent().unwrap()).unwrap();
+        let err = check_binding(&db, &key, &empty).unwrap_err();
+        assert!(err.contains("not at this location"), "{err}");
+        // A verified move: the same file copied to the new folder is accepted.
+        std::fs::copy(&mirror, &empty).unwrap();
+        assert_eq!(check_binding(&db, &key, &empty).unwrap(), Binding::Matches);
+        // Another server's mirror, or another key: refused.
+        let other = dir.path().join("m3").join("control-log.mirror");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        drop(Mirror::create(&other, [7; 16], key, 5).unwrap());
+        assert!(check_binding(&db, &key, &other).is_err());
+        assert!(check_binding(&db, &[8u8; 32], &mirror).is_err());
+        // A damaged copy: refused.
+        let mut bytes = std::fs::read(&empty).unwrap();
+        let n = bytes.len() - 5;
+        bytes[n] ^= 0x01;
+        std::fs::write(&empty, bytes).unwrap();
+        assert!(check_binding(&db, &key, &empty).is_err());
+    }
+
+    #[test]
+    fn the_installer_binding_check_refuses_a_stale_or_forked_copy_of_the_right_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("server.db");
+        let key = [9u8; 32];
+        let user = [2u8; 16];
+        let conn = crate::db::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('mirror_id', ?1)",
+            [hex(&[1u8; 16])],
+        )
+        .unwrap();
+        let full = chain(&key, user, 4);
+        store(&conn, &full);
+        let at = |name: &str, entries: &[StoredEntry]| {
+            let p = dir.path().join(name).join("control-log.mirror");
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let mut m = Mirror::create(&p, [1; 16], key, 5).unwrap();
+            m.append(entries).unwrap();
+            p
+        };
+        // A copy taken at seq 2, then the server mirrored up to 4: behind the mark.
+        let stale = at("stale", &full[..2]);
+        set_hwm(&conn, user, 4);
+        let err = check_binding(&db, &key, &stale).unwrap_err();
+        assert!(err.contains("older copy"), "{err}");
+        // The same copy is fine while the mark is at or below its tail (startup
+        // re-appends the rest).
+        set_hwm(&conn, user, 2);
+        assert_eq!(check_binding(&db, &key, &stale).unwrap(), Binding::Matches);
+        // The current mirror is fine; a longer one (an older database) means hold, not
+        // discard, so it is accepted too.
+        assert_eq!(
+            check_binding(&db, &key, &at("current", &full)).unwrap(),
+            Binding::Matches
+        );
+        let longer = chain(&key, user, 6);
+        assert_eq!(
+            check_binding(&db, &key, &at("longer", &longer)).unwrap(),
+            Binding::Matches
+        );
+        // A fork: same id and key, a valid chain, but a different entry at seq 3.
+        let mut forked = full[..2].to_vec();
+        let mut prev = forked[1].hash;
+        for seq in 3..=4u64 {
+            let body = EntryBody::DeviceConfirmed {
+                device_ref: [0xEE; 16],
+            };
+            let e = ControlEntry {
+                user_id: user,
+                seq,
+                at_ms: 5000 + seq,
+                body,
+            };
+            let hash = e.hash(&prev);
+            forked.push(StoredEntry {
+                user_id: user,
+                seq,
+                at_ms: e.at_ms,
+                kind: body.kind(),
+                body: body.encode(),
+                prev,
+                hash,
+            });
+            prev = hash;
+        }
+        let err = check_binding(&db, &key, &at("fork", &forked)).unwrap_err();
+        assert!(err.contains("different history"), "{err}");
     }
 }

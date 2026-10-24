@@ -20,8 +20,10 @@
 //! - [`sync`]: control operations, uploads with strict per-category schemas, history,
 //!   receipt echoes and regression, receipts as recovery evidence;
 //! - [`recovery`]: the startup comparison, recovery hold, release and discard;
-//! - [`backup`]: encrypted daily backups and restore.
+//! - [`backup`]: encrypted daily backups and restore;
+//! - [`acl`]: checking that the data folder is closed to other accounts (V1-6b).
 
+pub mod acl;
 pub mod admin;
 pub mod api;
 pub mod audit;

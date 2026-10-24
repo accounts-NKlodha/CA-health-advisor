@@ -41,4 +41,4 @@ cargo test --workspace --exclude hy-companion --locked
 (cd apps/companion/ui && npm ci && npm run build)
 ```
 
-The companion builds and is tested on the Windows CI job (`.github/workflows/ci.yml`), which also builds the per-user installers and runs the install, update, rollback and uninstall test (`scripts/windows/Test-CompanionLifecycle.ps1`). Release signing and the checks that need a real office PC are in `docs/V1-6_Install_Update.md`.
+The companion builds and is tested on the Windows CI job (`.github/workflows/ci.yml`), which also builds the per-user companion installers and the server installer, and runs the install, update, rollback and uninstall tests (`scripts/windows/Test-CompanionLifecycle.ps1`, `scripts/windows/Test-ServerLifecycle.ps1`). Release signing and the checks that need a real office PC are in `docs/V1-6_Install_Update.md`.
