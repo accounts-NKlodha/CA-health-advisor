@@ -55,6 +55,15 @@ const COMMANDS: &[&str] = &[
     "update_choose",
     "update_install",
     "set_autostart",
+    "camera_open",
+    "camera_off",
+    "camera_on",
+    "camera_page",
+    "camera_consent",
+    "camera_try_again",
+    "camera_withdraw",
+    "camera_report",
+    "camera_frame",
 ];
 
 /// The update public keys this build trusts (slice V1-6), passed to the program as

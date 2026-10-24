@@ -27,8 +27,13 @@
 //! Slice V1-6 adds [`update`]: signed update files (minisign signatures checked against
 //! built-in keys), what may be installed, the update record, keeping and restoring the
 //! previous program files, and restoring the pre-migration copy of the database.
+//!
+//! Slice V2-1 adds [`camera`]: the posture check's camera session (consent, holds,
+//! conflicts, the worker watchdog, release on off, and the frame-rate budget). Frames and
+//! landmarks never reach it; the camera page sends one derived report per frame.
 
 pub mod backup;
+pub mod camera;
 pub mod clock;
 pub mod coach;
 pub mod error;

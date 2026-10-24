@@ -1,0 +1,31 @@
+/* The camera page (wireframe W16). Shares the settings window's tokens and controls,
+   including the display preferences. */
+@import '../screens/screens.css';
+
+.shell.camera {
+  max-width: 560px;
+}
+.status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: calc(16px * var(--ts, 1));
+}
+.cam-chip {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 9px;
+  border: 2px solid currentColor;
+  font-size: 12px;
+  font-weight: 700;
+  opacity: 0.55;
+}
+.cam-chip.on {
+  opacity: 1;
+}
+@media (forced-colors: active) {
+  .cam-chip {
+    border-color: CanvasText;
+    opacity: 1;
+  }
+}

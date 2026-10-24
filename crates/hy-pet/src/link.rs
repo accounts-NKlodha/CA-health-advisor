@@ -15,7 +15,10 @@
 //! - `hide(HideReason::Presentation)` while the engine's view is not visible, and
 //!   `unhide` when it is again. The engine decides (presentation detection feeds it, and
 //!   the user's setting may keep the pet shown); the shell only follows;
-//! - the engine's pet menu, panel and tray entries ([`present::menu_actions`]).
+//! - the engine's pet menu, panel and tray entries ([`present::menu_actions`]);
+//! - the holds in force ([`PetShell::set_holds`]), for the V2 camera, which releases
+//!   capture while the PC is locked, coaching is paused, outside work hours, during a
+//!   presentation and during a meeting.
 //!
 //! Answers come back from the shell through [`LinkSink`] (the shell's
 //! [`ShellEventSink`]) on the UI thread: it routes the event against the [`RouteState`]
@@ -43,6 +46,7 @@ pub mod signals;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use hy_core::camera::HoldSources;
 use hy_core::coach::Coach;
 use hy_core::coach::{
     Bubble as CoachBubble, CoachView, Input, InputOutcome, Notice, PhoneInput, StepOutput,
@@ -134,6 +138,7 @@ struct Shown {
     look: Option<(PetState, Option<String>)>,
     menu: Option<Vec<MenuAction>>,
     bubble: Option<(BubbleKind, Bubble)>,
+    holds: Option<HoldSources>,
 }
 
 /// The engine bound to the shell.
@@ -413,6 +418,11 @@ impl CoachLink {
 
     /// Draw `view` on the shell. Returns true if the shell refused a new bubble.
     fn render(&mut self, view: &CoachView, celebrating: bool) -> bool {
+        // The V2 camera follows the engine's holds (it releases capture during some).
+        if self.shown.holds != Some(view.holds) {
+            self.shown.holds = Some(view.holds);
+            self.shell.set_holds(view.holds);
+        }
         let look = present::pet_look(view, celebrating);
         let menu = present::menu_actions(view);
         let want = view

@@ -1,19 +1,74 @@
 //! Window creation (architecture 4.1): the pet window always exists; the keyboard panel,
 //! the settings window and the review window are created on demand and destroyed on
-//! close, so their memory is returned (A7: idle at most 150 MB).
+//! close, so their memory is returned (A7: idle at most 150 MB). The camera page (slice
+//! V2-1) exists only while the posture check needs it.
+//!
+//! Every window gets the camera permission guard (architecture 4.5): only the camera
+//! window may use the camera, only while the posture check wants capture, and no answer
+//! is ever saved in the WebView2 profile (all pages share one origin).
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use hy_pet::geometry::{Monitor, Rect};
 use hy_pet::placement::screens_window_logical;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-use crate::shell::{PANEL, PET, PLAN, REVIEW, SCREENS, SETUP, Shell, set_window_rect};
+use crate::shell::{CAMERA, PANEL, PET, PLAN, REVIEW, SCREENS, SETUP, Shell, set_window_rect};
 
 /// The same WebView2 arguments for every window: windows sharing one WebView2
 /// environment must use identical options. These switch off Edge features that would
 /// otherwise contact the internet (batch 1; architecture 9).
 pub const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
+
+/// The self-test's extra argument: Chromium's synthetic camera (a generated test pattern,
+/// no image of anyone), so the camera page runs end to end on a CI runner without a
+/// webcam.
+pub const SELFTEST_CAMERA_ARG: &str = "--use-fake-device-for-media-stream";
+
+/// The arguments for this run's windows ([`BROWSER_ARGS`], plus the synthetic camera in
+/// the self-test only). Every window gets the same string.
+pub fn browser_args() -> &'static str {
+    static ARGS: OnceLock<String> = OnceLock::new();
+    ARGS.get_or_init(|| {
+        let selftest = std::env::var_os("HY_SELFTEST").is_some_and(|v| !v.is_empty());
+        if selftest {
+            format!("{BROWSER_ARGS} {SELFTEST_CAMERA_ARG}")
+        } else {
+            BROWSER_ARGS.to_owned()
+        }
+    })
+}
+
+/// The camera page's size, logical pixels.
+pub const CAMERA_LOGICAL: (f64, f64) = (520.0, 600.0);
+
+/// Install the permission guard on a window (Windows; see the module notes). `then` runs
+/// on the UI thread once the guard is in place (with false if it could not be).
+fn guard(w: &WebviewWindow, then: impl FnOnce(bool) + Send + 'static) {
+    let label = w.label().to_owned();
+    #[cfg(windows)]
+    {
+        let app = w.app_handle().clone();
+        let installed = w.with_webview(move |pw| {
+            let rule: crate::win32::PermissionRule = Box::new(move |camera| {
+                camera
+                    && app
+                        .try_state::<Arc<Shell>>()
+                        .is_some_and(|s| s.camera_permission(&label))
+            });
+            then(crate::win32::guard_permissions(&pw.controller(), rule));
+        });
+        if let Err(e) = installed {
+            eprintln!("HealthierYou: could not reach a webview to guard it: {e}");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // Development builds on other systems: Tauri's own handler (main.rs) decides.
+        let _ = label;
+        then(true);
+    }
+}
 
 /// The keyboard panel's size, logical pixels.
 pub const PANEL_LOGICAL: (f64, f64) = (340.0, 400.0);
@@ -40,14 +95,13 @@ pub fn create_pet_window(app: &AppHandle) -> tauri::Result<()> {
         .focused(false)
         .focusable(false)
         .visible(false)
-        .additional_browser_args(BROWSER_ARGS)
+        .additional_browser_args(browser_args())
         .build()?;
     #[cfg(windows)]
     if let Some(h) = crate::shell::hwnd_of(&w) {
         crate::win32::harden_pet(h);
     }
-    #[cfg(not(windows))]
-    let _ = w;
+    guard(&w, |_| {});
     Ok(())
 }
 
@@ -68,8 +122,9 @@ pub fn open_panel(shell: &Arc<Shell>, rect: Option<Rect>) -> tauri::Result<()> {
         .minimizable(false)
         .visible(false)
         .focused(true)
-        .additional_browser_args(BROWSER_ARGS)
+        .additional_browser_args(browser_args())
         .build()?;
+    guard(&w, |_| {});
     if let Some(r) = rect {
         set_window_rect(&w, r);
     } else {
@@ -164,7 +219,59 @@ fn open_screen(
         .resizable(true)
         .center()
         .focused(true)
-        .additional_browser_args(BROWSER_ARGS)
+        .additional_browser_args(browser_args())
         .build()?;
+    guard(&w, |_| {});
     w.set_focus()
+}
+
+/// Create the camera page (architecture 4.5): its own window, so its memory goes back
+/// when it closes. It is on screen when the user opened it (`show`), else hidden while
+/// the posture check runs in the background. Capture starts only after the permission
+/// guard is in place ([`Shell::camera_guarded`]). Closing it while the camera runs only
+/// hides it.
+///
+/// # Errors
+/// A Tauri window-creation error.
+pub fn open_camera(shell: &Arc<Shell>, monitor: Option<&Monitor>, show: bool) -> tauri::Result<()> {
+    let app = shell.app();
+    let (width, height) = monitor.map_or(CAMERA_LOGICAL, |m| {
+        let (w, h) = screens_window_logical(m);
+        (CAMERA_LOGICAL.0.min(w), CAMERA_LOGICAL.1.min(h))
+    });
+    let w = WebviewWindowBuilder::new(app, CAMERA, WebviewUrl::App("camera.html".into()))
+        .title("HealthierYou - Posture check")
+        .inner_size(width, height)
+        .resizable(true)
+        .maximizable(false)
+        .center()
+        .visible(show)
+        .focused(show)
+        .additional_browser_args(browser_args())
+        .build()?;
+    let weak = Arc::downgrade(shell);
+    w.on_window_event(move |e| {
+        let Some(s) = weak.upgrade() else { return };
+        match e {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                if !s.camera_close_requested() {
+                    api.prevent_close();
+                }
+            }
+            tauri::WindowEvent::Destroyed => s.post(|s| s.camera_window_closed()),
+            _ => {}
+        }
+    });
+    let weak = Arc::downgrade(shell);
+    guard(&w, move |ok| {
+        if let Some(s) = weak.upgrade() {
+            if ok {
+                s.post(|s| s.camera_guarded());
+            } else {
+                eprintln!("HealthierYou: the camera permission guard could not be installed");
+                s.post(|s| s.camera_guard_failed());
+            }
+        }
+    });
+    Ok(())
 }

@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use chrono::NaiveDate;
+use hy_core::camera::HoldSources;
 use hy_core::prefs::Accessibility;
 use hy_core::review::{MonthReview, WeekReview};
 use hy_core::schema::{PetEdge, PhoneLabel};
@@ -43,8 +44,8 @@ use uuid::Uuid;
 
 use crate::coach::SystemSignal;
 use crate::view::{
-    LayoutView, MenuView, PanelView, PetView, ReviewPage, SettingsView, menu_view, open_view,
-    pose_for, settings_view,
+    CameraBadge, LayoutView, MenuView, PanelView, PetView, ReviewPage, SettingsView, menu_view,
+    open_view, pose_for, settings_view,
 };
 use crate::{tray, windows};
 
@@ -60,9 +61,13 @@ pub const REVIEW: &str = "review";
 pub const PLAN: &str = "plan";
 /// The setup wizard's label (wireframe W1).
 pub const SETUP: &str = "setup";
+/// The camera page's label (slice V2-1; wireframes W10 and W16).
+pub const CAMERA: &str = "camera";
 
+mod camera;
 mod data;
 mod screens;
+pub use camera::{PageCommand, PageReport, start_camera_clock};
 pub(crate) use data::category_label;
 pub use data::{BackupDone, ImportOutcome};
 pub use screens::SuggestionAnswer;
@@ -145,6 +150,8 @@ pub struct Shell {
     inner: Mutex<Inner>,
     sink: Mutex<Option<Arc<dyn ShellEventSink>>>,
     system: Mutex<Option<SystemListener>>,
+    /// The posture check's camera (a leaf lock: see [`camera`]).
+    camera: Mutex<camera::CameraState>,
 }
 
 /// Hears lock, unlock, sleep, wake and the end of the Windows session.
@@ -233,6 +240,13 @@ impl Shell {
         let hotkey = profile::panel_hotkey(&store)?;
         // Unreadable preferences fall back to the defaults rather than stop the app.
         let a11y = store.accessibility().unwrap_or_default();
+        // An unreadable camera setting means off (the consent text is shown again).
+        let camera_settings = store
+            .setting::<hy_core::camera::CameraSettings>(hy_core::camera::SETTINGS_KEY)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let selftest = std::env::var_os("HY_SELFTEST").is_some_and(|v| !v.is_empty());
         Ok(Arc::new(Self {
             app,
             store: Mutex::new(store),
@@ -259,6 +273,7 @@ impl Shell {
             }),
             sink: Mutex::new(None),
             system: Mutex::new(None),
+            camera: Mutex::new(camera::CameraState::new(camera_settings, selftest)),
         }))
     }
 
@@ -473,7 +488,12 @@ impl Shell {
             .hotkey
             .filter(|_| i.hotkey_registered)
             .map(|h| h.to_string());
-        menu_view(&i.profile, i.core.model.menu_actions(), hk)
+        menu_view(
+            &i.profile,
+            i.core.model.menu_actions(),
+            hk,
+            self.camera_menu(),
+        )
     }
 
     /// Lay the window out and send the pet page (and the panel, if open) a fresh view.
@@ -552,6 +572,7 @@ impl Shell {
             pet_px: pet_window_logical(i.profile.scale_pct),
             open: open_view(i.core.model.open(), token, || self.menu_for(i)),
             layout,
+            camera: CameraBadge::of(self.camera_status()),
         }
     }
 
@@ -1202,5 +1223,9 @@ impl PetShell for ShellHandle {
 
     fn set_event_sink(&self, sink: Arc<dyn ShellEventSink>) {
         self.0.set_sink(sink);
+    }
+
+    fn set_holds(&self, holds: HoldSources) {
+        self.0.post(move |s| s.camera_set_hold(holds.camera_hold()));
     }
 }

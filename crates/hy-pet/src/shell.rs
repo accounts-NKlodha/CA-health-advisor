@@ -20,6 +20,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use hy_core::camera::HoldSources;
 use serde::{Deserialize, Serialize};
 
 use crate::state::PetState;
@@ -364,6 +365,11 @@ pub trait PetShell: Send + Sync {
     fn set_menu_actions(&self, actions: Vec<MenuAction>);
     /// Register the engine's event sink (replacing any earlier one).
     fn set_event_sink(&self, sink: Arc<dyn ShellEventSink>);
+    /// The holds in force changed (slice V2-1: the camera follows them). Shells without a
+    /// camera ignore it.
+    fn set_holds(&self, holds: HoldSources) {
+        let _ = holds;
+    }
 }
 
 /// What is open beside the pet.
