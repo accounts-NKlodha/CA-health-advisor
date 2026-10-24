@@ -217,14 +217,20 @@ fn run(shell: &Arc<Shell>) -> Report {
         let next_to_exe = std::env::current_exe()
             .ok()
             .and_then(|e| e.parent().map(|d| d.join("webview2-fixed")));
-        let ok = folder
+        // Tauri sets the folder from its own canonical exe path, so compare canonical
+        // forms (a verbatim `\\?\` prefix names the same folder).
+        let canonical =
+            |p: &Option<PathBuf>| p.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
+        let set = folder.is_some();
+        let runtime = folder
             .as_ref()
-            .is_some_and(|f| f.join("msedgewebview2.exe").is_file())
-            && folder == next_to_exe;
+            .is_some_and(|f| f.join("msedgewebview2.exe").is_file());
+        let same = canonical(&folder).is_some() && canonical(&folder) == canonical(&next_to_exe);
+        let ok = set && runtime && same;
         r.check(
             "fixed_webview2_runtime",
             ok,
-            format!("bundled runtime beside the app in use: {ok}"),
+            format!("runtime folder set {set}, runtime there {runtime}, beside the app {same}"),
         );
     }
     let loaded = wait_until(Duration::from_secs(60), || shell.page_ready());

@@ -205,6 +205,8 @@ jobs:
             }
             $all | Where-Object { $ids -contains $_.ProcessId }
           }
+          $installDir = Join-Path $env:LOCALAPPDATA 'HealthierYou\webview2-fixed\'
+          $bundledSeen = $false; $otherSeen = $false
           $deadline = (Get-Date).AddMinutes(5)
           $samples = @()
           while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
@@ -214,6 +216,9 @@ jobs:
               $ws = [math]::Round((($tree | Measure-Object WorkingSetSize -Sum).Sum) / 1MB, 1)
               $priv = [math]::Round((($tree | Measure-Object PrivatePageCount -Sum).Sum) / 1MB, 1)
               $samples += [pscustomobject]@{ t = (Get-Date).ToString('HH:mm:ss'); processes = $tree.Count; working_set_mb = $ws; private_mb = $priv }
+              foreach ($w in @($tree | Where-Object { $_.Name -eq 'msedgewebview2.exe' -and $_.ExecutablePath })) {
+                if ($w.ExecutablePath.StartsWith($installDir, [StringComparison]::OrdinalIgnoreCase)) { $bundledSeen = $true } else { $otherSeen = $true }
+              }
             }
           }
           if (-not $p.HasExited) {
@@ -224,8 +229,10 @@ jobs:
           "Process tree memory (A7 target: idle at most 150 MB; informational on a CI runner):"
           $samples | Format-Table -AutoSize | Out-String -Width 200
           if (Test-Path $report) { Get-Content $report } else { 'No self-test report was written' }
+          "WebView2 processes from the bundled runtime: $bundledSeen; from elsewhere: $otherSeen"
           "self-test exit code: $($p.ExitCode)"
           if ($p.ExitCode -ne 0) { throw "Pet shell self-test failed (exit code $($p.ExitCode))" }
+          if (-not $bundledSeen -or $otherSeen) { throw 'The installed app did not run on its bundled WebView2 runtime only' }
 
       - name: Update, rollback, refusals and uninstall of the installed app
         run: ./scripts/windows/Test-CompanionLifecycle.ps1 -Phase Lifecycle -Installers (Join-Path $env:RUNNER_TEMP 'hy-installers') -OtherKeyDir (Join-Path $env:RUNNER_TEMP 'hy-other-key') -Work (Join-Path $env:RUNNER_TEMP 'hy-lifecycle')

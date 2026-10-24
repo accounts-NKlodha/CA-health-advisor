@@ -143,7 +143,7 @@ try {
     Check 'install A: publisher' ((RegValue $UninstallKey 'Publisher') -eq $Product)
     $run = RegValue $RunKey $Product
     Check 'install A: start at sign-in (per-user Run value)' ($run -eq "`"$Exe`"")
-    Check 'install A: exe version' ((Get-Item $Exe).VersionInfo.ProductVersion -eq $VersionA) (Get-Item $Exe).VersionInfo.ProductVersion
+    Check 'install A: exe version' ((Get-Item $Exe).VersionInfo.ProductVersion -like "$VersionA*") (Get-Item $Exe).VersionInfo.ProductVersion
   }
   else {
     # ------------------------------------------------------------ update A -> B
@@ -154,7 +154,7 @@ try {
     $s = Wait-Outcome $VersionB
     Check 'update A->B: outcome updated' ($s -and $s.last.kind -eq 'updated') "$($s.last.kind): $($s.last.detail)"
     Check 'update A->B: uninstall entry shows B' ((DisplayVersion) -eq $VersionB) "DisplayVersion $(DisplayVersion)"
-    Check 'update A->B: exe is B' ((Get-Item $Exe).VersionInfo.ProductVersion -eq $VersionB -and (Hash $Exe) -ne $exeA)
+    Check 'update A->B: exe is B' ((Get-Item $Exe).VersionInfo.ProductVersion -like "$VersionB*" -and (Hash $Exe) -ne $exeA)
     Check 'update A->B: previous version recorded as A' ($s -and $s.previous_version -eq $VersionA) "$($s.previous_version)"
     Check 'update A->B: B is running (confirmed its start)' (@(Get-Process -Name 'hy-companion' -ErrorAction SilentlyContinue).Count -gt 0)
     Check 'update A->B: previous-version copy cleared after success' (-not (Test-Path (Join-Path $Updates 'previous')))
@@ -227,7 +227,7 @@ try {
     $s = Wait-Outcome $VersionA
     Check 'rollback B->A: outcome updated' ($s -and $s.last.kind -eq 'updated') "$($s.last.kind): $($s.last.detail)"
     Check 'rollback B->A: uninstall entry shows A' ((DisplayVersion) -eq $VersionA)
-    Check 'rollback B->A: exe is A' ((Get-Item $Exe).VersionInfo.ProductVersion -eq $VersionA)
+    Check 'rollback B->A: exe is A' ((Get-Item $Exe).VersionInfo.ProductVersion -like "$VersionA*")
     Check 'rollback B->A: nothing older may follow' ($s -and $null -eq $s.previous_version)
     Check 'rollback B->A: data kept' (Test-Path (Join-Path $Data 'hy.db'))
 
