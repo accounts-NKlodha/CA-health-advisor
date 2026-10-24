@@ -40,22 +40,33 @@ use crate::protocol::wire::{
     ControlOp, ControlOutcome, ControlResult, DeviceInfo, HistoryRow, MAX_CONTROL_OPS, RowOutcome,
     WireError,
 };
-use crate::schema::{Category, ConsentKind, ImportProvenance};
+use crate::schema::{Category, ConsentKind, ImportProvenance, ReminderOutcome, RoutineOutcome};
 
 /// The notice version recorded with `remote_enable_applied`.
 pub const REMOTE_ENABLE_NOTICE: &str = "v1-5-remote-enable-1";
-/// Days this PC looks back when building records (the server's window is 90).
+/// Days this PC looks back when building records on an ordinary sync.
 pub const SHARE_LOOKBACK_DAYS: u64 = 7;
+/// Days the re-send after a release from recovery hold looks back: the server's whole
+/// retention window (contract 8.6), which is also how long this PC keeps the detailed
+/// events the records are built from (architecture 6.1).
+pub const RESEND_WINDOW_DAYS: u64 = 90;
 
 const NOTICES: &str = "server_notices";
 const STATUS: &str = "server_status";
 const REVISIONS: &str = "share_revisions";
 /// The "last sent" text that makes a day be sent again (after a release from hold).
 const RESEND: &str = "resend";
+/// Set on a release from hold: the next queuing pass reaches back
+/// [`RESEND_WINDOW_DAYS`] instead of [`SHARE_LOOKBACK_DAYS`].
+const RESEND_PENDING: &str = "share_resend_pending";
 /// Set by a regression reset: the next verified pull applies no enable.
 const REGRESSION_SUPPRESS: &str = "server_regression_suppress";
 /// Notices kept at most (the oldest go first).
 const MAX_NOTICES: usize = 20;
+/// `store_meta` key: the latest date of tracker tallies that came from another PC's
+/// backup. Tallies carry no origin, so no day up to it is shared as this PC's work
+/// session (T-L7). Kept in `store_meta`, which a backup never carries.
+pub(super) const FOREIGN_TALLIES: &str = "foreign_tallies_through";
 
 /// What a notice is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,8 +373,12 @@ pub(super) fn apply_entries(
     let was_held = read_setting::<ServerStatus>(tx, STATUS)?.is_some_and(|s| s.hold);
     if was_held {
         // Released from a server restore: rows sent after the restored snapshot are no
-        // longer on the server, so every shareable day is sent again with a higher
-        // revision (the revisions themselves are kept, so they still increase).
+        // longer on the server, so every day this PC shared within the server's retention
+        // window is sent again with a higher revision (the revisions themselves are kept,
+        // so they still increase). The snapshot can be up to 30 days old and the hold can
+        // last 7 days, so the next pass reaches back the whole window, not the usual
+        // lookback.
+        write_setting(tx, RESEND_PENDING, &true, now)?;
         let mut revisions: std::collections::BTreeMap<String, (u32, String)> =
             read_setting(tx, REVISIONS)?.unwrap_or_default();
         for v in revisions.values_mut() {
@@ -396,9 +411,67 @@ fn empty_record(category: Category) -> Option<serde_json::Value> {
             personal: 0,
             unsure: 0,
         }),
-        Category::Outcomes | Category::WorkSession | Category::PostureSummary => return None,
+        Category::Outcomes => serde_json::to_value(share::Outcomes {
+            v: share::SCHEMA_VERSION,
+            offered: 0,
+            done: 0,
+            snoozed: 0,
+            skipped: 0,
+            no_response: 0,
+            routine: None,
+        }),
+        Category::WorkSession => serde_json::to_value(share::WorkSession {
+            v: share::SCHEMA_VERSION,
+            active_min: 0,
+            longest_block_min: 0,
+            focus_count: 0,
+            pomodoro_count: 0,
+        }),
+        Category::PostureSummary => return None,
     };
     v.ok().filter(|v| share::validate(category, v).is_ok())
+}
+
+const fn routine_result(o: RoutineOutcome) -> share::RoutineResult {
+    match o {
+        RoutineOutcome::Done => share::RoutineResult::Done,
+        RoutineOutcome::Partial => share::RoutineResult::Partial,
+        RoutineOutcome::None => share::RoutineResult::None,
+        RoutineOutcome::Skipped => share::RoutineResult::Skipped,
+    }
+}
+
+/// The reminder counts of one day on one PC, before bounding.
+#[derive(Debug, Default)]
+struct ReminderCounts {
+    offered: u32,
+    done: u32,
+    snoozed: u32,
+    skipped: u32,
+    no_response: u32,
+}
+
+impl ReminderCounts {
+    /// Bounded to the schema: at most [`share::MAX_DAY_COUNT`] offers, and the answers
+    /// never more than the offers.
+    fn bounded(&self, routine: Option<share::RoutineResult>) -> share::Outcomes {
+        let offered = self.offered.min(share::MAX_DAY_COUNT);
+        let mut left = offered;
+        let mut take = |n: u32| {
+            let n = n.min(left);
+            left -= n;
+            n
+        };
+        share::Outcomes {
+            v: share::SCHEMA_VERSION,
+            offered,
+            done: take(self.done),
+            snoozed: take(self.snoozed),
+            skipped: take(self.skipped),
+            no_response: take(self.no_response),
+            routine,
+        }
+    }
 }
 
 impl Store {
@@ -622,8 +695,14 @@ impl Store {
 
     /// The record this PC would send for a category and date, in the category's schema
     /// (the preview, SHR-01, renders exactly this). Only entries recorded on this PC
-    /// count: rows imported from another PC's backup are never sent under this PC's id. `None` when nothing was recorded or
-    /// the category has no daily record on this PC yet.
+    /// count: rows imported from another PC's backup are never sent under this PC's id.
+    /// `None` when nothing was recorded, and always for `posture_summary` (V2).
+    ///
+    /// - `hydration` and `phone_reports`: this PC's current entries of the day.
+    /// - `outcomes`: the reminders this PC offered that day with their answers (see
+    ///   [`Store::reminder_counts`]) and the day's best routine result.
+    /// - `work_session`: the tracker's tallies of the day, in whole minutes; none for a
+    ///   day whose tallies may have come from another PC's backup ([`FOREIGN_TALLIES`]).
     ///
     /// # Errors
     /// [`Error::Sqlite`] on a read failure.
@@ -666,18 +745,97 @@ impl Store {
                     unsure: p.unsure.min(share::MAX_DAY_COUNT),
                 })?
             }
-            // No daily record is built for these on the PC yet (V1-5b ships the schemas
-            // and the server side; the producers follow with their features).
-            Category::Outcomes | Category::WorkSession | Category::PostureSummary => {
-                return Ok(None);
+            Category::Outcomes => {
+                let counts = self.reminder_counts(date)?;
+                let routine = f.routine.map(routine_result);
+                if counts.offered == 0 && routine.is_none() {
+                    return Ok(None);
+                }
+                serde_json::to_value(counts.bounded(routine))?
             }
+            Category::WorkSession => {
+                // Tallies from another PC's backup are never sent as this PC's.
+                let foreign: Option<String> = self
+                    .conn
+                    .query_row(
+                        "SELECT value FROM store_meta WHERE key = ?1",
+                        [FOREIGN_TALLIES],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if foreign.is_some_and(|d| date_text(date) <= d) {
+                    return Ok(None);
+                }
+                let Some(t) = f.tally else {
+                    return Ok(None);
+                };
+                let minutes = |s: u64| u32::try_from(s / 60).unwrap_or(u32::MAX);
+                // Work time includes quiet time counted as work (an estimate,
+                // architecture 4.3), which is also what the longest block is made of.
+                let active =
+                    minutes(t.work_active_s.saturating_add(t.work_quiet_s)).min(share::DAY_MINUTES);
+                let focus = t.focus_sessions.min(share::MAX_DAY_COUNT);
+                let pomodoro = t.pomodoro_rounds.min(share::MAX_DAY_COUNT);
+                if active == 0 && focus == 0 && pomodoro == 0 {
+                    return Ok(None);
+                }
+                serde_json::to_value(share::WorkSession {
+                    v: share::SCHEMA_VERSION,
+                    active_min: active,
+                    longest_block_min: minutes(t.longest_block_s).min(active),
+                    focus_count: focus,
+                    pomodoro_count: pomodoro,
+                })?
+            }
+            // V2: no posture data exists in V1.
+            Category::PostureSummary => return Ok(None),
         };
         Ok(share::validate(category, &value).ok())
+    }
+
+    /// The reminders this PC offered on `date`, every activity, each counted with its
+    /// answer, if any: "done" and "started" as done (a started routine's result is the
+    /// record's `routine`), "skipped" and "not now" as skipped. An answer counts on its
+    /// offer's date, so answers never outnumber offers.
+    fn reminder_counts(&self, date: NaiveDate) -> Result<ReminderCounts> {
+        let mut stmt = self.conn.prepare(
+            "SELECT json_extract(r.payload, '$.outcome') FROM events o
+             LEFT JOIN events r ON r.type = 'reminder.response'
+                 AND r.origin_device = o.origin_device
+                 AND json_extract(r.payload, '$.reminder_id') = json_extract(o.payload, '$.reminder_id')
+             WHERE o.type = 'reminder.offered' AND o.local_date = ?1 AND o.origin_device = ?2",
+        )?;
+        let answers = stmt
+            .query_map(params![date_text(date), self.device_id.to_string()], |r| {
+                r.get::<_, Option<String>>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut c = ReminderCounts::default();
+        for a in answers {
+            c.offered = c.offered.saturating_add(1);
+            let slot = match a.and_then(|t| t.parse::<ReminderOutcome>().ok()) {
+                Some(ReminderOutcome::Done | ReminderOutcome::Started) => &mut c.done,
+                Some(ReminderOutcome::Snoozed) => &mut c.snoozed,
+                Some(ReminderOutcome::Skipped | ReminderOutcome::Dismissed) => &mut c.skipped,
+                Some(ReminderOutcome::NoResponse) => &mut c.no_response,
+                // Not answered yet (or an answer this build does not know).
+                None => continue,
+            };
+            *slot = slot.saturating_add(1);
+        }
+        Ok(c)
     }
 
     /// Queue this PC's changed records for the shareable days (on or after
     /// `share_from`, this PC's confirmation date, and the last
     /// [`SHARE_LOOKBACK_DAYS`] days). Returns how many were queued.
+    ///
+    /// The first pass after a release from recovery hold reaches back
+    /// [`RESEND_WINDOW_DAYS`] (the server's retention window). Beyond the usual lookback
+    /// it rebuilds only the days this PC had shared before (those in its revision record,
+    /// which is kept for the same window): it restores what the server held, and never
+    /// backfills a day that was never shared. Consent, `share_from`, the confirmation
+    /// date and tombstones bound it exactly as they bound an ordinary pass.
     ///
     /// # Errors
     /// [`Error::Sqlite`] on a read or write failure.
@@ -693,10 +851,18 @@ impl Store {
         }
         let mut revisions: std::collections::BTreeMap<String, (u32, String)> =
             self.setting(REVISIONS)?.unwrap_or_default();
-        let first_day = today
+        let resend = self.setting::<bool>(RESEND_PENDING)?.unwrap_or(false);
+        let recent = today
             .checked_sub_days(chrono::Days::new(SHARE_LOOKBACK_DAYS))
-            .unwrap_or(today)
-            .max(confirmed_on);
+            .unwrap_or(today);
+        let first_day = if resend {
+            today
+                .checked_sub_days(chrono::Days::new(RESEND_WINDOW_DAYS))
+                .unwrap_or(today)
+        } else {
+            recent
+        }
+        .max(confirmed_on);
         let mut queued = 0;
         for category in Category::ALL.iter().copied() {
             let policy = self.sharing_policy(category)?;
@@ -707,6 +873,14 @@ impl Store {
             while day <= today {
                 let next = day.succ_opt();
                 let key = format!("{}:{}", category.as_str(), date_text(day));
+                if day < recent && !revisions.contains_key(&key) {
+                    // Older than the usual lookback and never shared: not backfilled.
+                    match next {
+                        Some(n) => day = n,
+                        None => break,
+                    }
+                    continue;
+                }
                 let (rev, last) = revisions.get(&key).cloned().unwrap_or((0, String::new()));
                 // A day with nothing left (its last entry undone) is sent as an empty
                 // record if, and only if, something was shared for it before: the
@@ -738,11 +912,15 @@ impl Store {
         }
         let cutoff = date_text(
             today
-                .checked_sub_days(chrono::Days::new(90))
+                .checked_sub_days(chrono::Days::new(RESEND_WINDOW_DAYS))
                 .unwrap_or(today),
         );
         revisions.retain(|k, _| k.split_once(':').is_some_and(|(_, d)| d >= cutoff.as_str()));
         self.put_setting(REVISIONS, &revisions)?;
+        if resend {
+            self.conn
+                .execute("DELETE FROM settings WHERE key = ?1", [RESEND_PENDING])?;
+        }
         Ok(queued)
     }
 
@@ -786,5 +964,34 @@ impl Store {
     pub fn note_sync(&self) -> Result<()> {
         let now = self.clock.now();
         update_status(&self.conn, now, |s| s.last_sync_ms = Some(to_ms(now)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reminder_counts_are_bounded_so_answers_never_outnumber_offers() {
+        let c = ReminderCounts {
+            offered: 900,
+            done: 450,
+            snoozed: 30,
+            skipped: 300,
+            no_response: 100,
+        };
+        let o = c.bounded(Some(share::RoutineResult::Partial));
+        assert_eq!(o.offered, share::MAX_DAY_COUNT);
+        assert_eq!(
+            (o.done, o.snoozed, o.skipped, o.no_response),
+            (450, 30, 20, 0)
+        );
+        let v = serde_json::to_value(o).unwrap();
+        assert!(share::validate(Category::Outcomes, &v).is_ok());
+        // The empty records validate too (sent only to correct a day shared before).
+        for c in [Category::Outcomes, Category::WorkSession] {
+            assert!(empty_record(c).is_some(), "{c:?}");
+        }
+        assert!(empty_record(Category::PostureSummary).is_none());
     }
 }

@@ -43,7 +43,10 @@ mod tests;
 
 pub use coach::{ActivityDay, CoachCommit, SavedCoachState};
 pub use link::{NewLink, PairedDevice, ServerLink, StateOutcome};
-pub use sync::{NoticeKind, REMOTE_ENABLE_NOTICE, SHARE_LOOKBACK_DAYS, ServerNotice, ServerStatus};
+pub use sync::{
+    NoticeKind, REMOTE_ENABLE_NOTICE, RESEND_WINDOW_DAYS, SHARE_LOOKBACK_DAYS, ServerNotice,
+    ServerStatus,
+};
 
 /// Setting keys with typed accessors.
 pub mod keys {

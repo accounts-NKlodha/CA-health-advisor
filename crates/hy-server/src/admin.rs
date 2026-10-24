@@ -412,8 +412,10 @@ fn attempt_login(server: &Server, pass: &Secret<String>) -> LoginOutcome {
 /// finishes and records its outcome even if this request is cancelled.
 async fn login(State(st): State<AdminState>, Form(form): Form<LoginForm>) -> Response {
     let pass = Secret::new(form.passphrase);
-    let server = st.server.clone();
-    let outcome = tokio::task::spawn_blocking(move || attempt_login(&server, &pass))
+    let s = st.server.clone();
+    let outcome = st
+        .server
+        .run_blocking(move || attempt_login(&s, &pass))
         .await
         .unwrap_or(LoginOutcome::Wait(1));
     match outcome {
@@ -531,8 +533,10 @@ async fn dashboard(State(st): State<AdminState>, headers: HeaderMap) -> Response
         b,
         "<p>Control-log mirror: {mirror}.</p><p>Last backup: {backup}.</p>\
          <p class=\"note\">Backups open only with this server's backup key (<span class=\"mono\">backup.key</span> \
-         in the keys folder, protected for this PC). Keep a protected copy of the keys folder somewhere safe: \
-         if the key is lost, every existing backup is permanently unrecoverable.</p>"
+         in the keys folder, protected for this PC). If the key is lost, every existing backup is permanently unrecoverable. \
+         A copy of the keys folder opens only on this same Windows installation: it is not a way to move or rebuild the server. \
+         On a replacement server, after a Windows reinstall, or if the keys cannot be opened, the only route is a full reset: \
+         new keys, every PC re-pairs with a new slip, and the old backups cannot be opened.</p>"
     );
     if users.iter().any(|u| u.hold) {
         b.push_str("<p class=\"warn\">One or more users are in recovery hold: their shared history is paused.</p>");

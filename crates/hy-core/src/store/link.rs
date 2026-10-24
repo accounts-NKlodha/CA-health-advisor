@@ -265,7 +265,7 @@ impl Store {
             [],
         )?;
         tx.execute(
-            "DELETE FROM settings WHERE key IN ('server_status', 'server_notices', 'share_revisions', 'server_regression_suppress')",
+            "DELETE FROM settings WHERE key IN ('server_status', 'server_notices', 'share_revisions', 'server_regression_suppress', 'share_resend_pending')",
             [],
         )?;
         tx.execute(

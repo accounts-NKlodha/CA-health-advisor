@@ -390,6 +390,9 @@ async fn the_page_shows_the_hold_and_takes_the_witness_only_with_csrf() {
         page.contains("permanently unrecoverable"),
         "the backup-key warning is shown"
     );
+    // A copy of machine-DPAPI keys is no portable recovery route: the full reset is.
+    assert!(page.contains("it is not a way to move or rebuild the server"));
+    assert!(page.contains("every PC re-pairs with a new slip"));
     assert!(page.contains("PC-A") && page.contains("<strong>missing</strong>"));
     let csrf = csrf_in(&page);
     let post = |path: &str, body: &str| {
