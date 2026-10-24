@@ -79,8 +79,15 @@ test('each switch says on from when, waiting, or off; the notice says what is se
   // from another PC.
   for (const enabled of [false, true]) {
     assert.equal(
-      shareLine({ label: 'Reminder outcomes', enabled, share_from: null, waiting: false, available: false }),
-      'Reminder outcomes: not yet sharing (coming in a later update)',
+      shareLine({ label: 'Posture check summary (V2)', enabled, share_from: null, waiting: false, available: false }),
+      'Posture check summary (V2): not yet sharing (coming in a later update)',
+    );
+  }
+  // Outcomes and the work session are produced in V1 and read like any other category.
+  for (const label of ['Reminder and exercise outcomes', 'Work-session summary']) {
+    assert.equal(
+      shareLine({ label, enabled: true, share_from: '2026-10-23', waiting: false, available: true }),
+      `${label}: on (from 2026-10-23)`,
     );
   }
   assert.match(enableNotice('Hydration summary'), /daily totals.*from today on/);

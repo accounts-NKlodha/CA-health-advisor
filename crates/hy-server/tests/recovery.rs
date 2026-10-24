@@ -864,3 +864,132 @@ async fn after_release_rows_sent_after_the_snapshot_are_sent_again() {
     );
     assert_eq!(summaries(&h, &u), 1);
 }
+
+/// Each `(date, payload)` the server holds for `origin` in `category`, oldest first.
+fn rows_for(h: &Harness, origin: uuid::Uuid, category: Category) -> Vec<(String, String)> {
+    let conn = h.server.db();
+    let mut stmt = conn
+        .prepare(
+            "SELECT local_date, payload FROM summaries
+             WHERE origin_device = ?1 AND category = ?2 ORDER BY local_date",
+        )
+        .unwrap();
+    stmt.query_map(
+        rusqlite::params![origin.as_bytes().as_slice(), category.as_str()],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .unwrap()
+    .collect::<Result<_, _>>()
+    .unwrap()
+}
+
+/// The `(date, payload)` rows `pc` should have on the server for `days`: its own current
+/// record of each day that has one.
+fn expected_rows(pc: &Pc, days: &[NaiveDate], category: Category) -> Vec<(String, String)> {
+    days.iter()
+        .filter_map(|d| {
+            pc.with(|s| s.share_record(category, *d).unwrap())
+                .map(|r| (d.format("%Y-%m-%d").to_string(), r.to_string()))
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_aged_snapshot_and_a_prolonged_hold_rebuild_the_whole_retained_history() {
+    // The oldest snapshot that can exist (backups are kept 30 days at most) is restored,
+    // and the hold lasts six of its seven days. After release every row each PC shared
+    // since the snapshot, weeks older than the ordinary lookback, is on the server again,
+    // exactly as each PC holds it, and a deletion made after the snapshot stays in force.
+    let h = Harness::start().await;
+    let u = h.user("u1");
+    let a = h.pc(&u, "PC-A").await;
+    let b = h.pc(&u, "PC-B").await;
+    a.synced().await;
+    b.synced().await;
+    enable(&a, Category::Hydration).await;
+    b.synced().await;
+    let d0 = today(&h);
+    a.water(morning(&h), 400);
+    b.water(morning(&h), 250);
+    a.synced().await;
+    b.synced().await;
+    let file = h.backup();
+    let mut days = vec![d0];
+    // 29 more days of ordinary daily use after the snapshot (B logs every other day).
+    for n in 1..=29 {
+        h.clock.advance(Duration::days(1));
+        days.push(today(&h));
+        a.water(morning(&h), 100 + n);
+        if n % 2 == 0 {
+            b.water(morning(&h), 200 + n);
+        }
+        if n == 12 {
+            // A deletes day 5 for everyone; the mirror keeps the deletion.
+            let d5 = days[5];
+            a.with(|s| {
+                s.record_deletion(Category::Hydration, DateRange { from: d5, to: d5 })
+                    .unwrap();
+            });
+        }
+        a.synced().await;
+        b.synced().await;
+    }
+    let d5 = days[5].format("%Y-%m-%d").to_string();
+    let before_a = rows_for(&h, a.origin(), Category::Hydration);
+    assert_eq!(before_a.len(), 29, "day 0 to day 29 shared, without day 5");
+    assert!(!before_a.iter().any(|(d, _)| *d == d5));
+
+    let h = h.restore(&file).await;
+    assert_eq!(
+        rows_for(&h, a.origin(), Category::Hydration).len(),
+        1,
+        "only day 0 is in the snapshot"
+    );
+    h.server.witness_users(true).unwrap();
+    h.server.witness_user(&u, true).unwrap();
+    // A checks in at once; B stays away for six days. Use goes on during the hold.
+    assert!(matches!(
+        a.synced().await,
+        SyncOutcome::Hold { evidence: true, .. }
+    ));
+    for n in 30..=35 {
+        h.clock.advance(Duration::days(1));
+        days.push(today(&h));
+        a.water(morning(&h), 100 + n);
+        b.water(morning(&h), 200 + n);
+        assert!(matches!(a.synced().await, SyncOutcome::Hold { .. }));
+        assert!(in_hold(&h, &u));
+    }
+    assert!(matches!(
+        b.synced().await,
+        SyncOutcome::Hold { evidence: true, .. }
+    ));
+    assert!(!in_hold(&h, &u), "released on B's evidence");
+    for pc in [&a, &b, &a, &b] {
+        assert!(matches!(pc.synced().await, SyncOutcome::Synced { .. }));
+    }
+
+    for pc in [&a, &b] {
+        let rows = rows_for(&h, pc.origin(), Category::Hydration);
+        // Local entries stay after a deletion; only the shared copy is gone.
+        let shareable: Vec<NaiveDate> = days.iter().copied().filter(|d| *d != days[5]).collect();
+        assert_eq!(
+            rows,
+            expected_rows(pc, &shareable, Category::Hydration),
+            "every day this PC holds, weeks older than the ordinary lookback included"
+        );
+        assert!(!rows.iter().any(|(d, _)| *d == d5), "the deletion holds");
+    }
+    // Day 0 plus days 1 to 35 without day 5 for A; day 0, the even days to 28 and the
+    // six hold days for B. A's day 1 and B's day 2 are 34 and 33 days old at release.
+    let a_rows = rows_for(&h, a.origin(), Category::Hydration);
+    let b_rows = rows_for(&h, b.origin(), Category::Hydration);
+    assert_eq!((a_rows.len(), b_rows.len()), (35, 21));
+    assert_eq!(a_rows[1].0, days[1].format("%Y-%m-%d").to_string());
+    assert_eq!(b_rows[1].0, days[2].format("%Y-%m-%d").to_string());
+    // The next ordinary sync sends nothing more: the re-send ran once.
+    assert!(matches!(
+        a.synced().await,
+        SyncOutcome::Synced { uploaded: 0, .. }
+    ));
+}

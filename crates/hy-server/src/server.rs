@@ -296,6 +296,34 @@ pub struct Server {
     pub(crate) login_gate: tokio::sync::Semaphore,
     /// Passphrase checks running now and the most ever seen at once (for the bound test).
     pub(crate) login_checks: (AtomicUsize, AtomicUsize),
+    /// Blocking operations started by a request and not yet finished (see
+    /// [`Server::run_blocking`]).
+    busy: Arc<Busy>,
+}
+
+/// Counts blocking operations in flight, so a listener's shutdown can wait for them.
+#[derive(Debug, Default)]
+struct Busy {
+    running: AtomicUsize,
+    idle: tokio::sync::Notify,
+}
+
+/// Held by one blocking operation until it ends; the last one out wakes the waiters.
+struct BusyGuard(Arc<Busy>);
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        if self.0.running.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.idle.notify_waiters();
+        }
+    }
+}
+
+/// A blocking job and its guard. Fields drop in order, so the job (and every server
+/// reference it captured) is gone before the guard is released, whether it ran or not.
+struct Job<F> {
+    f: F,
+    guard: BusyGuard,
 }
 
 impl std::fmt::Debug for Server {
@@ -333,7 +361,54 @@ impl Server {
             rng: Box::new(SystemEntropy(SystemRandom::new())),
             login_gate: tokio::sync::Semaphore::new(1),
             login_checks: (AtomicUsize::new(0), AtomicUsize::new(0)),
+            busy: Arc::new(Busy::default()),
         }
+    }
+
+    /// Run `f` on a blocking thread, counted as work in flight until it ends.
+    ///
+    /// Cancelling the request that started it (a connection stopped at shutdown, a
+    /// client that goes away) does not stop `f`: it runs to the end, with whatever server
+    /// reference it captured. [`Server::idle`] waits for every such operation, so a
+    /// listener can return only after the references they hold are dropped.
+    pub(crate) fn run_blocking<T, F>(&self, f: F) -> tokio::task::JoinHandle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        // Counted before it is spawned, so a waiter can never miss it.
+        self.busy.running.fetch_add(1, Ordering::SeqCst);
+        let job = Job {
+            f,
+            guard: BusyGuard(self.busy.clone()),
+        };
+        tokio::task::spawn_blocking(move || {
+            let Job { f, guard } = job;
+            // `f` and its captures are dropped when the call returns, before the guard.
+            let out = f();
+            drop(guard);
+            out
+        })
+    }
+
+    /// Wait until no operation started by [`Server::run_blocking`] is running.
+    pub(crate) async fn idle(&self) {
+        loop {
+            let woken = self.busy.idle.notified();
+            tokio::pin!(woken);
+            // Registered before the count is read, so a release in between is not lost.
+            woken.as_mut().enable();
+            if self.busy.running.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            woken.await;
+        }
+    }
+
+    /// Blocking operations in flight right now (tests only).
+    #[doc(hidden)]
+    pub fn blocking_in_flight(&self) -> usize {
+        self.busy.running.load(Ordering::SeqCst)
     }
 
     /// The most admin passphrase checks that ever ran at once (tests: always at most 1).

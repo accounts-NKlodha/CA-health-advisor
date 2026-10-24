@@ -41,6 +41,8 @@ use crate::server::{AuthedDevice, DeviceState, Server};
 
 /// Days back an upload may be dated, and the server's summary retention (8.6).
 pub const RETENTION_DAYS: u64 = 90;
+// A PC's re-send after a release from hold covers exactly this window.
+const _: () = assert!(RETENTION_DAYS == hy_core::store::RESEND_WINDOW_DAYS);
 /// Largest stored payload, bytes of canonical JSON.
 pub const MAX_PAYLOAD: usize = 1024;
 /// A second regression within this window revokes the device (7.4).
