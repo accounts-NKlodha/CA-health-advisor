@@ -838,6 +838,45 @@ async fn t_d6_a_mirror_older_than_the_database_high_water_is_a_global_discard() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_installer_refuses_a_stale_copy_of_the_right_mirror_that_startup_would_discard() {
+    // V1-6b review: a copy of the mirror taken while the server ran, then another
+    // acknowledgement, then setup pointed at the copy. The installer's check runs on the
+    // stopped server and refuses it; the current mirror is accepted.
+    let h = Harness::start().await;
+    let u = h.user("u1");
+    let a = h.pc(&u, "PC-A").await;
+    a.synced().await;
+    let stale_bytes = std::fs::read(&h.mirror).unwrap();
+    enable(&a, Category::Hydration).await;
+    a.synced().await;
+    let key = h.server.keys.key_id;
+    let stale = h
+        .dir
+        .parent()
+        .unwrap()
+        .join("stale-copy")
+        .join("control-log.mirror");
+    let checked = std::sync::Mutex::new(None);
+    let h = h
+        .restart_after(|dir, mirror| {
+            std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+            std::fs::write(&stale, &stale_bytes).unwrap();
+            let db = dir.join("server.db");
+            *checked.lock().unwrap() = Some((
+                hy_server::mirror::check_binding(&db, &key, &stale),
+                hy_server::mirror::check_binding(&db, &key, mirror),
+            ));
+        })
+        .await;
+    let (stale_check, current_check) = checked.into_inner().unwrap().unwrap();
+    let err = stale_check.unwrap_err();
+    assert!(err.contains("older copy"), "{err}");
+    assert_eq!(current_check, Ok(hy_server::mirror::Binding::Matches));
+    // The server went on with its own mirror, untouched.
+    assert_eq!(h.startup, Startup::Opened);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn after_release_rows_sent_after_the_snapshot_are_sent_again() {
     let h = Harness::start().await;
     let u = h.user("u1");

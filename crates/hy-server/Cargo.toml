@@ -35,8 +35,13 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# Already in the lockfile through the companion. Used only by src/dpapi.rs.
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+# Already in the lockfile through the companion. Used only by src/dpapi.rs and
+# src/acl.rs (reading the data folder's rights back, V1-6b).
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography"] }
+# Running as a Windows service under its virtual account (V1-5 contract 6.2, slice
+# V1-6b). Uses the same windows-sys 0.61; adds only widestring. Used only by
+# src/winservice.rs (the binary).
+windows-service = "0.8.1"
 
 [dev-dependencies]
 hy-core = { workspace = true, features = ["link"] }
@@ -49,7 +54,7 @@ tempfile.workspace = true
 # The workspace forbids unsafe code. The server's key files are protected with
 # machine-scope DPAPI (V1-5 contract 6.2), which needs two Win32 calls. They live in
 # src/dpapi.rs only, each with a SAFETY note, so here unsafe code is denied (not
-# forbidden) and that one module allows it.
+# forbidden) and that one module allows it; so does the Windows part of src/acl.rs.
 [lints.rust]
 unsafe_code = "deny"
 missing_debug_implementations = "warn"
