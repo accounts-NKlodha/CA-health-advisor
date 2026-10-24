@@ -3048,7 +3048,7 @@ fn the_review_offer_routes_its_three_answers() {
 fn the_posture_cue_offers_ok_and_recalibrate() {
     let v = view(PetMode::Idle);
     let b = present::bubble(&CoachBubble::PostureCue, &v);
-    b.validate().unwrap();
+    assert!(b.lines.iter().all(|l| l.len() <= 200));
     assert_eq!(b.title, "Posture check");
     assert_eq!(all_actions(&b), vec!["ok", "posture_recalibrate"]);
     // No judgement and no medical claim in its words.

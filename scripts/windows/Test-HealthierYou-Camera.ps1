@@ -20,16 +20,20 @@
               seconds, a second webcam unplugged and plugged.
     Soak      (V2-5; 2 hours by default) leave the posture check on during normal work;
               the script only measures, then asks four questions at the end.
+    Calibration (V2-2; about 15 minutes) calibrate, calm desk work with no cue, a
+              sustained slump that gives one cue, a moved camera that pauses cues and asks
+              to recalibrate, and an app restart at the same desk.
 
   Budget (architecture 4.5): the camera adds at most 10% of the PC's CPU and 350 MB.
 
 .EXAMPLE
   .\Test-HealthierYou-Camera.ps1 -Phase Session -Report .\hy-camera-session.txt
   .\Test-HealthierYou-Camera.ps1 -Phase Soak -Minutes 120 -Report .\hy-camera-soak.txt
+  .\Test-HealthierYou-Camera.ps1 -Phase Calibration -Report .\hy-camera-calibration.txt
 #>
 [CmdletBinding()]
 param(
-  [ValidateSet('Session', 'Soak')][string]$Phase = 'Session',
+  [ValidateSet('Session', 'Soak', 'Calibration')][string]$Phase = 'Session',
   [int]$Minutes = 120,
   [int]$SampleSeconds = 5,
   [Parameter(Mandatory = $true)][string]$Report
@@ -161,6 +165,20 @@ if ($Phase -eq 'Session') {
   Start-Sleep -Seconds 10
   $after = Measure-For 'camera-off-after' 30
   Result 'memory-returned' $(if ($after.ws_mb -le $off.ws_mb + 60) { 'PASS' } else { 'FAIL' }) "working set $($after.ws_mb) MB after off (was $($off.ws_mb) MB)"
+} elseif ($Phase -eq 'Calibration') {
+  Do-Step 'Turn the posture check ON. Open the camera page (pet menu > Posture check). Sit as you normally do and choose Calibrate; keep still until it finishes.'
+  Ask 'calibration-usable' 'Did it say "Calibrated" within about 30 seconds?'
+  Do-Step 'Optional: lean far back or move partly out of view, then choose Recalibrate.'
+  Ask 'calibration-reason' 'If it refused, did it say "Calibration not usable" with a reason that matched what you did? (s if skipped)'
+  Do-Step 'If it refused above, calibrate again sitting normally. Then work calmly at the desk for 5 minutes (reading, typing, glancing at a second screen).'
+  Ask 'no-false-cue' 'In those 5 minutes, did the pet give NO posture cue?'
+  Do-Step 'Now slump or lean towards the screen clearly and stay like that for 90 seconds.'
+  Ask 'cue-after-a-minute' 'Did one "Posture check" card appear after about one to one and a half minutes, and only one?'
+  Ask 'cue-wording' 'Was the card neutral (no judgement, no health claim), with OK and Recalibrate?'
+  Do-Step 'Sit normally again. Then push the laptop back (or tilt the external camera) and leave it there for 3 minutes, sitting normally.'
+  Ask 'moved-camera' 'Did the camera page say cues are paused within about 20 seconds, and after about 2 minutes did a notice ask you once to recalibrate, with no posture cue meanwhile?'
+  Do-Step 'Put the camera back, choose Calibrate on the camera page, then quit HealthierYou from the tray and start it again at the same desk. Wait 1 minute.'
+  Ask 'restart-accepted' 'Does the camera page show "Calibrated" again (not "Recalibrate")?'
 } else {
   Do-Step 'Turn the posture check ON (pet menu > Posture check). Then work normally; keep this window open.'
   $res = Measure-For 'soak' ($Minutes * 60)

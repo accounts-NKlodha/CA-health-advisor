@@ -231,10 +231,30 @@ pub struct CameraPage {
     pub fps: u8,
     /// Measurements (frames, stalls, stop time, model load, inference time).
     pub stats: CameraStats,
+    /// Calibration and the baseline (slice V2-2).
+    pub posture: PostureView,
     /// The self-test drives this page (it may ask for test-only actions).
     pub selftest: bool,
     /// Display preferences.
     pub a11y: Accessibility,
+}
+
+/// The posture check's calibration and baseline, as the camera page and Settings show
+/// them (slice V2-2).
+#[derive(Debug, Clone, Serialize)]
+pub struct PostureView {
+    /// The state.
+    pub state: hy_core::posture::PostureState,
+    /// The state in words.
+    pub words: &'static str,
+    /// Why the last calibration was not usable, in words.
+    pub issue: Option<&'static str>,
+    /// When the calibration in use was taken.
+    pub calibrated_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Calibration may start now (the camera is capturing).
+    pub can_calibrate: bool,
+    /// Counts (episodes, cues shown and suppressed, suspects).
+    pub stats: hy_core::posture::PostureStats,
 }
 
 /// The open bubble or menu.

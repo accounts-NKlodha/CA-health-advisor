@@ -1,10 +1,11 @@
 // The valid-frame rule (architecture 4.5), applied in the pose worker to each frame's
 // landmarks, which never leave the worker. Only the derived result is reported: valid or
-// not, why not, and the mean visibility of the landmarks the rule needs.
+// not, why not, the mean visibility of the landmarks the rule needs, and (slice V2-2) a
+// valid frame's few posture numbers (`postureFeatures`), from which no image can be made.
 //
 // MediaPipe Pose landmark indices: 0 nose, 2 and 5 the eyes, 7 and 8 the ears, 11 and 12
 // the shoulders. Coordinates are normalised to the frame (0 to 1).
-import type { FrameIssue, FrameReport } from '../shared/types';
+import type { Features, FrameIssue, FrameReport } from '../shared/types';
 
 /** A landmark as the pose model gives it (the fields the rule reads). */
 export interface Point {
@@ -44,7 +45,11 @@ const inside = (p: Point | undefined): boolean =>
  * Judge one frame: `people` is the model's landmark list per person found (the first is
  * used; the worker asks for one). `inferenceMs` is the model's time for the frame.
  */
-export function judgeFrame(people: readonly (readonly Point[])[], inferenceMs: number): FrameReport {
+export function judgeFrame(
+  people: readonly (readonly Point[])[],
+  inferenceMs: number,
+  aspect = 4 / 3,
+): FrameReport {
   const ms = Number.isFinite(inferenceMs) ? Math.min(60_000, Math.max(0, inferenceMs)) : 0;
   const lm = people[0];
   if (!lm || lm.length <= RIGHT_SHOULDER) {
@@ -67,12 +72,64 @@ export function judgeFrame(people: readonly (readonly Point[])[], inferenceMs: n
   } else if (!inside(ls) || !inside(rs)) {
     issue = 'out_of_frame';
   }
-  return {
+  const report: FrameReport = {
     valid: issue === null,
     issue,
     inference_ms: ms,
     visibility: Math.round(visibility * 1000) / 1000,
   };
+  if (issue === null) {
+    const f = postureFeatures(lm, ears, aspect);
+    if (f) report.features = f;
+  }
+  return report;
+}
+
+// (+ 0 turns -0 into 0.)
+const round4 = (v: number): number => Math.round(v * 10_000) / 10_000 + 0;
+
+/**
+ * A valid frame's posture numbers (architecture 4.5 "Features"): the ear-to-shoulder gap
+ * over the shoulder width, the shoulder width as a share of the frame width, the shoulder
+ * tilt, the head roll (degrees), the shoulders' midpoint, the head pair's width over the
+ * shoulder width and the head's turn. The ears are used when both are seen, else the
+ * eyes. `aspect` is the frame's width over its height, so heights are measured in the
+ * same unit as widths. Hips and legs are ignored.
+ */
+export function postureFeatures(lm: readonly Point[], ears: boolean, aspect: number): Features | null {
+  const k = 1 / (Number.isFinite(aspect) && aspect > 0 ? aspect : 4 / 3);
+  const ls = lm[LEFT_SHOULDER];
+  const rs = lm[RIGHT_SHOULDER];
+  const hl = lm[ears ? LEFT_EAR : LEFT_EYE];
+  const hr = lm[ears ? RIGHT_EAR : RIGHT_EYE];
+  const nose = lm[NOSE];
+  if (!ls || !rs || !hl || !hr || !nose) return null;
+  // Heights in frame-width units.
+  const Y = (p: Point) => p.y * k;
+  const width = Math.hypot(rs.x - ls.x, Y(rs) - Y(ls));
+  const pair = Math.hypot(hl.x - hr.x, Y(hl) - Y(hr));
+  if (!(width > 0.001) || !(pair > 0.0005)) return null;
+  const midY = (Y(ls) + Y(rs)) / 2;
+  const headX = (hl.x + hr.x) / 2;
+  const headY = (Y(hl) + Y(hr)) / 2;
+  // The pair's angle to the horizontal, folded so a mirrored image gives the same value.
+  let roll = (Math.atan2(Y(hl) - Y(hr), hl.x - hr.x) * 180) / Math.PI;
+  if (roll > 90) roll -= 180;
+  if (roll < -90) roll += 180;
+  let tilt = (Y(ls) - Y(rs)) / width;
+  if (ls.x < rs.x) tilt = -tilt;
+  const f: Features = {
+    head: ears ? 'ears' : 'eyes',
+    gap: round4((midY - headY) / width),
+    width: round4(width),
+    tilt: round4(tilt),
+    roll: round4(roll),
+    mid_x: round4((ls.x + rs.x) / 2),
+    mid_y: round4((ls.y + rs.y) / 2),
+    span: round4(pair / width),
+    turn: round4(((nose.x - headX) / pair) * Math.sign(hl.x - hr.x || 1)),
+  };
+  return Object.values(f).every((v) => typeof v === 'string' || Number.isFinite(v)) ? f : null;
 }
 
 /** Whether `next` is due at `fps`, given the last processed frame's time (ms). */

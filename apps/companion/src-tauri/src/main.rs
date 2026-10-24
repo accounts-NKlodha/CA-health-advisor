@@ -256,6 +256,7 @@ fn main() {
             commands::camera_off,
             commands::camera_on,
             commands::camera_page,
+            commands::camera_calibrate,
             commands::camera_consent,
             commands::camera_try_again,
             commands::camera_withdraw,

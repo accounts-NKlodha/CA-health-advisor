@@ -2,8 +2,8 @@
 // are synthetic numbers, never taken from an image of anyone.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MIN_VISIBILITY, frameDue, judgeFrame, nextTimestamp } from '../src/camera/frame.ts';
-import { CONSENT_LINES, offersRetry, statsLine, statusDetail } from '../src/camera/text.ts';
+import { MIN_VISIBILITY, frameDue, judgeFrame, nextTimestamp, postureFeatures } from '../src/camera/frame.ts';
+import { CALIBRATION_HELP, CONSENT_LINES, offersRetry, postureDetail, statsLine, statusDetail } from '../src/camera/text.ts';
 
 /** 33 synthetic landmarks: a centred, upright figure, every point seen. */
 function figure(over = {}) {
@@ -92,4 +92,66 @@ test('each status explains itself, and only an unavailable camera offers Try aga
   assert.equal(offersRetry({ kind: 'reading' }), false);
   const stats = { frames: 30, valid_frames: 0, stalls: 0, worker_restarts: 0, last_stop_ms: null, last_stop_forced: false, model_ms: 900, inference_ms: 41.6, fps: 3 };
   assert.equal(statsLine({ stats, fps: 3 }), '30 frames read, 0 usable, 42 ms a frame, 3 a second');
+});
+
+// ------------------------------------------------------------------ posture features (V2-2)
+
+test('a valid frame carries its posture numbers; an invalid one carries none', () => {
+  const r = judgeFrame([figure()], 30, 4 / 3);
+  assert.ok(r.features);
+  const f = r.features;
+  assert.equal(f.head, 'ears');
+  // Shoulders 0.30 of the frame width apart, level, centred at (0.5, 0.6).
+  assert.equal(f.width, 0.3);
+  assert.equal(f.tilt, 0);
+  assert.equal(f.mid_x, 0.5);
+  assert.equal(f.mid_y, 0.6);
+  // Ears 0.12 apart: 0.4 of the shoulder width; level, so no roll; the nose centred.
+  assert.equal(f.span, 0.4);
+  assert.equal(f.roll, 0);
+  assert.equal(f.turn, 0);
+  // The gap is measured in frame-width units: (0.6 - 0.29) * 0.75 / 0.3.
+  assert.ok(Math.abs(f.gap - 0.775) < 1e-3, String(f.gap));
+  assert.equal(judgeFrame([figure({ 0: { visibility: 0.1 } })], 30).features, undefined);
+  assert.equal(judgeFrame([], 30).features, undefined);
+  // Only numbers: nothing like a landmark list rides along.
+  assert.deepEqual(Object.keys(f).sort(), ['gap', 'head', 'mid_x', 'mid_y', 'roll', 'span', 'tilt', 'turn', 'width']);
+});
+
+test('slumping lowers the gap, leaning in widens the shoulders, tilting shows', () => {
+  const base = judgeFrame([figure()], 30).features;
+  const slumped = judgeFrame([figure({ 0: { y: 0.4 }, 2: { y: 0.37 }, 5: { y: 0.37 }, 7: { y: 0.39 }, 8: { y: 0.39 } })], 30).features;
+  assert.ok(slumped.gap < base.gap - 0.2);
+  const lean = judgeFrame([figure({ 11: { x: 0.3 }, 12: { x: 0.7 } })], 30).features;
+  assert.ok(lean.width > base.width);
+  const tilted = judgeFrame([figure({ 11: { y: 0.64 } })], 30).features;
+  assert.ok(Math.abs(tilted.tilt) > 0.05);
+  const rolled = judgeFrame([figure({ 7: { y: 0.33 } })], 30).features;
+  assert.ok(Math.abs(rolled.roll) > 10);
+  const turned = judgeFrame([figure({ 0: { x: 0.54 } })], 30).features;
+  assert.ok(Math.abs(turned.turn) > 0.3);
+  // A mirrored image gives the same numbers (apart from the sign of the turn).
+  const mirror = figure().map((p) => ({ ...p, x: 1 - p.x }));
+  const m = judgeFrame([mirror], 30).features;
+  assert.equal(m.roll, base.roll);
+  assert.equal(m.gap, base.gap);
+});
+
+test('the eyes stand in for unseen ears', () => {
+  const r = judgeFrame([figure({ 7: { visibility: 0.1 }, 8: { visibility: 0.1 } })], 30);
+  assert.equal(r.valid, true);
+  assert.equal(r.features.head, 'eyes');
+  assert.equal(r.features.span, 0.2);
+  assert.equal(postureFeatures(figure({ 11: { x: 0.5 }, 12: { x: 0.5 } }), true, 4 / 3), null);
+});
+
+test('the calibration words name the reason and never judge posture', () => {
+  const view = (state, issue = null) => ({ state, words: '', issue, calibrated_at: null, can_calibrate: true, stats: {} });
+  assert.match(postureDetail(view({ kind: 'not_calibrated' })), /no posture cues/i);
+  assert.match(postureDetail(view({ kind: 'calibrating', detail: { valid: 12, needed: 40 } })), /12 of 40/);
+  assert.match(postureDetail(view({ kind: 'not_usable', detail: 'too_far' }, 'you are too far')), /not usable: you are too far/);
+  assert.match(postureDetail(view({ kind: 'suspect', detail: 'camera_moved' })), /paused/);
+  assert.match(postureDetail(view({ kind: 'recalibrate' })), /Calibrate again/);
+  const all = [CALIBRATION_HELP, postureDetail(view({ kind: 'ready' }))].join(' ').toLowerCase();
+  for (const w of ['bad', 'poor posture', 'wrong', 'slouch', 'health']) assert.ok(!all.includes(w), w);
 });
