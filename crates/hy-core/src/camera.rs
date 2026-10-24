@@ -601,7 +601,9 @@ impl Machine {
     pub fn calibrate(&mut self, now: Duration) -> Result<Vec<Action>> {
         self.now = self.now.max(now);
         if !matches!(self.phase, Phase::Capturing { .. }) || self.stopping.is_some() {
-            return Err(Error::invalid("calibration needs the camera on and reading"));
+            return Err(Error::invalid(
+                "calibration needs the camera on and reading",
+            ));
         }
         let before = self.fps();
         let fx = self.detector.start_calibration(now);

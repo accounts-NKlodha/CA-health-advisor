@@ -160,6 +160,10 @@ pub mod action {
     /// "Skip this week".
     pub const REVIEW_SKIP: &str = "review_skip";
 
+    // The posture cue (slice V2-2).
+    /// "Recalibrate": closes the cue; the companion opens the camera page to calibrate.
+    pub const POSTURE_RECALIBRATE: &str = "posture_recalibrate";
+
     // Pet menu, keyboard panel and tray (B1, B5, B6, T1).
     /// "Show waiting reminder" or "Show Pomodoro card".
     pub const OPEN_PENDING: &str = "open_pending";
@@ -263,6 +267,8 @@ pub enum BubbleKind {
     PhoneNote,
     /// The weekly review offer.
     ReviewOffer,
+    /// The posture cue.
+    PostureCue,
 }
 
 impl BubbleKind {
@@ -288,11 +294,12 @@ impl BubbleKind {
             CoachBubble::WaterPanel { .. } => Self::WaterPanel,
             CoachBubble::PhoneNote { .. } => Self::PhoneNote,
             CoachBubble::ReviewOffer { .. } => Self::ReviewOffer,
+            CoachBubble::PostureCue => Self::PostureCue,
         }
     }
 
     /// The fixed keys (every kind but a reminder, whose key carries its offer).
-    const FIXED: [(Self, &'static str); 17] = [
+    const FIXED: [(Self, &'static str); 18] = [
         (Self::PomodoroBreak, "pomodoro-break"),
         (Self::PomodoroRoundDone, "pomodoro-round"),
         (Self::PomodoroPaused, "pomodoro-paused"),
@@ -310,6 +317,7 @@ impl BubbleKind {
         (Self::WaterPanel, "water-panel"),
         (Self::PhoneNote, "phone-note"),
         (Self::ReviewOffer, "review-offer"),
+        (Self::PostureCue, "posture-cue"),
     ];
 
     fn key(self) -> String {
@@ -1176,8 +1184,22 @@ pub fn bubble(b: &CoachBubble, view: &CoachView) -> Bubble {
                 actions,
             )
         }
+        CoachBubble::PostureCue => card(
+            POSTURE_CUE_TITLE,
+            vec![POSTURE_CUE_LINE.to_owned()],
+            vec![
+                act(action::OK, "OK", Primary),
+                act(action::POSTURE_RECALIBRATE, "Recalibrate", Link),
+            ],
+        ),
     }
 }
+
+/// The posture cue's title (slice V2-2).
+pub const POSTURE_CUE_TITLE: &str = "Posture check";
+/// The posture cue's line: a change from the user's own calibration, never a judgement
+/// of their posture and not medical advice.
+pub const POSTURE_CUE_LINE: &str = "For about a minute you have been sitting differently from your calibration. Settle back into a position that is comfortable for you, if you like.";
 
 /// Whether a click on the pet should reopen something the engine holds (a waiting
 /// reminder, the movement guide waiting behind the pet, or a Pomodoro card the user has

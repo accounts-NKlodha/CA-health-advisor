@@ -756,7 +756,12 @@ impl Detector {
         }
     }
 
-    fn finish_calibration(&mut self, now: Duration, out: &mut Vec<PostureAction>, at: DateTime<Utc>) {
+    fn finish_calibration(
+        &mut self,
+        now: Duration,
+        out: &mut Vec<PostureAction>,
+        at: DateTime<Utc>,
+    ) {
         let Some(c) = self.calibrating.take() else {
             return;
         };
@@ -766,7 +771,12 @@ impl Detector {
             ..
         } = self.baseline
         {
-            Self::record_interval(out, PostureKind::BaselineSuspect, now.saturating_sub(start), reason);
+            Self::record_interval(
+                out,
+                PostureKind::BaselineSuspect,
+                now.saturating_sub(start),
+                reason,
+            );
         }
         match assess(&c.frames, at) {
             Ok(cal) => {
@@ -919,7 +929,9 @@ impl Detector {
             .history
             .iter()
             .filter(|s| s.t >= from)
-            .fold((0_u32, 0_u32), |(n, v), s| (n + 1, v + u32::from(s.features.is_some())));
+            .fold((0_u32, 0_u32), |(n, v), s| {
+                (n + 1, v + u32::from(s.features.is_some()))
+            });
         if n == 0 {
             0.0
         } else {
@@ -1049,7 +1061,12 @@ impl Detector {
             ..
         } = self.baseline
         {
-            Self::record_interval(out, PostureKind::BaselineSuspect, now.saturating_sub(start), was);
+            Self::record_interval(
+                out,
+                PostureKind::BaselineSuspect,
+                now.saturating_sub(start),
+                was,
+            );
         }
         self.baseline = Baseline::Suspect {
             reason,
@@ -1084,7 +1101,9 @@ impl Detector {
             return;
         };
         let total = total + reading;
-        let matches = features.filter(|f| f.head == cal.head).map(|f| cal.geometry_matches(&f));
+        let matches = features
+            .filter(|f| f.head == cal.head)
+            .map(|f| cal.geometry_matches(&f));
         let (check, verdict) = match check {
             Check::Restart { matched, seen } => {
                 let (matched, seen) = match matches {
@@ -1124,7 +1143,12 @@ impl Detector {
             }
             Some(accepted) => {
                 if let Some(start) = since {
-                    Self::record_interval(out, PostureKind::BaselineSuspect, now.saturating_sub(start), reason);
+                    Self::record_interval(
+                        out,
+                        PostureKind::BaselineSuspect,
+                        now.saturating_sub(start),
+                        reason,
+                    );
                 }
                 if accepted {
                     self.baseline = Baseline::Valid;
@@ -1182,9 +1206,28 @@ impl Detector {
     }
 }
 
+/// What became of a cue, from the coaching engine's answer to
+/// [`crate::coach::Input::PostureCue`].
+#[must_use]
+pub fn cue_outcome_of(outcome: &crate::coach::InputOutcome) -> CueOutcome {
+    use crate::coach::InputOutcome;
+    use crate::coach::engine::{CUE_BUSY, CUE_COOLDOWN, CUE_FOCUS, CUE_HELD};
+    match outcome {
+        InputOutcome::Applied => CueOutcome::Shown,
+        InputOutcome::Ignored(why) if *why == CUE_FOCUS => CueOutcome::Focus,
+        InputOutcome::Ignored(why) if *why == CUE_HELD => CueOutcome::Held,
+        InputOutcome::Ignored(why) if *why == CUE_COOLDOWN => CueOutcome::Cooldown,
+        InputOutcome::Ignored(why) if *why == CUE_BUSY => CueOutcome::Busy,
+        _ => CueOutcome::NoAnswer,
+    }
+}
+
 /// Judge a calibration's frames (architecture 4.5 "Calibration quality", all required):
 /// the calibration, or the first check that fails.
-fn assess(frames: &[Sample], at: DateTime<Utc>) -> std::result::Result<Calibration, CalibrationIssue> {
+fn assess(
+    frames: &[Sample],
+    at: DateTime<Utc>,
+) -> std::result::Result<Calibration, CalibrationIssue> {
     let ears = frames
         .iter()
         .filter(|s| s.features.is_some_and(|f| f.head == HeadRef::Ears))
@@ -1200,7 +1243,11 @@ fn assess(frames: &[Sample], at: DateTime<Utc>) -> std::result::Result<Calibrati
     };
     let used: Vec<(f64, Features)> = frames
         .iter()
-        .filter_map(|s| s.features.filter(|f| f.head == head).map(|f| (s.visibility, f)))
+        .filter_map(|s| {
+            s.features
+                .filter(|f| f.head == head)
+                .map(|f| (s.visibility, f))
+        })
         .collect();
     #[allow(clippy::cast_precision_loss)]
     let share = if frames.is_empty() {

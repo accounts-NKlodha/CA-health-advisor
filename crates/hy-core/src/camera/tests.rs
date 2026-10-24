@@ -29,6 +29,7 @@ fn person() -> FrameReport {
         issue: None,
         inference_ms: 37.0,
         visibility: 0.9,
+        features: None,
     }
 }
 
@@ -38,6 +39,7 @@ fn nobody() -> FrameReport {
         issue: Some(FrameIssue::Absent),
         inference_ms: 30.0,
         visibility: 0.0,
+        features: None,
     }
 }
 
@@ -86,6 +88,7 @@ fn a_consent_for_an_older_notice_asks_again() {
             given_at: at(),
         }),
         on: true,
+        calibration: None,
     };
     let mut m = Machine::new(old);
     assert_eq!(m.resume(s(0)), vec![Action::Persist]);
@@ -102,6 +105,7 @@ fn the_choice_to_stay_on_starts_the_camera_after_a_restart_unless_held() {
             given_at: at(),
         }),
         on: true,
+        calibration: None,
     };
     let mut m = Machine::new(on);
     assert!(m.resume(s(0)).contains(&Action::OpenPage));
@@ -137,6 +141,7 @@ fn usable_frames_read_and_unusable_ones_give_no_reading_with_the_reason() {
         issue: Some(FrameIssue::LowConfidence),
         inference_ms: 40.0,
         visibility: 0.3,
+        features: None,
     };
     feed(&mut m, s(9), s(14), ms(333), low);
     assert_eq!(
@@ -583,6 +588,7 @@ fn settings_store_numbers_and_choices_only() {
             given_at: at(),
         }),
         on: true,
+        calibration: None,
     };
     let v = serde_json::to_value(s).unwrap();
     assert_eq!(v["on"], true);
@@ -702,4 +708,166 @@ fn off_then_on_before_the_stop_is_confirmed_waits_for_the_old_capture() {
     assert_eq!(m.page_stopped(ms(3_300)), vec![Action::ClosePage]);
     assert!(m.page_gone(ms(3_400)).is_empty());
     assert_eq!(m.status(), Status::Off);
+}
+
+// ------------------------------------------------------------------ posture (V2-2)
+
+fn sitting(gap: f64) -> FrameReport {
+    FrameReport {
+        features: Some(crate::posture::Features {
+            head: crate::posture::HeadRef::Ears,
+            gap,
+            width: 0.35,
+            tilt: 0.0,
+            roll: 0.0,
+            mid_x: 0.5,
+            mid_y: 0.75,
+            span: 0.45,
+            turn: 0.0,
+        }),
+        ..person()
+    }
+}
+
+#[test]
+fn calibration_needs_capture_runs_at_the_full_rate_and_is_stored() {
+    let mut m = Machine::new(CameraSettings::default());
+    assert!(m.calibrate(s(0)).is_err());
+    assert_eq!(m.posture_state(), PostureState::NotCalibrated);
+    // Slow inference has put the page on the low rate.
+    let mut m = capturing(s(0));
+    let mut t = s(0);
+    for _ in 0..12 {
+        m.frame(
+            t,
+            FrameReport {
+                inference_ms: 200.0,
+                ..person()
+            },
+        )
+        .unwrap();
+        t += s(1);
+    }
+    assert_eq!(m.fps(), FPS_LOW);
+    let fx = m.calibrate(t).unwrap();
+    assert!(fx.contains(&Action::SetFps(FPS_HIGH)), "{fx:?}");
+    assert!(matches!(
+        m.posture_state(),
+        PostureState::Calibrating { .. }
+    ));
+    // The governor does not drop the rate during calibration.
+    let mut fx = Vec::new();
+    while matches!(m.posture_state(), PostureState::Calibrating { .. }) {
+        fx.extend(
+            m.frame(
+                t,
+                FrameReport {
+                    inference_ms: 200.0,
+                    ..sitting(0.55)
+                },
+            )
+            .unwrap(),
+        );
+        t += ms(333);
+    }
+    assert_eq!(m.posture_state(), PostureState::Ready);
+    assert!(fx.contains(&Action::Persist));
+    assert_eq!(fx.last(), Some(&Action::SetFps(FPS_LOW)), "{fx:?}");
+    assert!(m.settings().calibration.is_some());
+    // Stored with the settings, and read back (older settings without it still load).
+    let json = serde_json::to_value(m.settings()).unwrap();
+    assert!(json["calibration"]["gap"]["median"].is_number());
+    let back: CameraSettings = serde_json::from_value(json).unwrap();
+    assert_eq!(back, m.settings());
+    let old: CameraSettings = serde_json::from_str(r#"{"consent":null,"on":false}"#).unwrap();
+    assert!(old.calibration.is_none());
+}
+
+#[test]
+fn drift_asks_for_the_cue_and_a_hold_records_the_episode() {
+    let mut m = capturing(s(0));
+    m.calibrate(s(0)).unwrap();
+    feed(&mut m, s(0), s(20), ms(333), sitting(0.55));
+    assert_eq!(m.posture_state(), PostureState::Ready);
+    let mut fx = Vec::new();
+    let mut t = s(20);
+    while t < s(110) {
+        fx.extend(m.frame(t, sitting(0.40)).unwrap());
+        fx.extend(m.tick(t));
+        t += ms(333);
+    }
+    assert_eq!(fx.iter().filter(|a| **a == Action::Cue).count(), 1);
+    m.cue_outcome(CueOutcome::Focus);
+    let fx = m.set_hold(t, Some(CameraHold::Meeting));
+    let rec: Vec<_> = fx
+        .iter()
+        .filter_map(|a| match a {
+            Action::Record(o) => Some(*o),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rec.len(), 1, "{fx:?}");
+    assert_eq!(rec[0].kind, crate::posture::PostureKind::DriftEpisode);
+    assert_eq!(rec[0].cue, Some(CueOutcome::Focus));
+    rec[0].payload().validate().unwrap();
+    // The camera restarts after the hold: cues wait until the view matches again.
+    m.page_stopped(t);
+    m.page_gone(t);
+    m.set_hold(t + s(60), None);
+    m.page_started(t + s(61), started());
+    assert_eq!(
+        m.posture_state(),
+        PostureState::Suspect(PostureReason::CameraRestart)
+    );
+    assert_eq!(m.posture_stats().episodes, 1);
+}
+
+#[test]
+fn a_frame_report_carries_features_only_when_valid() {
+    let mut bad = sitting(0.55);
+    bad.valid = false;
+    bad.issue = Some(FrameIssue::LowConfidence);
+    assert!(bad.validate().is_err());
+    let mut nan = sitting(0.55);
+    if let Some(f) = nan.features.as_mut() {
+        f.gap = f64::NAN;
+    }
+    assert!(nan.validate().is_err());
+    sitting(0.55).validate().unwrap();
+    // Older pages without features still parse.
+    let r: FrameReport = serde_json::from_str(
+        r#"{"valid":false,"issue":"absent","inference_ms":30,"visibility":0}"#,
+    )
+    .unwrap();
+    assert!(r.features.is_none());
+}
+
+#[test]
+fn no_reading_intervals_reach_the_records() {
+    let mut m = capturing(s(0));
+    feed(&mut m, s(0), s(5), ms(333), person());
+    let mut fx = Vec::new();
+    let mut t = s(5);
+    while t < s(30) {
+        fx.extend(m.frame(t, nobody()).unwrap());
+        t += ms(333);
+    }
+    while t < s(35) {
+        fx.extend(m.frame(t, person()).unwrap());
+        t += ms(333);
+    }
+    let rec: Vec<_> = fx
+        .iter()
+        .filter_map(|a| match a {
+            Action::Record(o) => Some((o.kind, o.reason)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rec,
+        vec![(
+            crate::posture::PostureKind::NoReading,
+            Some(PostureReason::Absent)
+        )]
+    );
 }

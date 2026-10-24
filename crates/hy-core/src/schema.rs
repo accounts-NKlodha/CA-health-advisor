@@ -1042,12 +1042,6 @@ mod tests {
                 reason: None,
                 cue: Some(CueOutcome::Shown),
             },
-            EventPayload::PostureObservation {
-                kind: PostureKind::BaselineSuspect,
-                duration_s: 30,
-                reason: Some(PostureReason::CameraMoved),
-                cue: None,
-            },
             EventPayload::SharingPolicyChanged {
                 category: Category::Hydration,
                 enabled: false,
@@ -1242,26 +1236,50 @@ mod tests {
             cue,
         };
         use PostureKind::{BaselineSuspect, DriftEpisode, NoReading};
-        assert!(p(DriftEpisode, None, Some(CueOutcome::Focus)).validate().is_ok());
+        assert!(
+            p(DriftEpisode, None, Some(CueOutcome::Focus))
+                .validate()
+                .is_ok()
+        );
         assert!(p(DriftEpisode, None, None).validate().is_err());
         assert!(
-            p(DriftEpisode, Some(PostureReason::Absent), Some(CueOutcome::Shown))
+            p(
+                DriftEpisode,
+                Some(PostureReason::Absent),
+                Some(CueOutcome::Shown)
+            )
+            .validate()
+            .is_err()
+        );
+        assert!(
+            p(NoReading, Some(PostureReason::Stalled), None)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            p(NoReading, Some(PostureReason::CameraMoved), None)
                 .validate()
                 .is_err()
         );
-        assert!(p(NoReading, Some(PostureReason::Stalled), None).validate().is_ok());
-        assert!(p(NoReading, Some(PostureReason::CameraMoved), None).validate().is_err());
         assert!(p(NoReading, None, None).validate().is_err());
         assert!(
             p(BaselineSuspect, Some(PostureReason::ViewpointChanged), None)
                 .validate()
                 .is_ok()
         );
-        assert!(p(BaselineSuspect, Some(PostureReason::Absent), None).validate().is_err());
         assert!(
-            p(BaselineSuspect, Some(PostureReason::AppRestart), Some(CueOutcome::Shown))
+            p(BaselineSuspect, Some(PostureReason::Absent), None)
                 .validate()
                 .is_err()
+        );
+        assert!(
+            p(
+                BaselineSuspect,
+                Some(PostureReason::AppRestart),
+                Some(CueOutcome::Shown)
+            )
+            .validate()
+            .is_err()
         );
         // Stored without the optional fields, an episode is refused (V2-2 always writes
         // them; nothing earlier wrote posture events).
