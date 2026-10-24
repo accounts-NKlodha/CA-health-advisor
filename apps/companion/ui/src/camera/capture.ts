@@ -49,12 +49,15 @@ class Capture {
   private path: CapturePath = processorClass() ? 'processor' : 'video';
   /** Bumped by every stop, so a start overtaken by a stop lets go of what it got. */
   private generation = 0;
+  /** Self-test only: the page ignores every command from now on, as a hung page would. */
+  private hung = false;
 
   get running(): boolean {
     return this.stream !== null || this.starting;
   }
 
   command(c: PageCommand): void {
+    if (this.hung) return;
     switch (c.kind) {
       case 'start':
         void this.start();
@@ -74,6 +77,9 @@ class Capture {
         break;
       case 'probe':
         this.worker?.postMessage({ type: 'probe' } satisfies ToWorker);
+        break;
+      case 'hang':
+        this.hung = true;
         break;
     }
   }
