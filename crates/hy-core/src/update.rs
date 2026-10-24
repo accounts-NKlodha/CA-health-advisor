@@ -1182,42 +1182,69 @@ pub fn restore_pre_migration_copy_with(
             "the recovery record could not be saved, so nothing was changed ({e})"
         )));
     }
+    // An error from a rename does not prove it did not happen (the rename can succeed
+    // and the folder flush after it fail): after any error the files themselves say
+    // where things stand. Only a state read back as "not moved" counts as unchanged;
+    // anything unclear keeps the journal (and the staged copy) for the next start.
+    let ambiguous = |e: &dyn std::fmt::Display| RestoreError {
+        reason: format!(
+            "the data restore was interrupted ({e}); HealthierYou finishes it at its next start"
+        ),
+        state: RestoreState::SetAside(aside.clone()),
+    };
     // 4. Set the newer database aside.
     if let Err(e) = fs.rename(db, &aside) {
-        let _ = std::fs::remove_file(&staged);
-        // If this fails the next start sees the database in place and clears it.
-        let _ = fs.remove_durable(&journal);
-        return Err(RestoreError::unchanged(format!(
-            "the current data could not be set aside ({e})"
-        )));
+        match (present(db), present(&aside)) {
+            (Ok(true), Ok(false)) => {
+                let _ = std::fs::remove_file(&staged);
+                // If this fails the next start sees the database in place and clears it.
+                let _ = fs.remove_durable(&journal);
+                return Err(RestoreError::unchanged(format!(
+                    "the current data could not be set aside ({e})"
+                )));
+            }
+            // It moved after all: go on.
+            (Ok(false), Ok(true)) => {}
+            _ => return Err(ambiguous(&e)),
+        }
     }
     for ext in ["-wal", "-shm"] {
         let _ = std::fs::remove_file(side_path(db, ext));
     }
     // 5. Swap the checked copy in.
-    match fs.rename(&staged, db) {
-        Ok(()) => {
-            // 6. If this fails the next start sees the restore completed and clears it.
-            let _ = fs.remove_durable(&journal);
-            Ok(aside)
-        }
-        Err(e) => match fs.rename(&aside, db) {
-            Ok(()) => {
-                let _ = std::fs::remove_file(&staged);
-                let _ = fs.remove_durable(&journal);
-                Err(RestoreError::unchanged(format!(
-                    "the earlier copy could not be put in place ({e}); the current data was put back"
-                )))
+    if let Err(e) = fs.rename(&staged, db) {
+        match (present(db), present(&staged)) {
+            // It moved after all.
+            (Ok(true), Ok(false)) => {}
+            (Ok(false), Ok(true)) => {
+                // Not swapped: move the newer database back.
+                let undo = fs.rename(&aside, db);
+                match (undo, present(db), present(&aside)) {
+                    (_, Ok(true), Ok(false)) => {
+                        let _ = std::fs::remove_file(&staged);
+                        let _ = fs.remove_durable(&journal);
+                        return Err(RestoreError::unchanged(format!(
+                            "the earlier copy could not be put in place ({e}); the current data was put back"
+                        )));
+                    }
+                    // The journal stays: the next start completes or undoes this.
+                    (Err(back), _, _) => {
+                        return Err(RestoreError {
+                            reason: format!(
+                                "the earlier copy could not be put in place ({e}) and the current data could not be moved back ({back}); HealthierYou finishes this at its next start"
+                            ),
+                            state: RestoreState::SetAside(aside),
+                        });
+                    }
+                    (Ok(()), _, _) => return Err(ambiguous(&e)),
+                }
             }
-            // The journal stays: the next start completes or undoes this.
-            Err(back) => Err(RestoreError {
-                reason: format!(
-                    "the earlier copy could not be put in place ({e}) and the current data could not be moved back ({back}); HealthierYou finishes this at its next start"
-                ),
-                state: RestoreState::SetAside(aside),
-            }),
-        },
+            _ => return Err(ambiguous(&e)),
+        }
     }
+    // 6. If this fails the next start sees the restore completed and clears it.
+    let _ = fs.remove_durable(&journal);
+    Ok(aside)
 }
 
 #[cfg(test)]
@@ -1763,16 +1790,19 @@ mod tests {
         fail_rename: RenameRule,
         fail_journal_write: bool,
         crash_before_op: Option<usize>,
+        flush_fails_after_op: Option<usize>,
         ops: std::cell::Cell<usize>,
     }
 
     impl Faulty {
-        fn step(&self) {
+        /// Count the operation; true if it must report a flush failure after it ran.
+        fn step(&self) -> bool {
             let n = self.ops.get();
             self.ops.set(n + 1);
             if self.crash_before_op == Some(n) {
                 panic!("simulated crash before operation {n}");
             }
+            self.flush_fails_after_op == Some(n)
         }
     }
 
@@ -1787,11 +1817,16 @@ mod tests {
             RealFs.copy(from, to)
         }
         fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
-            self.step();
+            let flush_fails = self.step();
             if (self.fail_rename)(from, to) {
                 return Err(std::io::Error::other("access denied"));
             }
-            RealFs.rename(from, to)
+            RealFs.rename(from, to)?;
+            if flush_fails {
+                // The rename happened; the folder flush after it failed.
+                return Err(std::io::Error::other("folder flush failed"));
+            }
+            Ok(())
         }
         fn write_durable(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             self.step();
@@ -1812,6 +1847,7 @@ mod tests {
             fail_rename: Box::new(|_, _| false),
             fail_journal_write: false,
             crash_before_op: None,
+            flush_fails_after_op: None,
             ops: std::cell::Cell::new(0),
         }
     }
@@ -2046,5 +2082,77 @@ mod tests {
         // A new restore is refused while a record is unfinished.
         let err = restore_pre_migration_copy(&db, &copy, 10).unwrap_err();
         assert_eq!(err.state, RestoreState::Unchanged);
+    }
+
+    #[test]
+    fn a_rename_that_happened_but_reported_an_error_is_judged_by_the_files() {
+        // Operations: 0 journal, 1 set-aside, 2 swap. Each rename really happens, then
+        // its folder flush fails; a fresh start then reconciles.
+        for op in [1, 2] {
+            let dir = tempfile::tempdir().unwrap();
+            let (db, copy) = newer_db_with_copy(dir.path());
+            let fs = Faulty {
+                flush_fails_after_op: Some(op),
+                ..faulty()
+            };
+            let aside = restore_pre_migration_copy_with(&fs, &db, &copy, 11)
+                .unwrap_or_else(|e| panic!("op {op}: {e:?}"));
+            assert!(
+                db.exists() && !has_newer(&db),
+                "op {op}: the copy is in place"
+            );
+            assert!(has_newer(&aside), "op {op}: the newer data is kept");
+            assert_eq!(reconcile_restore(&db), Ok(Reconciled::Clean), "op {op}");
+            assert!(db.exists() && !has_newer(&db));
+        }
+        // The undo: the swap really fails, the move back happens but reports an error.
+        let dir = tempfile::tempdir().unwrap();
+        let (db, copy) = newer_db_with_copy(dir.path());
+        let fs = Faulty {
+            fail_rename: Box::new(|from, _| from.to_string_lossy().contains(".restore-")),
+            flush_fails_after_op: Some(3),
+            ..faulty()
+        };
+        let err = restore_pre_migration_copy_with(&fs, &db, &copy, 12).unwrap_err();
+        assert_eq!(err.state, RestoreState::Unchanged, "{err:?}");
+        assert!(has_newer(&db));
+        assert_eq!(reconcile_restore(&db), Ok(Reconciled::Clean));
+        assert!(has_newer(&db));
+        assert!(
+            leftovers(dir.path()).is_empty(),
+            "{:?}",
+            leftovers(dir.path())
+        );
+    }
+
+    #[test]
+    fn a_set_aside_whose_outcome_cannot_be_read_keeps_the_journal_for_the_next_start() {
+        // The set-aside reports an error and the data is found in neither place a
+        // restore uses until the next start: nothing is cleaned up, the journal stays.
+        let dir = tempfile::tempdir().unwrap();
+        let (db, copy) = newer_db_with_copy(dir.path());
+        let elsewhere = dir.path().join("moved-by-someone");
+        let target = db.clone();
+        let away = elsewhere.clone();
+        let fs = Faulty {
+            fail_rename: Box::new(move |from, _| {
+                if from == target {
+                    std::fs::rename(&target, &away).unwrap();
+                    return true;
+                }
+                false
+            }),
+            ..faulty()
+        };
+        let err = restore_pre_migration_copy_with(&fs, &db, &copy, 13).unwrap_err();
+        assert!(matches!(err.state, RestoreState::SetAside(_)), "{err:?}");
+        assert!(journal_exists(&db), "the journal is kept");
+        assert!(
+            side_path(&db, ".restore-13.tmp").exists(),
+            "the staged copy is kept"
+        );
+        // The next start refuses to guess (no database is created).
+        assert!(reconcile_restore(&db).is_err());
+        assert!(!db.exists());
     }
 }
