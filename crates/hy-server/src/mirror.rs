@@ -529,6 +529,53 @@ pub fn check_volume_with(
     }
 }
 
+/// How a server database is bound to a mirror file (checked by the installer before it
+/// points the service at a mirror, slice V1-6b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binding {
+    /// No database yet: the first start creates the mirror.
+    NoData,
+    /// A database that has never recorded a mirror, and no mirror file there: the first
+    /// start creates it.
+    NotYetBound,
+    /// The mirror file is the one this database recorded (same id, this server's key,
+    /// every chain verifies). Differences in length are the normal startup comparison.
+    Matches,
+}
+
+/// Check that the mirror at `mirror` is the one the database at `db_path` is bound to.
+/// A refusal means starting the server against `mirror` would take the global discard
+/// path (every PC revoked, shared data cleared) or stay stopped, so the installer must
+/// not use it.
+///
+/// # Errors
+/// Why the mirror does not belong to this data, worded for an administrator.
+pub fn check_binding(db_path: &Path, key_id: &[u8; 32], mirror: &Path) -> Result<Binding, String> {
+    if !db_path.exists() {
+        return Ok(Binding::NoData);
+    }
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("the server database cannot be opened: {e}"))?;
+    let stored: Option<String> = rusqlite::OptionalExtension::optional(conn.query_row(
+        "SELECT value FROM meta WHERE key = 'mirror_id'",
+        [],
+        |r| r.get(0),
+    ))
+    .map_err(|e| format!("the server database cannot be read: {e}"))?;
+    let stored = stored.map(|s| s.to_ascii_lowercase());
+    match (scan(mirror, key_id), stored) {
+        (Err(MirrorError::Missing), None) => Ok(Binding::NotYetBound),
+        (Ok(_), None) => Err("a mirror file is already at this location but the server data has never used one; choose an empty folder".into()),
+        (Err(MirrorError::Missing), Some(_)) => Err("the server data's mirror is not at this location (the file is missing); give the folder that holds it, or copy it here first".into()),
+        (Err(MirrorError::Unreadable), _) => Err("the mirror cannot be read (check the share and its permissions)".into()),
+        (Err(MirrorError::Corrupt), _) => Err("the mirror at this location is damaged".into()),
+        (Err(MirrorError::Foreign), _) => Err("the mirror at this location belongs to another server or key".into()),
+        (Ok(scan), Some(id)) if hex(&scan.header.mirror_id) == id => Ok(Binding::Matches),
+        (Ok(_), Some(_)) => Err("the mirror at this location belongs to other server data".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,5 +673,55 @@ mod tests {
             scan(&dir.path().join("none"), &key).unwrap_err(),
             MirrorError::Missing
         );
+    }
+
+    #[test]
+    fn the_installer_binding_check_accepts_only_the_datas_own_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("server.db");
+        let key = [9u8; 32];
+        let mirror = dir.path().join("m1").join("control-log.mirror");
+        std::fs::create_dir_all(mirror.parent().unwrap()).unwrap();
+        // No database: nothing to bind.
+        assert_eq!(check_binding(&db, &key, &mirror).unwrap(), Binding::NoData);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            .unwrap();
+        // A database that never used a mirror, and no file there.
+        assert_eq!(
+            check_binding(&db, &key, &mirror).unwrap(),
+            Binding::NotYetBound
+        );
+        let mut m = Mirror::create(&mirror, [1; 16], key, 5).unwrap();
+        m.append(&chain(&key, [2; 16], 3)).unwrap();
+        drop(m);
+        // ... but a file already there is refused for unbound data.
+        assert!(check_binding(&db, &key, &mirror).is_err());
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('mirror_id', ?1)",
+            [hex(&[1u8; 16])],
+        )
+        .unwrap();
+        assert_eq!(check_binding(&db, &key, &mirror).unwrap(), Binding::Matches);
+        // Another, empty destination: refused (it would take the global discard path).
+        let empty = dir.path().join("m2").join("control-log.mirror");
+        std::fs::create_dir_all(empty.parent().unwrap()).unwrap();
+        let err = check_binding(&db, &key, &empty).unwrap_err();
+        assert!(err.contains("not at this location"), "{err}");
+        // A verified move: the same file copied to the new folder is accepted.
+        std::fs::copy(&mirror, &empty).unwrap();
+        assert_eq!(check_binding(&db, &key, &empty).unwrap(), Binding::Matches);
+        // Another server's mirror, or another key: refused.
+        let other = dir.path().join("m3").join("control-log.mirror");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        drop(Mirror::create(&other, [7; 16], key, 5).unwrap());
+        assert!(check_binding(&db, &key, &other).is_err());
+        assert!(check_binding(&db, &[8u8; 32], &mirror).is_err());
+        // A damaged copy: refused.
+        let mut bytes = std::fs::read(&empty).unwrap();
+        let n = bytes.len() - 5;
+        bytes[n] ^= 0x01;
+        std::fs::write(&empty, bytes).unwrap();
+        assert!(check_binding(&db, &key, &empty).is_err());
     }
 }

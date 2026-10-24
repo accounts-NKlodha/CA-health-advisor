@@ -28,7 +28,7 @@ use hy_core::schema::{Category, DateRange, EventPayload, NewEvent};
 use hy_core::secret::EphemeralVault;
 use hy_core::store::Store;
 use hy_server::backup::{self, BackupKey};
-use hy_server::keys::{ServerKeys, UnprotectedForTests};
+use hy_server::keys::{KeyProtector, ServerKeys, UnprotectedForTests, platform_protector};
 use hy_server::recovery::Startup;
 use hy_server::serve::{self, Limits};
 use hy_server::{Config, Server, db};
@@ -103,11 +103,12 @@ async fn start(
     mirror: &Path,
     clock: &Arc<ManualClock>,
     port: u16,
+    protector: &dyn KeyProtector,
 ) -> Result<Running, Fail> {
     let keys = if ServerKeys::exist(dir) {
-        ServerKeys::load(dir, &UnprotectedForTests).map_err(fail)?
+        ServerKeys::load(dir, protector).map_err(fail)?
     } else {
-        ServerKeys::create(dir, &UnprotectedForTests, "127.0.0.1", 2026).map_err(fail)?
+        ServerKeys::create(dir, protector, "127.0.0.1", 2026).map_err(fail)?
     };
     let conn = db::open(&dir.join("server.db")).map_err(fail)?;
     let mut tries = 0;
@@ -274,21 +275,51 @@ fn check(server: &Server, pcs: &[Pc], users: &[[u8; 16]], exp: &Expect) -> Resul
     Ok(checked)
 }
 
-#[allow(clippy::too_many_lines)]
 async fn run(tmp: &Path) -> Result<String, Fail> {
     let dir = tmp.join("data");
     let mirror_dir = tmp.join("mirror");
     let backups = tmp.join("backups");
+    run_in(
+        &dir,
+        &mirror_dir.join("control.mirror"),
+        &backups,
+        &UnprotectedForTests,
+        true,
+    )
+    .await
+}
+
+/// The simulation with its data in `dir` and its mirror at `mirror`. With `restore`
+/// false it stops after the week and leaves the data (`hy-sim seed`).
+#[allow(clippy::too_many_lines)]
+async fn run_in(
+    dir: &Path,
+    mirror: &Path,
+    backups: &Path,
+    protector: &dyn KeyProtector,
+    restore: bool,
+) -> Result<String, Fail> {
+    let (dir, mirror, backups) = (
+        dir.to_path_buf(),
+        mirror.to_path_buf(),
+        backups.to_path_buf(),
+    );
+    let mirror_dir = mirror.parent().ok_or("mirror folder")?.to_path_buf();
     for d in [&dir, &mirror_dir] {
         std::fs::create_dir_all(d).map_err(fail)?;
     }
-    let mirror = mirror_dir.join("control.mirror");
-    let start_at = Utc
-        .with_ymd_and_hms(2026, 10, 23, 6, 0, 0)
-        .single()
-        .ok_or("start time")?;
+    // The full simulation runs on a fixed week; a seeded data folder ends before today,
+    // so the real server that takes it over sees only past dates.
+    let start_at = if restore {
+        Utc.with_ymd_and_hms(2026, 10, 23, 6, 0, 0)
+            .single()
+            .ok_or("start time")?
+    } else {
+        let day = (Utc::now() - chrono::Duration::days(10)).date_naive();
+        Utc.from_utc_datetime(&day.and_hms_opt(6, 0, 0).ok_or("start time")?)
+    };
     let clock = Arc::new(ManualClock::new(start_at));
-    let mut srv = start(&dir, &mirror, &clock, 0).await?;
+    let mut srv = start(&dir, &mirror, &clock, 0, protector).await?;
     let port = srv.server.config.api_port;
     let mut report = Vec::new();
 
@@ -403,11 +434,15 @@ async fn run(tmp: &Path) -> Result<String, Fail> {
         p95(&mut times).as_millis()
     ));
 
+    if !restore {
+        stop(srv).await?;
+        return Ok(format!("hy-sim seed: {}", report.join("; ")));
+    }
     // Restore the day-2 backup: every user is held until each of their PCs checks in.
     let file = file.ok_or("no backup was written")?;
     stop(srv).await?;
     backup::restore(&dir, &file, &key(), clock.now().timestamp_millis()).map_err(fail)?;
-    srv = start(&dir, &mirror, &clock, port).await?;
+    srv = start(&dir, &mirror, &clock, port, protector).await?;
     let Startup::Hold { replayed } = srv.startup else {
         return Err(fail(format!(
             "expected a hold after the restore, got {:?}",
@@ -446,7 +481,52 @@ async fn run(tmp: &Path) -> Result<String, Fail> {
     ))
 }
 
+/// `hy-sim count <data dir>`: what a server data folder holds, as counts only, so a
+/// test can show an install kept the data (slice V1-6b).
+fn count(dir: &Path) -> Result<String, Fail> {
+    let conn = rusqlite::Connection::open_with_flags(
+        dir.join("server.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(fail)?;
+    let n =
+        |sql: &str| -> Result<i64, Fail> { conn.query_row(sql, [], |r| r.get(0)).map_err(fail) };
+    Ok(format!(
+        "users={} active_devices={} revoked_devices={} summaries={} control_entries={}",
+        n("SELECT count(*) FROM users")?,
+        n("SELECT count(*) FROM devices WHERE state = 'active'")?,
+        n("SELECT count(*) FROM devices WHERE state = 'revoked'")?,
+        n("SELECT count(*) FROM summaries")?,
+        n("SELECT count(*) FROM control_log")?,
+    ))
+}
+
 fn main() -> std::process::ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let [cmd, dir] = args.as_slice()
+        && cmd == "count"
+    {
+        return match count(Path::new(dir)) {
+            Ok(line) => {
+                println!("{line}");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("hy-sim: {e}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
+    let seed = match args.as_slice() {
+        [] => None,
+        // `hy-sim seed <data dir> <mirror file>`: a populated server data folder with
+        // this machine's real key protection, for the installer tests (slice V1-6b).
+        [cmd, dir, mirror] if cmd == "seed" => Some((dir.clone(), mirror.clone())),
+        _ => {
+            eprintln!("usage: hy-sim [seed <data dir> <mirror file> | count <data dir>]");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
     let tmp = std::env::temp_dir().join(format!("hy-sim-{}", std::process::id()));
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -458,7 +538,19 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    let out = rt.block_on(run(&tmp));
+    let out = match &seed {
+        None => rt.block_on(run(&tmp)),
+        Some((dir, mirror)) => {
+            let protector = platform_protector();
+            rt.block_on(run_in(
+                Path::new(dir),
+                Path::new(mirror),
+                &tmp.join("backups"),
+                protector.as_ref(),
+                false,
+            ))
+        }
+    };
     let _ = std::fs::remove_dir_all(&tmp);
     match out {
         Ok(line) => {

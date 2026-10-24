@@ -128,7 +128,7 @@ A CI runner is an administrator account on Windows Server, with no SmartScreen r
 
 ## 8. The office server (V1-6b)
 
-One file per release: `HealthierYou-Server_<version>_x64-setup.exe` (NSIS, per machine, built by `scripts/windows/Build-ServerInstaller.ps1`), with its `.sig` made the same way as the companion's. An administrator runs it on the server PC; silent: `setup.exe /S /MIRROR=D:\HealthierYou-Mirror`.
+One file per release: `HealthierYou-Server_<version>_x64-setup.exe` (NSIS, per machine, built by `scripts/windows/Build-ServerInstaller.ps1`), with its `.sig` made the same way as the companion's. An administrator runs it on the server PC; silent: `setup.exe /S [/MIRROR=D:\HealthierYou-Mirror]` (without `/MIRROR` it uses the installed or remembered mirror).
 
 **What it sets up (V1-5 contract 6.2):**
 
@@ -136,23 +136,55 @@ One file per release: `HealthierYou-Server_<version>_x64-setup.exe` (NSIS, per m
 | --- | --- |
 | Program | `%ProgramFiles%\HealthierYou Server\hy-server.exe`, uninstall entry under HKLM |
 | Service | `HealthierYouServer`, `hy-server.exe service --mirror <folder>\control-log.mirror`, account `NT SERVICE\HealthierYouServer` (virtual account, no password), automatic (delayed) start, restart after 1 and 1 minutes then 5 minutes; reports *running* only once both ports are open |
-| Data | `%ProgramData%\HealthierYou\Server`: inheritance removed; full control for SYSTEM (`S-1-5-18`) and Administrators (`S-1-5-32-544`), modify for the service account; nobody else |
+| Data | `%ProgramData%\HealthierYou\Server`, exact rights on the whole tree (below) |
 | Keys | made by the service itself at its first start (TLS and head keys sealed with machine-scope DPAPI); an administrator can still run `hy-server fingerprint` and `set-passphrase` |
-| Mirror | the folder given by `/MIRROR=` (or on the setup page) on another volume; same rights where Windows allows (a share's owner sets its rights) |
+| Mirror | the folder given by `/MIRROR=` (or on the setup page) on another volume, bound to the data (below); same rights where Windows allows (a share's owner sets its rights) |
 | Firewall | one inbound allow rule "HealthierYou Server": TCP 8443, `hy-server.exe` only, private and domain profiles only (never public). The admin page (8444) listens on loopback only and gets no rule |
+| Registry | `HKLM\Software\HealthierYou\Server`: `Version`, `PreviousVersion` (written only after a good start), `MirrorFolder` |
+
+**Exact data-folder rights, also on a folder that already exists.** Before the program is put in place, with the service stopped, the installer: makes Administrators the owner of every file and folder; drops every entry the folder itself has, stops inheritance and grants only SYSTEM (`S-1-5-18`) and Administrators (`S-1-5-32-544`) full control and the service account modify; resets every file and folder under it so it has no entries of its own and takes the folder's. Then `hy-server check-acl` reads the whole tree back: any owner other than those three accounts, any allow entry for another account (explicit or inherited), a folder list that still inherits, or a file with no list at all fails the install closed (exit 8; on an upgrade nothing is replaced and the previous version is started again). For a moment between "drop" and "stop inheritance" the folder inherits `%ProgramData%`'s rights; the service is stopped then and setup runs as an administrator.
+
+**The data stays bound to its mirror.** The database records which mirror it belongs to (V1-5 contract 7.3); pointed at another (say an empty) mirror, the next start would take the global discard path. So the mirror folder is remembered in `mirror-location.txt` in the data folder (kept on uninstall, so a reinstall over kept data uses it by default), and before the service is pointed at any mirror the trusted server (the installed one on an upgrade, the installer's own on a fresh install) runs `hy-server check-mirror`: it passes only when there is no data yet, the data has never had a mirror, or the mirror file at that location is the data's own (same mirror id, this server's key, intact chain). Anything else (a missing or empty folder, another server's mirror, a damaged copy) is refused with nothing changed (exit 6). **Moving the mirror** is therefore an explicit, verified step: copy `control-log.mirror` to the new folder, then run setup with `/MIRROR=` that folder; the check accepts the copy because it is the data's own.
+
+**Version policy (enforced by `hy-server verify-release`).** The installed server accepts a signed server installer whose version is newer than the installed one, or exactly the version it was last updated from (`PreviousVersion`, a rollback). The same version again, or any other older version, is refused (exit 3). Going back keeps the data. If the newer version changed the database in a way the older one cannot read, the older one does not start, and setup handles it like any release that does not start (steps 6 and 7 below): the newer program and the database copy made just before are put back.
 
 **Upgrade and rollback.**
 
-1. The **installed** server checks the new installer and its `.sig` first (`hy-server verify-release`): same keys, name, version and file rules as the companion. A refused file changes nothing (exit 3).
-2. The service is stopped; `hy-server.exe` is kept as `hy-server.previous.exe` and the database is copied to `pre-update\` in the data folder.
-3. The new program is installed and started. If the service is not running a few seconds later, the previous program is put back and started (exit 4); if that does not start either, the pre-update database copy is restored (the changed one is kept as `server.db.after-failed-update`) and the service started again.
-4. After a good start the previous copy and the pre-update copy are removed. The keys never change, so no PC re-pairs.
+1. The **installed** server checks the new installer, its `.sig` and the version policy (`hy-server verify-release --current --previous`): same keys, name and file rules as the companion. A refused file changes nothing (exit 3). If copies from an earlier update that did not complete are still in `pre-update\`, setup stops here (exit 7): they may be the only good database.
+2. The service is stopped and must be **confirmed stopped**, otherwise nothing changes (exit 7). The mirror binding is checked (exit 6 on refusal; the service is started again).
+3. Copies are made and each is compared byte for byte (`fc /b`) before anything is replaced: `hy-server.exe` as `hy-server.previous.exe`, and `server.db` with its `server.db-wal` (if any) in `pre-update\`. If any copy cannot be made or does not match, the previous version is started again and nothing changed (exit 7).
+4. The data-folder rights are set and verified (exit 8 on failure, nothing replaced).
+5. The new program is put in place (verified) and started. If it is running five seconds later, the copies are removed, `Version`/`PreviousVersion` are written, done.
+6. Otherwise: the service is stopped (confirmed), the previous program is put back (verified) and started. If it runs: exit 4, the data as it is.
+7. If it does not start (for example the new version changed the database so the old one refuses it): the service is disabled while the database is changed (so nothing can start it and make an empty database), the failed version's `server.db`, `-wal` and `-shm` are moved together into `failed-update-<version>\` (each move checked; a database is never left apart from its WAL), the `pre-update\` copy is put back and verified, the service is re-enabled and started: exit 4.
+8. Any step of 6 or 7 that fails stops with **exit 9** and a message that says exactly what is where (which program is installed, where the previous program, the database copy and the failed database are, whether the service was disabled). Nothing is deleted. **Recovery after exit 9:** stop the service; move `server.db*` out of the data folder; copy the files in `pre-update\` into the data folder; move `pre-update\` out of the data folder; set the service to automatic (delayed) and start it. (CI runs exactly this.)
 
-The first install has nothing installed to check the signature with: the administrator should check the file came from the owner (the same file as on the share, with its `.sig`).
+After a good start or a completed rollback the previous copy and the pre-update copy are removed. The keys never change, so no PC re-pairs.
 
-**Uninstall** (Windows Settings or `uninstall.exe`, silent `/S`): stops and deletes the service, removes the firewall rule, the program, the uninstall entry and `HKLM\Software\HealthierYou\Server`. The data (keys, database, backups) and the mirror are kept unless "Also delete the server data" is ticked (unticked by default; it warns that without the keys every PC re-pairs) or `/DELETEDATA` is passed. A reinstall over kept data reuses the keys.
+**Bootstrap limitation (first-install provenance).** The first install, and a reinstall after an uninstall, has no installed server to check the signature or the version with: whatever installer the administrator runs is trusted. The administrator must check the file came from the owner (the same file as on the share, with its `.sig`, compared with the SHA-256 the owner publishes). Every later upgrade is checked by the installed server. Production update public keys are not yet built into any release (section 7), so no server release is updateable yet either.
 
-**CI** (Windows job, administrator): builds S1 0.1.0, S2 0.1.1 and S3 0.1.2 (whose `hy-server.exe` is not a program) and runs `scripts/windows/Test-ServerLifecycle.ps1`: the service account, start type and restart actions; the exact data-folder rights; keys made by the service; 8443 listening, the admin page on loopback only; the firewall rule's profiles, port and program; upgrades refused for another key and a missing `.sig` with nothing changed; S1 to S2 with the same keys; S3 rolled back to S2; uninstall keeping the data; a reinstall reusing the keys; uninstall with `/DELETEDATA`.
+**Uninstall** (Windows Settings or `uninstall.exe`, silent `/S`): stops and deletes the service, removes the firewall rule, the program, the uninstall entry and `HKLM\Software\HealthierYou\Server`. The data (keys, database, backups, `mirror-location.txt`) and the mirror are kept unless "Also delete the server data" is ticked (unticked by default; it warns that without the keys every PC re-pairs) or `/DELETEDATA` is passed. A reinstall over kept data reuses the keys and the remembered mirror.
+
+**Exit codes:** 0 done; 2 bad options, not an administrator, or the program could not be written; 3 refused (signature or version), nothing changed; 4 the new version did not start and the previous version was put back and runs; 5 the service did not start (fresh install); 6 the mirror is not the data's own, nothing changed; 7 not confirmed stopped, copies not made and verified, or an earlier incomplete update's copies present, nothing changed; 8 the data-folder rights could not be set or verified, nothing replaced; 9 the rollback could not complete (the message says what is where; nothing deleted).
+
+**CI** (Windows job, administrator): builds S1 0.1.0, S2 0.1.1, S3 0.1.2 (whose `hy-server.exe` is not a program) and S4 0.1.3 (the real server built with the CI-only `HY_SERVER_TEST_SCHEMA_CHANGE_THEN_FAIL` hook: it applies a Contract migration older servers refuse, leaves it in the WAL and fails to start; the hook is compiled in only when that variable is set at build time and the migration is not one of the server's own), and runs `scripts/windows/Test-ServerLifecycle.ps1` over a data folder and mirror seeded by `hy-sim seed` (5 users, 10 devices, 60 summaries), counting them with `hy-sim count` after every step that keeps data:
+
+| Test | Shows |
+| --- | --- |
+| install over the seeded folder after giving Users explicit entries, a file owned by Users and a non-inheriting Everyone file | exact rights: `check-acl` and an independent PowerShell walk find no other owner or entry; the kept keys are used |
+| service, firewall, ports | as before |
+| other key, no `.sig`, same version again | exit 3, nothing changed |
+| upgrade with another `/MIRROR` | exit 6, program, registry and service mirror unchanged, data counts unchanged |
+| S1 to S2 | data counts unchanged, `Version`/`PreviousVersion`, rights verified |
+| `hy-server.previous.exe` locked | exit 7, nothing replaced, service running again |
+| S3 | exit 4, previous program back and running, data unchanged |
+| S4 with the failed-update folder blocked | exit 9, previous program back, database and both copies kept; a new setup refuses (exit 7); the documented recovery brings the same data back |
+| S4 | exit 4, previous program and pre-update database back and running with the same counts; the failed version's change kept with its database in `failed-update-0.1.3\` |
+| S2 back to S1 | allowed (the previous version) |
+| uninstall, then reinstall with another `/MIRROR` | exit 6, nothing installed, data unchanged |
+| reinstall without `/MIRROR` over a folder opened up again | remembered mirror used, rights exact, data unchanged |
+| copy the mirror, reinstall with `/MIRROR=` the copy | accepted (verified move), remembered |
+| uninstall `/DELETEDATA`, fresh install | data and mirror removed; new keys made by the service; rights exact |
 
 **Needs physical testing (server):**
 
@@ -161,5 +193,7 @@ The first install has nothing installed to check the signature with: the adminis
 3. The mirror on the real second disk or share: on a share, give the computer account (`DOMAIN\SERVERPC$`) modify rights, since the virtual account acts as the computer on the network.
 4. Power settings: the server PC must not sleep during office hours (Settings > System > Power: sleep "Never" when plugged in); the service restarts after a reboot (delayed start) and after a crash.
 5. Upgrade with a real downloaded installer, and uninstall from Windows Settings with the data box left unticked.
+6. Moving the mirror to the real share (copy `control-log.mirror`, setup with `/MIRROR=`): `check-mirror` reads it over SMB as the administrator, the service then writes it as the computer account.
+7. An install over a data folder an administrator copied or restored by hand on that PC (domain owners, inherited domain groups): `check-acl` passes after setup.
 
 **Deviation:** the server takes update files only from the administrator running the next installer (no automatic channel).

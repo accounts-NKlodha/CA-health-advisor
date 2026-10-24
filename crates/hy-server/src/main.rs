@@ -7,8 +7,12 @@
 //! hy-server serve           [--data-dir DIR] --mirror FILE [--backups DIR] [--host NAME] [--api ADDR] [--admin ADDR]
 //! hy-server restore         [--data-dir DIR] --backup FILE    restore a server backup (service stopped)
 //! hy-server --version
-//! hy-server verify-release  --file INSTALLER                 check a server update's signature
+//! hy-server verify-release  --file INSTALLER --current V [--previous V]
+//!                                                            check a server update's signature
+//!                                                            and the version policy
 //! hy-server service         [--data-dir DIR] --mirror FILE [...]  run as the Windows service
+//! hy-server check-mirror    [--data-dir DIR] --mirror FILE   is FILE the data's own mirror?
+//! hy-server check-acl       [--data-dir DIR]                 is the data folder closed to others?
 //! ```
 //!
 //! `--mirror` is the append-only copy of the control log (contract 7.3). It must be on
@@ -56,6 +60,8 @@ struct Args {
     backups: Option<PathBuf>,
     backup: Option<PathBuf>,
     file: Option<PathBuf>,
+    current: Option<String>,
+    previous: Option<String>,
 }
 
 fn usage() -> String {
@@ -81,6 +87,8 @@ fn parse() -> Result<Args, String> {
         backups: None,
         backup: None,
         file: None,
+        current: None,
+        previous: None,
     };
     while let Some(flag) = it.next() {
         let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
@@ -91,6 +99,8 @@ fn parse() -> Result<Args, String> {
             "--backups" => args.backups = Some(PathBuf::from(value)),
             "--backup" => args.backup = Some(PathBuf::from(value)),
             "--file" => args.file = Some(PathBuf::from(value)),
+            "--current" => args.current = Some(value),
+            "--previous" => args.previous = Some(value),
             "--api" => args.api = value.parse().map_err(|_| "bad --api address".to_owned())?,
             "--admin" => {
                 args.admin = value
@@ -174,6 +184,8 @@ fn run() -> Result<(), String> {
             eprintln!("Admin passphrase set. Existing admin sessions were signed out.");
             Ok(())
         }
+        "check-mirror" => check_mirror(&args, &dir, protector.as_ref()),
+        "check-acl" => check_acl(&dir),
         "serve" => serve_cmd(
             &args,
             &dir,
@@ -213,21 +225,84 @@ fn init(
     Ok(keys)
 }
 
-/// Check a server installer and its `.sig` with the update keys built into this server
-/// (slice V1-6b). The server installer runs this with the installed server before it
-/// replaces anything, so only a release signed with a trusted key can update it.
+/// Check a server installer and its `.sig` with the update keys built into this server,
+/// and the server's version policy (slice V1-6b). The server installer runs this with the
+/// installed server before it replaces anything, so only a release signed with a trusted
+/// key can update it. The policy is the companion's ([`hy_core::update::plan`]): a newer
+/// version, or exactly the version this server was last updated from (`--previous`, a
+/// rollback); the same version again or any other older version is refused.
 fn verify_release(args: &Args) -> Result<(), String> {
     use hy_core::update::{
-        Product, TrustedKeys, read_signature_file, sig_path_for, verify_release,
+        Plan, Product, TrustedKeys, Version, plan, read_signature_file, sig_path_for,
+        verify_release,
     };
     let file = args.file.as_ref().ok_or("give --file INSTALLER")?;
+    let version = |v: &str| v.parse::<Version>().map_err(|e| e.to_string());
+    let current = version(args.current.as_deref().ok_or("give --current VERSION")?)?;
+    let previous = args.previous.as_deref().map(version).transpose()?;
     let keys = TrustedKeys::parse(env!("HY_UPDATE_KEYS")).map_err(|e| e.to_string())?;
     let sig = read_signature_file(&sig_path_for(file)).map_err(|e| e.to_string())?;
     let release = verify_release(&keys, file, &sig).map_err(|e| e.to_string())?;
-    if release.product != Product::Server {
-        return Err(hy_core::update::UpdateError::WrongProduct("desktop companion").to_string());
+    let what =
+        match plan(Product::Server, current, previous, &release).map_err(|e| e.to_string())? {
+            Plan::Upgrade => "upgrade",
+            Plan::Rollback => "rollback",
+        };
+    println!(
+        "verified {} version {} ({what})",
+        release.file_name, release.version
+    );
+    Ok(())
+}
+
+/// Check that nobody but SYSTEM, Administrators and the service's own account owns or
+/// can open anything in the data folder (slice V1-6b). The installer runs this after it
+/// sets the rights and fails closed on any finding.
+#[cfg(windows)]
+fn check_acl(dir: &std::path::Path) -> Result<(), String> {
+    use hy_server::acl::{ADMINISTRATORS, SYSTEM, evaluate, read_tree, sid_of};
+    let service = sid_of(&format!("NT SERVICE\\{}", winservice::SERVICE_NAME))?;
+    let entries = read_tree(dir)?;
+    let problems = evaluate(dir, &entries, &[SYSTEM, ADMINISTRATORS, &service]);
+    if problems.is_empty() {
+        println!("rights: {} items, closed to other accounts", entries.len());
+        Ok(())
+    } else {
+        Err(format!(
+            "the data folder is open to other accounts:\n  {}",
+            problems.join("\n  ")
+        ))
     }
-    println!("verified {} version {}", release.file_name, release.version);
+}
+
+#[cfg(not(windows))]
+fn check_acl(_dir: &std::path::Path) -> Result<(), String> {
+    Err("check-acl reads Windows rights and runs on Windows only".into())
+}
+
+/// Check that `--mirror` is the mirror the data folder's database is bound to (slice
+/// V1-6b). The server installer runs this, with the service stopped, before it points
+/// the service at a mirror: pointing retained data at another (say empty) mirror would
+/// make the next start take the global discard path.
+fn check_mirror(
+    args: &Args,
+    dir: &std::path::Path,
+    protector: &dyn hy_server::keys::KeyProtector,
+) -> Result<(), String> {
+    use hy_server::mirror::{Binding, check_binding};
+    let mirror = args.mirror.as_ref().ok_or("give --mirror FILE")?;
+    let db = dir.join("server.db");
+    if !db.exists() {
+        println!("mirror: no server data yet");
+        return Ok(());
+    }
+    let keys =
+        ServerKeys::load(dir, protector).map_err(|e| format!("cannot open the keys: {e}"))?;
+    match check_binding(&db, &keys.key_id, mirror)? {
+        Binding::NoData => println!("mirror: no server data yet"),
+        Binding::NotYetBound => println!("mirror: the server data has no mirror yet"),
+        Binding::Matches => println!("mirror: matches the server data"),
+    }
     Ok(())
 }
 
@@ -242,6 +317,9 @@ type Shutdown = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 fn service_body(stop: std::sync::mpsc::Receiver<()>, ready: &dyn Fn()) -> Result<(), String> {
     let args = parse()?;
     let dir = data_dir(&args)?;
+    if option_env!("HY_SERVER_TEST_SCHEMA_CHANGE_THEN_FAIL").is_some() {
+        return schema_change_then_fail(&dir);
+    }
     let protector = platform_protector();
     if !ServerKeys::exist(&dir) {
         init(&args, &dir, protector.as_ref())?;
@@ -250,6 +328,42 @@ fn service_body(stop: std::sync::mpsc::Receiver<()>, ready: &dyn Fn()) -> Result
         let _ = tokio::task::spawn_blocking(move || stop.recv()).await;
     });
     serve_cmd(&args, &dir, protector.as_ref(), shutdown, ready)
+}
+
+/// CI only (slice V1-6b): a release that changes the database so that older servers
+/// refuse it (a Contract migration), leaves that change in the WAL, then fails to start.
+/// The installer must then put back both the previous program and the database copy it
+/// made before the update, and keep the failed database with its WAL. Compiled in only
+/// when `HY_SERVER_TEST_SCHEMA_CHANGE_THEN_FAIL` is set at build time (the CI test
+/// release); the migration is not one of the server's own and never ships.
+#[cfg(windows)]
+fn schema_change_then_fail(dir: &std::path::Path) -> Result<(), String> {
+    use hy_core::migrations::{Compat, MigrateOptions, Migration, migrate_with};
+    let mut list = db::MIGRATIONS.to_vec();
+    list.push(Migration {
+        version: u32::try_from(list.len() + 1).unwrap_or(u32::MAX),
+        name: "ci_contract_probe",
+        sql: "CREATE TABLE ci_contract_probe (x INTEGER NOT NULL);",
+        compat: Compat::Contract,
+    });
+    let mut conn =
+        rusqlite::Connection::open(dir.join("server.db")).map_err(|e| format!("database: {e}"))?;
+    let _mode: String = conn
+        .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+        .map_err(|e| format!("database: {e}"))?;
+    conn.pragma_update(None, "wal_autocheckpoint", 0)
+        .map_err(|e| format!("database: {e}"))?;
+    migrate_with(
+        &mut conn,
+        &list,
+        MigrateOptions {
+            copy_before_upgrade: false,
+        },
+    )
+    .map_err(|e| format!("database: {e}"))?;
+    // Leave the change in the WAL (no checkpoint at close), as a crash would.
+    std::mem::forget(conn);
+    Err("test release: the database was changed, then the start failed".into())
 }
 
 fn serve_cmd(
