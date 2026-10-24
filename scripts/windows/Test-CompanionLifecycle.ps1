@@ -71,16 +71,26 @@ function Stop-Companion {
     Start-Sleep -Milliseconds 500
   }
 }
-function Run-Installer([string]$Path, [string]$Arguments = '/S') {
-  $p = Start-Process -FilePath $Path -ArgumentList $Arguments -PassThru -Wait
+# Start a program and wait for it alone. Start-Process -Wait would also wait for every
+# process it starts (the update helper, the restarted app), which never all end.
+function Start-AndWait([string]$Path, [object]$Arguments, [int]$Minutes = 10) {
+  $p = Start-Process -FilePath $Path -ArgumentList $Arguments -PassThru
+  $null = $p.Handle  # keep the handle so the exit code is readable
+  if (-not $p.WaitForExit($Minutes * 60000)) {
+    $p | Stop-Process -Force -ErrorAction SilentlyContinue
+    return -1
+  }
   $p.ExitCode
+}
+function Run-Installer([string]$Path, [string]$Arguments = '/S') {
+  Start-AndWait $Path $Arguments
 }
 function Invoke-Uninstall([string]$Arguments = '/S') {
   $u = Join-Path $Root 'uninstall.exe'
   if (-not (Test-Path $u)) { return $false }
   # The NSIS uninstaller copies itself to the temp folder and exits at once; wait for
   # the copy (Au_.exe) to finish and the entry to go, as Windows Settings would.
-  Start-Process -FilePath $u -ArgumentList $Arguments -Wait | Out-Null
+  $null = Start-AndWait $u $Arguments
   $deadline = (Get-Date).AddMinutes(3)
   while ((Get-Date) -lt $deadline) {
     $running = @(Get-Process -Name 'Au_' -ErrorAction SilentlyContinue).Count -gt 0
@@ -96,9 +106,9 @@ function Read-State {
 # Run a command-line update step; returns @{ Code; Report }.
 function Update-Step([string]$Mode, [string]$File) {
   $report = Join-Path $Work ("report-{0}.json" -f [guid]::NewGuid().ToString('N'))
-  $p = Start-Process -FilePath $Exe -ArgumentList @($Mode, "`"$File`"", '--report', "`"$report`"") -PassThru -Wait
+  $code = Start-AndWait $Exe @($Mode, "`"$File`"", '--report', "`"$report`"") 2
   $r = if (Test-Path $report) { Get-Content -Raw $report | ConvertFrom-Json } else { $null }
-  @{ Code = $p.ExitCode; Report = $r }
+  @{ Code = $code; Report = $r }
 }
 # Wait for the helper to record the attempt's outcome.
 function Wait-Outcome([string]$To, [int]$Seconds = 300) {
