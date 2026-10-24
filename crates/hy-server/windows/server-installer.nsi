@@ -522,6 +522,19 @@ Section "Install"
     ${EndIf}
   ${EndIf}
 
+  ; A fresh install registers the service first: its account (and SID) exists only then.
+  ${If} $Upgrade = 0
+    DetailPrint "Registering the service"
+    !insertmacro Run '"$SYSDIR\sc.exe" create ${SERVICE} binPath= "\"$INSTDIR\hy-server.exe\" service --mirror \"$Mirror\${MIRROR_FILE}\"" start= delayed-auto obj= "${ACCOUNT}" DisplayName= "${PRODUCT}"'
+    ${If} $0 <> 0
+    ${AndIf} $0 <> 1073
+      !insertmacro Fail 2 "The service could not be registered (sc exit $0)."
+    ${EndIf}
+    ; The service's own SID (NT SERVICE\HealthierYouServer) in its token, so the folder
+    ; rules apply to it.
+    !insertmacro Run '"$SYSDIR\sc.exe" sidtype ${SERVICE} unrestricted'
+  ${EndIf}
+
   ; The data folder's rights, before the new program is in place.
   CreateDirectory "$DataDir"
   Call ProtectData
@@ -530,7 +543,9 @@ Section "Install"
       !insertmacro StartService
       !insertmacro Fail 8 "The data folder's rights could not be set or checked, so the program was not replaced: $1"
     ${EndIf}
-    !insertmacro Fail 8 "The data folder's rights could not be set or checked, so nothing was installed: $1"
+    StrCpy $5 $1
+    !insertmacro Run '"$SYSDIR\sc.exe" delete ${SERVICE}'
+    !insertmacro Fail 8 "The data folder's rights could not be set or checked, so nothing was installed: $5"
   ${EndIf}
 
   Delete "$INSTDIR\hy-server.exe"
@@ -545,14 +560,7 @@ Section "Install"
   WriteUninstaller "$INSTDIR\uninstall.exe"
   CreateDirectory "$Mirror"
 
-  ${If} $Upgrade = 0
-    DetailPrint "Registering the service"
-    !insertmacro Run '"$SYSDIR\sc.exe" create ${SERVICE} binPath= "\"$INSTDIR\hy-server.exe\" service --mirror \"$Mirror\${MIRROR_FILE}\"" start= delayed-auto obj= "${ACCOUNT}" DisplayName= "${PRODUCT}"'
-    ${If} $0 <> 0
-    ${AndIf} $0 <> 1073
-      !insertmacro Fail 2 "The service could not be registered (sc exit $0)."
-    ${EndIf}
-  ${Else}
+  ${If} $Upgrade = 1
     !insertmacro Run '"$SYSDIR\sc.exe" config ${SERVICE} binPath= "\"$INSTDIR\hy-server.exe\" service --mirror \"$Mirror\${MIRROR_FILE}\"" start= delayed-auto obj= "${ACCOUNT}"'
   ${EndIf}
   !insertmacro Run '"$SYSDIR\sc.exe" description ${SERVICE} "HealthierYou office server: pairing and sync for the desktop companions (TCP ${PORT}, admin page on this PC only)."'
