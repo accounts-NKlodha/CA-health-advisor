@@ -175,7 +175,6 @@ try {
     Stop-Companion
     $exeB = Hash $Exe
     $uninstB = Hash (Join-Path $Root 'uninstall.exe')
-    $dbBefore = Hash (Join-Path $Data 'hy.db')
     $r = Update-Step '--hy-update-install' (Installer $VersionC)
     Check 'update B->C: accepted and started' ($r.Code -eq 0) "exit $($r.Code) $($r.Report.error)"
     $s = Wait-Outcome $VersionC
@@ -185,7 +184,8 @@ try {
     Check 'update B->C: uninstaller back to B' ((Hash (Join-Path $Root 'uninstall.exe')) -eq $uninstB)
     Check 'update B->C: runtime back' (Test-Path (Join-Path $Root 'webview2-fixed\msedgewebview2.exe'))
     Check 'update B->C: previous version still A' ($s -and $s.previous_version -eq $VersionA) "$($s.previous_version)"
-    Check 'update B->C: data untouched by the program copy' ((Hash (Join-Path $Data 'hy.db')) -ne '' -and $dbBefore -ne '')
+    # (B is running again and holds the database open, so it is not hashed here.)
+    Check 'update B->C: data kept' ((Test-Path (Join-Path $Data 'hy.db')) -and (Get-Item (Join-Path $Data 'hy.db')).Length -gt 0)
     Check 'update B->C: B started again' (@(Get-Process -Name 'hy-companion' -ErrorAction SilentlyContinue).Count -gt 0)
 
     # ------------------------------------------------------------- refused files
