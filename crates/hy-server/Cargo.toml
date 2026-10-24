@@ -37,6 +37,10 @@ zeroize.workspace = true
 [target.'cfg(windows)'.dependencies]
 # Already in the lockfile through the companion. Used only by src/dpapi.rs.
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+# Running as a Windows service under its virtual account (V1-5 contract 6.2, slice
+# V1-6b). Uses the same windows-sys 0.61; adds only widestring. Used only by
+# src/winservice.rs (the binary).
+windows-service = "0.8.1"
 
 [dev-dependencies]
 hy-core = { workspace = true, features = ["link"] }

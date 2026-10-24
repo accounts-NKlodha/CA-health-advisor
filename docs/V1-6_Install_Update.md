@@ -1,6 +1,6 @@
 # V1-6 install, update and uninstall
 
-Status: **slice V1-6a, the companion** (24 Oct 2026). This covers the per-user installer, start at sign-in, updating from a signed file with rollback, and a clean uninstall. The office server's installer and Windows service are slice V1-6b (a stacked PR). Baseline: architecture section 8 (`docs/Architecture_V1_V2.md` on the architecture branch), assumptions A5, A15 and A16.
+Status: **slices V1-6a (the companion) and V1-6b (the office server)** (24 Oct 2026). V1-6a covers the companion's per-user installer, start at sign-in, updating from a signed file with rollback, and a clean uninstall. V1-6b (section 8, a stacked PR) covers the server's per-machine installer and Windows service. Baseline: architecture section 8 (`docs/Architecture_V1_V2.md` on the architecture branch), assumptions A5, A15 and A16, and the V1-5 contract 6.2 for the server.
 
 ## 1. The companion installer
 
@@ -114,3 +114,41 @@ A CI runner is an administrator account on Windows Server, with no SmartScreen r
 - The previous-version program copy is deleted once the new version confirms its start. Going back after that uses the old installer file and its signature.
 - The program folder and the data folder share the parent `%LOCALAPPDATA%\HealthierYou`, which is the Tauri template's install path. The uninstaller removes everything but `data\`.
 - The "display scaling" defect had no written record in the repository. It is handled as declaring per-monitor-v2 DPI awareness, with the self-test check and the physical checks above.
+
+## 8. The office server (V1-6b)
+
+One file per release: `HealthierYou-Server_<version>_x64-setup.exe` (NSIS, per machine, built by `scripts/windows/Build-ServerInstaller.ps1`), with its `.sig` made the same way as the companion's. An administrator runs it on the server PC; silent: `setup.exe /S /MIRROR=D:\HealthierYou-Mirror`.
+
+**What it sets up (V1-5 contract 6.2):**
+
+| Item | Setting |
+| --- | --- |
+| Program | `%ProgramFiles%\HealthierYou Server\hy-server.exe`, uninstall entry under HKLM |
+| Service | `HealthierYouServer`, `hy-server.exe service --mirror <folder>\control-log.mirror`, account `NT SERVICE\HealthierYouServer` (virtual account, no password), automatic (delayed) start, restart after 1 and 1 minutes then 5 minutes; reports *running* only once both ports are open |
+| Data | `%ProgramData%\HealthierYou\Server`: inheritance removed; full control for SYSTEM (`S-1-5-18`) and Administrators (`S-1-5-32-544`), modify for the service account; nobody else |
+| Keys | made by the service itself at its first start (TLS and head keys sealed with machine-scope DPAPI); an administrator can still run `hy-server fingerprint` and `set-passphrase` |
+| Mirror | the folder given by `/MIRROR=` (or on the setup page) on another volume; same rights where Windows allows (a share's owner sets its rights) |
+| Firewall | one inbound allow rule "HealthierYou Server": TCP 8443, `hy-server.exe` only, private and domain profiles only (never public). The admin page (8444) listens on loopback only and gets no rule |
+
+**Upgrade and rollback.**
+
+1. The **installed** server checks the new installer and its `.sig` first (`hy-server verify-release`): same keys, name, version and file rules as the companion. A refused file changes nothing (exit 3).
+2. The service is stopped; `hy-server.exe` is kept as `hy-server.previous.exe` and the database is copied to `pre-update\` in the data folder.
+3. The new program is installed and started. If the service is not running a few seconds later, the previous program is put back and started (exit 4); if that does not start either, the pre-update database copy is restored (the changed one is kept as `server.db.after-failed-update`) and the service started again.
+4. After a good start the previous copy and the pre-update copy are removed. The keys never change, so no PC re-pairs.
+
+The first install has nothing installed to check the signature with: the administrator should check the file came from the owner (the same file as on the share, with its `.sig`).
+
+**Uninstall** (Windows Settings or `uninstall.exe`, silent `/S`): stops and deletes the service, removes the firewall rule, the program, the uninstall entry and `HKLM\Software\HealthierYou\Server`. The data (keys, database, backups) and the mirror are kept unless "Also delete the server data" is ticked (unticked by default; it warns that without the keys every PC re-pairs) or `/DELETEDATA` is passed. A reinstall over kept data reuses the keys.
+
+**CI** (Windows job, administrator): builds S1 0.1.0, S2 0.1.1 and S3 0.1.2 (whose `hy-server.exe` is not a program) and runs `scripts/windows/Test-ServerLifecycle.ps1`: the service account, start type and restart actions; the exact data-folder rights; keys made by the service; 8443 listening, the admin page on loopback only; the firewall rule's profiles, port and program; upgrades refused for another key and a missing `.sig` with nothing changed; S1 to S2 with the same keys; S3 rolled back to S2; uninstall keeping the data; a reinstall reusing the keys; uninstall with `/DELETEDATA`.
+
+**Needs physical testing (server):**
+
+1. Install on the real office server PC (Windows 10/11 Pro, or Server) as a domain or local administrator; the setup's SmartScreen and "Unknown publisher" warnings as in section 4.
+2. A companion on another office PC connects through the firewall rule on the office network (private or domain profile); confirm the network profile is not *Public* (the rule deliberately does not open it).
+3. The mirror on the real second disk or share: on a share, give the computer account (`DOMAIN\SERVERPC$`) modify rights, since the virtual account acts as the computer on the network.
+4. Power settings: the server PC must not sleep during office hours (Settings > System > Power: sleep "Never" when plugged in); the service restarts after a reboot (delayed start) and after a crash.
+5. Upgrade with a real downloaded installer, and uninstall from Windows Settings with the data box left unticked.
+
+**Deviation:** the server takes update files only from the administrator running the next installer (no automatic channel).
