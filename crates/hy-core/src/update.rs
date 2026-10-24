@@ -802,8 +802,9 @@ pub enum RestoreState {
     /// not put back.
     Unchanged,
     /// The database is no longer at its name: it was set aside at this path and could not
-    /// be moved back. A marker beside it ([`incomplete_restore`]) stops the next start
-    /// from creating an empty database in its place.
+    /// be moved back. The recovery journal written before it was moved
+    /// ([`reconcile_restore`]) puts it back, or finishes the restore, at the next start;
+    /// until then nothing may open (and so create) a database at its name.
     SetAside(PathBuf),
 }
 
@@ -826,7 +827,7 @@ impl RestoreError {
     }
 }
 
-/// The file operations a restore uses (failures are injected in tests).
+/// The file operations a restore uses (failures and crashes are injected in tests).
 #[doc(hidden)]
 pub trait RestoreFs {
     /// Copy `from` to `to` and flush it to disk.
@@ -834,11 +835,48 @@ pub trait RestoreFs {
     /// # Errors
     /// An I/O error.
     fn copy(&self, from: &Path, to: &Path) -> std::io::Result<()>;
-    /// Rename `from` to `to` (same folder).
+    /// Rename `from` to `to` (same folder) and flush the folder.
     ///
     /// # Errors
     /// An I/O error.
     fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()>;
+    /// Write `bytes` to `path` durably: a temporary file is written and flushed, renamed
+    /// to `path`, and the folder flushed, so after a crash `path` is either absent or
+    /// whole.
+    ///
+    /// # Errors
+    /// An I/O error (nothing was recorded).
+    fn write_durable(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()>;
+    /// Remove `path` and flush the folder.
+    ///
+    /// # Errors
+    /// An I/O error.
+    fn remove_durable(&self, path: &Path) -> std::io::Result<()>;
+}
+
+/// Flush a folder's entries (names created, renamed or removed) to disk.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // A folder opens only with backup semantics; FlushFileBuffers needs write access.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)?
+            .sync_all()
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::File::open(dir)?.sync_all()
+    }
+}
+
+fn parent_of(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 /// The real file system.
@@ -852,7 +890,28 @@ impl RestoreFs for RealFs {
         std::fs::OpenOptions::new().write(true).open(to)?.sync_all()
     }
     fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
-        std::fs::rename(from, to)
+        std::fs::rename(from, to)?;
+        sync_dir(parent_of(to))
+    }
+    fn write_durable(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        let tmp = side_path(path, ".tmp");
+        let result = (|| {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(bytes)?;
+            f.sync_all()?;
+            drop(f);
+            std::fs::rename(&tmp, path)?;
+            sync_dir(parent_of(path))
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
+    }
+    fn remove_durable(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::remove_file(path)?;
+        sync_dir(parent_of(path))
     }
 }
 
@@ -860,39 +919,143 @@ fn side_path(db: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(format!("{}{suffix}", db.display()))
 }
 
-/// The marker left when a restore set the database aside and could not move it back.
-fn marker_path(db: &Path) -> PathBuf {
-    side_path(db, ".restore-incomplete")
+/// The recovery journal: written and flushed before the database is first moved, removed
+/// once the restore (or its undo) is complete.
+fn journal_path(db: &Path) -> PathBuf {
+    side_path(db, ".restore-journal")
 }
 
-/// If a restore set the database aside and could not move it back, where it is. The
-/// program must not open (and so create) a database at `db` while this is `Some`.
-#[must_use]
-pub fn incomplete_restore(db: &Path) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(marker_path(db)).ok()?;
-    let name = text.trim();
-    // Only a file name in the same folder is accepted.
-    if name.is_empty() || name.contains(['/', '\\']) {
+const JOURNAL_HEADER: &str = "hy-restore-journal 1";
+
+/// What [`reconcile_restore`] found and did at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reconciled {
+    /// No restore was under way.
+    Clean,
+    /// A restore had not yet moved the database: nothing changed (leftovers removed).
+    NotStarted,
+    /// A restore had completed; only its journal was left.
+    Completed,
+    /// A restore was cut short after the database was set aside: the checked copy was
+    /// put in place, as chosen.
+    RolledForward,
+    /// A restore was cut short and the copy could not be used: the database was put back
+    /// as it was.
+    PutBack,
+}
+
+/// Present, absent, or an error other than "not found" (which must not be taken as
+/// absent: on some systems a rename onto an existing name replaces it).
+fn present(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("a file of your data could not be checked ({e})")),
+    }
+}
+
+fn parse_journal(text: &str, db: &Path) -> Option<(PathBuf, PathBuf)> {
+    let mut lines = text.lines();
+    if lines.next()? != JOURNAL_HEADER {
         return None;
     }
-    db.parent().map(|d| d.join(name))
+    let mut aside = None;
+    let mut staged = None;
+    for line in lines {
+        let (k, v) = line.split_once('=')?;
+        // Only a file name in the database's own folder is accepted.
+        if v.is_empty() || v.contains(['/', '\\']) || v == "." || v == ".." {
+            return None;
+        }
+        match k {
+            "aside" => aside = Some(v.to_owned()),
+            "staged" => staged = Some(v.to_owned()),
+            _ => return None,
+        }
+    }
+    let dir = parent_of(db);
+    Some((dir.join(aside?), dir.join(staged?)))
 }
 
-/// Move a database a failed restore set aside back to its name and clear the marker.
+/// At startup, before the database is opened: finish or undo a restore that was cut
+/// short (a crash or power loss mid-restore, or a restore that could not undo itself).
+///
+/// With no journal there is nothing to do. With one, the state of the three files says
+/// how far the restore got, and it is completed (the checked copy put in place, if it
+/// is still whole) or the database put back. A journal that cannot be read, or files in
+/// a state no restore leaves, return an error: the caller must then stop **without
+/// opening the database** (opening would create an empty one).
 ///
 /// # Errors
-/// The set-aside file is missing, a database is already at `db`, or the rename failed.
-pub fn recover_incomplete_restore(db: &Path) -> std::io::Result<()> {
-    let aside = incomplete_restore(db)
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no restore marker"))?;
-    if db.exists() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "a database is already in place",
-        ));
+/// What could not be read or done; the files are left as they are.
+pub fn reconcile_restore(db: &Path) -> Result<Reconciled, String> {
+    reconcile_restore_with(&RealFs, db)
+}
+
+/// As [`reconcile_restore`] with the file operations supplied (tests).
+///
+/// # Errors
+/// As [`reconcile_restore`].
+#[doc(hidden)]
+pub fn reconcile_restore_with(fs: &dyn RestoreFs, db: &Path) -> Result<Reconciled, String> {
+    let journal = journal_path(db);
+    if !present(&journal)? {
+        // Staged copies (and a half-written record) from a restore cut short before its
+        // record was saved: nothing was moved, so they are only leftovers.
+        let prefix = format!("{}.restore-", file_name(db));
+        if let Ok(items) = std::fs::read_dir(parent_of(db)) {
+            for item in items.flatten() {
+                let name = item.file_name().to_string_lossy().into_owned();
+                if name.starts_with(&prefix) && name.ends_with(".tmp") {
+                    let _ = std::fs::remove_file(item.path());
+                }
+            }
+        }
+        return Ok(Reconciled::Clean);
     }
-    std::fs::rename(&aside, db)?;
-    std::fs::remove_file(marker_path(db))
+    let text = std::fs::read_to_string(&journal)
+        .map_err(|e| format!("the record of an unfinished data restore could not be read ({e})"))?;
+    let (aside, staged) =
+        parse_journal(&text, db).ok_or("the record of an unfinished data restore is damaged")?;
+    let outcome = match (present(db)?, present(&aside)?, present(&staged)?) {
+        // The database was never moved (or was moved back): nothing changed.
+        (true, false, s) => {
+            if s {
+                let _ = std::fs::remove_file(&staged);
+            }
+            Reconciled::NotStarted
+        }
+        // The copy is in place and the newer database kept aside: it completed.
+        (true, true, false) => Reconciled::Completed,
+        // Set aside, copy not yet in place: finish it with the checked copy if it is
+        // still whole, otherwise put the database back.
+        (false, true, true) => {
+            if validate_database(&staged).is_ok() {
+                fs.rename(&staged, db)
+                    .map_err(|e| format!("the earlier copy could not be put in place ({e})"))?;
+                Reconciled::RolledForward
+            } else {
+                fs.rename(&aside, db)
+                    .map_err(|e| format!("your data could not be put back ({e})"))?;
+                let _ = std::fs::remove_file(&staged);
+                Reconciled::PutBack
+            }
+        }
+        (false, true, false) => {
+            fs.rename(&aside, db)
+                .map_err(|e| format!("your data could not be put back ({e})"))?;
+            Reconciled::PutBack
+        }
+        (true, true, true) => {
+            return Err("an unfinished data restore left files that do not match".into());
+        }
+        (false, false, _) => {
+            return Err("an unfinished data restore left no database to put back".into());
+        }
+    };
+    // If this fails the next start finds the same finished state again.
+    let _ = fs.remove_durable(&journal);
+    Ok(outcome)
 }
 
 /// Check that `path` is a whole SQLite database with a HealthierYou schema.
@@ -914,18 +1077,21 @@ fn validate_database(path: &Path) -> Result<u32, String> {
     Ok(status.version)
 }
 
-/// Put a pre-migration copy back as the database, failure-safe:
+/// Put a pre-migration copy back as the database, failure- and crash-safe:
 ///
 /// 1. the copy is copied beside the database (`<db>.restore-<millis>.tmp`), flushed and
 ///    checked (whole, readable schema) before anything else changes;
 /// 2. the newer database is folded into one file (its write-ahead log checkpointed);
-/// 3. it is renamed to `<db>.newer-<millis>.bak` (never deleted);
-/// 4. the checked copy is renamed into place.
+/// 3. a recovery journal naming both files is written and flushed (file and folder);
+///    if it cannot be, nothing changes;
+/// 4. the newer database is renamed to `<db>.newer-<millis>.bak` (never deleted);
+/// 5. the checked copy is renamed into place;
+/// 6. the journal is removed.
 ///
-/// If step 4 fails, the newer database is moved back. Only if that fails too is the
-/// database left aside, with a marker so the next start does not create an empty one
-/// ([`incomplete_restore`]). The pre-migration copy itself is never changed. Returns
-/// where the newer database was set aside.
+/// If step 5 fails, the newer database is moved back. A crash at any point, or an undo
+/// that fails, leaves the journal, and [`reconcile_restore`] at the next start completes
+/// or undoes the restore before anything opens the database. The pre-migration copy
+/// itself is never changed. Returns where the newer database was set aside.
 ///
 /// # Errors
 /// [`RestoreError`], which says where the data stands.
@@ -935,6 +1101,12 @@ pub fn restore_pre_migration_copy(
     now_ms: i64,
 ) -> Result<PathBuf, RestoreError> {
     restore_pre_migration_copy_with(&RealFs, db, copy, now_ms)
+}
+
+fn file_name(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// As [`restore_pre_migration_copy`] with the file operations supplied (tests).
@@ -948,6 +1120,16 @@ pub fn restore_pre_migration_copy_with(
     copy: &Path,
     now_ms: i64,
 ) -> Result<PathBuf, RestoreError> {
+    let journal = journal_path(db);
+    match present(&journal) {
+        Ok(false) => {}
+        Ok(true) => {
+            return Err(RestoreError::unchanged(
+                "an earlier data restore is unfinished; restart HealthierYou first",
+            ));
+        }
+        Err(e) => return Err(RestoreError::unchanged(e)),
+    }
     // 1. Stage and check the replacement; nothing has changed yet.
     let staged = side_path(db, &format!(".restore-{now_ms}.tmp"));
     let _ = std::fs::remove_file(&staged);
@@ -987,10 +1169,24 @@ pub fn restore_pre_migration_copy_with(
             "the current data is still in use by another program",
         ));
     }
-    // 3. Set the newer database aside.
+    // 3. Record the intent durably before anything is moved.
     let aside = side_path(db, &format!(".newer-{now_ms}.bak"));
+    let record = format!(
+        "{JOURNAL_HEADER}\naside={}\nstaged={}\n",
+        file_name(&aside),
+        file_name(&staged)
+    );
+    if let Err(e) = fs.write_durable(&journal, record.as_bytes()) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(RestoreError::unchanged(format!(
+            "the recovery record could not be saved, so nothing was changed ({e})"
+        )));
+    }
+    // 4. Set the newer database aside.
     if let Err(e) = fs.rename(db, &aside) {
         let _ = std::fs::remove_file(&staged);
+        // If this fails the next start sees the database in place and clears it.
+        let _ = fs.remove_durable(&journal);
         return Err(RestoreError::unchanged(format!(
             "the current data could not be set aside ({e})"
         )));
@@ -998,35 +1194,29 @@ pub fn restore_pre_migration_copy_with(
     for ext in ["-wal", "-shm"] {
         let _ = std::fs::remove_file(side_path(db, ext));
     }
-    // 4. Swap the checked copy in.
+    // 5. Swap the checked copy in.
     match fs.rename(&staged, db) {
-        Ok(()) => Ok(aside),
-        Err(e) => {
-            let _ = std::fs::remove_file(&staged);
-            match fs.rename(&aside, db) {
-                Ok(()) => Err(RestoreError::unchanged(format!(
-                    "the earlier copy could not be put in place ({e}); the current data was put back"
-                ))),
-                Err(back) => {
-                    let name = aside
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let marked = std::fs::write(marker_path(db), &name).is_ok();
-                    Err(RestoreError {
-                        reason: format!(
-                            "the earlier copy could not be put in place ({e}) and the current data could not be moved back ({back}){}",
-                            if marked {
-                                ""
-                            } else {
-                                "; the safety marker could not be written either"
-                            }
-                        ),
-                        state: RestoreState::SetAside(aside),
-                    })
-                }
-            }
+        Ok(()) => {
+            // 6. If this fails the next start sees the restore completed and clears it.
+            let _ = fs.remove_durable(&journal);
+            Ok(aside)
         }
+        Err(e) => match fs.rename(&aside, db) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&staged);
+                let _ = fs.remove_durable(&journal);
+                Err(RestoreError::unchanged(format!(
+                    "the earlier copy could not be put in place ({e}); the current data was put back"
+                )))
+            }
+            // The journal stays: the next start completes or undoes this.
+            Err(back) => Err(RestoreError {
+                reason: format!(
+                    "the earlier copy could not be put in place ({e}) and the current data could not be moved back ({back}); HealthierYou finishes this at its next start"
+                ),
+                state: RestoreState::SetAside(aside),
+            }),
+        },
     }
 }
 
@@ -1565,10 +1755,25 @@ mod tests {
 
     type RenameRule = Box<dyn Fn(&Path, &Path) -> bool>;
 
-    /// File operations that fail on request.
+    /// File operations that fail, or "crash" (panic before the operation, so no cleanup
+    /// runs), on request. Operations are counted: the journal write, the two renames and
+    /// the journal removal.
     struct Faulty {
         partial_copy: bool,
         fail_rename: RenameRule,
+        fail_journal_write: bool,
+        crash_before_op: Option<usize>,
+        ops: std::cell::Cell<usize>,
+    }
+
+    impl Faulty {
+        fn step(&self) {
+            let n = self.ops.get();
+            self.ops.set(n + 1);
+            if self.crash_before_op == Some(n) {
+                panic!("simulated crash before operation {n}");
+            }
+        }
     }
 
     impl RestoreFs for Faulty {
@@ -1582,18 +1787,44 @@ mod tests {
             RealFs.copy(from, to)
         }
         fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            self.step();
             if (self.fail_rename)(from, to) {
                 return Err(std::io::Error::other("access denied"));
             }
             RealFs.rename(from, to)
         }
+        fn write_durable(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+            self.step();
+            if self.fail_journal_write {
+                return Err(std::io::Error::other("disk full"));
+            }
+            RealFs.write_durable(path, bytes)
+        }
+        fn remove_durable(&self, path: &Path) -> std::io::Result<()> {
+            self.step();
+            RealFs.remove_durable(path)
+        }
+    }
+
+    fn faulty() -> Faulty {
+        Faulty {
+            partial_copy: false,
+            fail_rename: Box::new(|_, _| false),
+            fail_journal_write: false,
+            crash_before_op: None,
+            ops: std::cell::Cell::new(0),
+        }
     }
 
     fn renames_fail_when(f: impl Fn(&Path, &Path) -> bool + 'static) -> Faulty {
         Faulty {
-            partial_copy: false,
             fail_rename: Box::new(f),
+            ..faulty()
         }
+    }
+
+    fn journal_exists(db: &Path) -> bool {
+        journal_path(db).exists()
     }
 
     #[test]
@@ -1609,7 +1840,7 @@ mod tests {
             "{:?}",
             leftovers(dir.path())
         );
-        assert!(incomplete_restore(&db).is_none());
+        assert_eq!(reconcile_restore(&db), Ok(Reconciled::Clean));
     }
 
     #[test]
@@ -1618,7 +1849,7 @@ mod tests {
         let (db, copy) = newer_db_with_copy(dir.path());
         let fs = Faulty {
             partial_copy: true,
-            fail_rename: Box::new(|_, _| false),
+            ..faulty()
         };
         let err = restore_pre_migration_copy_with(&fs, &db, &copy, 2).unwrap_err();
         assert_eq!(err.state, RestoreState::Unchanged);
@@ -1637,6 +1868,22 @@ mod tests {
         let err = restore_pre_migration_copy(&db, &copy, 3).unwrap_err();
         assert_eq!(err.state, RestoreState::Unchanged);
         assert!(has_newer(&db));
+        assert!(leftovers(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_recovery_record_that_cannot_be_saved_stops_before_anything_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, copy) = newer_db_with_copy(dir.path());
+        let fs = Faulty {
+            fail_journal_write: true,
+            ..faulty()
+        };
+        let err = restore_pre_migration_copy_with(&fs, &db, &copy, 4).unwrap_err();
+        assert_eq!(err.state, RestoreState::Unchanged);
+        assert!(err.reason.contains("recovery record"), "{}", err.reason);
+        assert!(has_newer(&db));
+        assert!(!journal_exists(&db));
         assert!(leftovers(dir.path()).is_empty());
     }
 
@@ -1662,11 +1909,11 @@ mod tests {
         assert!(err.reason.contains("put back"));
         assert!(has_newer(&db));
         assert!(leftovers(dir.path()).is_empty());
-        assert!(incomplete_restore(&db).is_none());
+        assert_eq!(reconcile_restore(&db), Ok(Reconciled::Clean));
     }
 
     #[test]
-    fn a_swap_that_cannot_be_undone_leaves_a_marker_and_never_an_empty_database() {
+    fn a_swap_that_cannot_be_undone_is_finished_at_the_next_start() {
         let dir = tempfile::tempdir().unwrap();
         let (db, copy) = newer_db_with_copy(dir.path());
         let live = db.clone();
@@ -1681,12 +1928,123 @@ mod tests {
             has_newer(&aside),
             "the current data is whole where it was set aside"
         );
-        // The next start sees the marker (and must not create a database), and can
-        // move the data back.
-        assert_eq!(incomplete_restore(&db), Some(aside.clone()));
-        recover_incomplete_restore(&db).unwrap();
+        assert!(journal_exists(&db), "the recovery record is in place");
+        // The next start (a fresh call, real file system) finishes the chosen restore
+        // before anything opens the database.
+        assert_eq!(reconcile_restore(&db), Ok(Reconciled::RolledForward));
+        assert!(db.exists() && !has_newer(&db));
+        assert!(has_newer(&aside), "the newer data is kept");
+        assert!(!journal_exists(&db));
+    }
+
+    /// Restore with a crash before operation `op` (0 journal written, 1 data set aside,
+    /// 2 copy swapped in, 3 journal removed), then a fresh start.
+    fn crash_then_start(op: usize) -> (tempfile::TempDir, PathBuf, Result<Reconciled, String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, copy) = newer_db_with_copy(dir.path());
+        let fs = Faulty {
+            crash_before_op: Some(op),
+            ..faulty()
+        };
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = restore_pre_migration_copy_with(&fs, &db, &copy, 7);
+        }));
+        assert!(crashed.is_err(), "the crash happened before operation {op}");
+        let started = reconcile_restore(&db);
+        (dir, db, started)
+    }
+
+    #[test]
+    fn a_crash_at_every_swap_boundary_is_reconciled_at_the_next_start() {
+        // Before the journal: nothing moved; leftovers cleared.
+        let (dir, db, r) = crash_then_start(0);
+        assert_eq!(r, Ok(Reconciled::Clean));
         assert!(has_newer(&db));
-        assert!(incomplete_restore(&db).is_none());
-        assert!(!aside.exists());
+        assert!(
+            leftovers(dir.path()).is_empty(),
+            "{:?}",
+            leftovers(dir.path())
+        );
+        // Journal written, data not yet moved: nothing changed.
+        let (dir, db, r) = crash_then_start(1);
+        assert_eq!(r, Ok(Reconciled::NotStarted));
+        assert!(has_newer(&db));
+        assert!(
+            leftovers(dir.path()).is_empty(),
+            "{:?}",
+            leftovers(dir.path())
+        );
+        // Data set aside, copy not in place (no database at its name): finished with
+        // the checked copy; the newer data kept.
+        let (dir, db, r) = crash_then_start(2);
+        assert_eq!(r, Ok(Reconciled::RolledForward));
+        assert!(db.exists() && !has_newer(&db));
+        let kept = leftovers(dir.path());
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert!(has_newer(&dir.path().join(&kept[0])));
+        // Copy in place, journal not yet removed: completed.
+        let (dir, db, r) = crash_then_start(3);
+        assert_eq!(r, Ok(Reconciled::Completed));
+        assert!(db.exists() && !has_newer(&db));
+        assert_eq!(leftovers(dir.path()).len(), 1);
+        assert!(!journal_exists(&db));
+    }
+
+    #[test]
+    fn a_crash_with_a_damaged_staged_copy_puts_the_data_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, copy) = newer_db_with_copy(dir.path());
+        let fs = Faulty {
+            crash_before_op: Some(2),
+            ..faulty()
+        };
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = restore_pre_migration_copy_with(&fs, &db, &copy, 8);
+        }));
+        let staged = side_path(&db, ".restore-8.tmp");
+        let bytes = std::fs::read(&staged).unwrap();
+        std::fs::write(&staged, &bytes[..bytes.len() / 3]).unwrap();
+        assert_eq!(reconcile_restore(&db), Ok(Reconciled::PutBack));
+        assert!(has_newer(&db));
+        assert!(
+            leftovers(dir.path()).is_empty(),
+            "{:?}",
+            leftovers(dir.path())
+        );
+    }
+
+    #[test]
+    fn an_unreadable_recovery_record_stops_the_start_without_creating_a_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, copy) = newer_db_with_copy(dir.path());
+        let fs = Faulty {
+            crash_before_op: Some(2),
+            ..faulty()
+        };
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = restore_pre_migration_copy_with(&fs, &db, &copy, 9);
+        }));
+        assert!(!db.exists());
+        // A damaged record.
+        std::fs::write(journal_path(&db), "garbage").unwrap();
+        assert!(reconcile_restore(&db).is_err());
+        assert!(!db.exists(), "no database was created");
+        // A record that cannot be read at all.
+        std::fs::remove_file(journal_path(&db)).unwrap();
+        std::fs::create_dir(journal_path(&db)).unwrap();
+        assert!(reconcile_restore(&db).is_err());
+        assert!(!db.exists(), "no database was created");
+        // A record naming files outside the folder.
+        std::fs::remove_dir(journal_path(&db)).unwrap();
+        std::fs::write(
+            journal_path(&db),
+            format!("{JOURNAL_HEADER}\naside=../x\nstaged=y\n"),
+        )
+        .unwrap();
+        assert!(reconcile_restore(&db).is_err());
+        assert!(!db.exists());
+        // A new restore is refused while a record is unfinished.
+        let err = restore_pre_migration_copy(&db, &copy, 10).unwrap_err();
+        assert_eq!(err.state, RestoreState::Unchanged);
     }
 }

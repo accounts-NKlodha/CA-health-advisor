@@ -88,8 +88,9 @@ fn setup(
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    // A data restore that could not be finished set the database aside: never open (and
-    // so create) an empty one in its place.
+    // A data restore cut short (a crash, or an undo that failed) is finished or undone
+    // from its recovery record first; if that cannot be done, stop without opening (and
+    // so creating) an empty database.
     if selftest.is_none() && !update::settle_incomplete_restore(&path) {
         std::process::exit(1);
     }

@@ -281,20 +281,27 @@ impl Updater {
     }
 
     /// An attempt left with no helper (the PC restarted mid-update, or the helper was
-    /// ended) is settled once, so it never blocks later updates:
+    /// ended) is settled, so it never blocks later updates:
     /// - while a helper runs, it is the helper's to finish;
     /// - if the version now running is the attempt's target and the installer had run
-    ///   (installing or waiting for the start), the update took effect: it is recorded as
-    ///   updated and the previous-version copy is cleared;
+    ///   (installing or waiting for the start), the update took effect only once this
+    ///   version has confirmed its start (its page loaded, [`Self::page_ready`]): only
+    ///   then is it recorded as updated and the previous-version copy cleared. Merely
+    ///   running as the target (a UI that fails before its page loads) settles nothing,
+    ///   so going back with the kept copy stays possible;
     /// - otherwise it is recorded as not finished, with the version that is running.
     ///
     /// A just-staged attempt is left alone for a short grace period (its helper may still
     /// be starting).
     fn settle_stale_attempt(&self) {
-        self.settle_attempt(helper_running());
+        let started = *self
+            .confirmed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.settle_attempt(helper_running(), started);
     }
 
-    fn settle_attempt(&self, helper_alive: bool) {
+    fn settle_attempt(&self, helper_alive: bool, start_confirmed: bool) {
         let mut st = self.state();
         let Some(a) = st.attempt.clone() else { return };
         if helper_alive {
@@ -308,6 +315,10 @@ impl Updater {
         }
         let took_effect =
             a.to == self.version && matches!(a.phase, Phase::Installing | Phase::AwaitingStart);
+        if took_effect && !start_confirmed {
+            // Settled when (if) this version's page loads.
+            return;
+        }
         if took_effect {
             st.finish(
                 OutcomeKind::Updated,
@@ -342,16 +353,28 @@ impl Updater {
         }
     }
 
-    /// The pet page loaded: if the helper is waiting for this version, confirm it.
+    /// The pet page loaded: this version's start is confirmed. If the helper is waiting
+    /// for it, it gets the confirmation; if the helper is gone (an attempt left behind by
+    /// a restart), the attempt is settled here.
     pub fn page_ready(&self) {
-        let mut done = self
-            .confirmed
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if *done {
+        self.page_ready_with(helper_running());
+    }
+
+    fn page_ready_with(&self, helper_alive: bool) {
+        {
+            let mut done = self
+                .confirmed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if *done {
+                return;
+            }
+            *done = true;
+        }
+        if !helper_alive {
+            self.settle_attempt(false, true);
             return;
         }
-        *done = true;
         let st = self.state();
         if let Some(a) = &st.attempt
             && a.phase == Phase::AwaitingStart
@@ -998,7 +1021,7 @@ pub fn offer_data_rollback(db: &Path, version: Version) -> bool {
                     e.reason
                 ),
                 update::RestoreState::SetAside(aside) => format!(
-                    "The earlier copy could not be put back: {}.\n\nYour current data is safe in the data folder as \"{}\". HealthierYou will not start with empty data: next time it starts it offers to put that file back.",
+                    "The earlier copy could not be put back: {}.\n\nYour current data is safe in the data folder as \"{}\". HealthierYou will not start with empty data: next time it starts it finishes going back, or puts that file back, before it opens anything.",
                     e.reason,
                     aside
                         .file_name()
@@ -1016,34 +1039,31 @@ pub fn offer_data_rollback(db: &Path, version: Version) -> bool {
 /// move it back, offer to put it back. Returns false if the app must close (it then
 /// never opens, and so never creates, an empty database).
 pub fn settle_incomplete_restore(db: &Path) -> bool {
-    let Some(aside) = update::incomplete_restore(db) else {
-        return true;
-    };
-    let name = aside
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    if db.exists() {
-        // A database was put in place by hand: the marker is out of date.
-        let _ = std::fs::remove_file(PathBuf::from(format!(
-            "{}.restore-incomplete",
-            db.display()
-        )));
-        return true;
-    }
-    let question = format!(
-        "Last time HealthierYou could not finish going back to an earlier copy of your data. Your data is safe in the data folder as \"{name}\".\n\nPut it back now? Choose No to close without changing anything."
-    );
-    if !ask_user("HealthierYou: your data", &question) {
-        return false;
-    }
-    match update::recover_incomplete_restore(db) {
-        Ok(()) => true,
+    match update::reconcile_restore(db) {
+        Ok(
+            update::Reconciled::Clean
+            | update::Reconciled::NotStarted
+            | update::Reconciled::Completed,
+        ) => true,
+        Ok(update::Reconciled::RolledForward) => {
+            tell_user(
+                "HealthierYou: your data",
+                "Last time HealthierYou was stopped while it went back to an earlier copy of your data. It has finished going back now. The newer data is kept in the data folder; it is not deleted.",
+            );
+            true
+        }
+        Ok(update::Reconciled::PutBack) => {
+            tell_user(
+                "HealthierYou: your data",
+                "Last time HealthierYou was stopped while it went back to an earlier copy of your data, and that copy could not be used. Your data was put back as it was.",
+            );
+            true
+        }
         Err(e) => {
             tell_user(
                 "HealthierYou",
                 &format!(
-                    "Your data could not be put back ({e}). It is still safe as \"{name}\". HealthierYou will close."
+                    "HealthierYou could not finish going back to an earlier copy of your data ({e}). Nothing was changed and no new data was created; your data files are in the data folder. HealthierYou will close. Ask for help before starting it again."
                 ),
             );
             false
@@ -1145,7 +1165,8 @@ mod tests {
     #[test]
     fn a_restart_after_the_install_but_before_the_helper_finished_is_settled_as_updated() {
         // The installer ran, the new version started and confirmed, then the PC restarted
-        // (or the helper was ended) before the helper recorded the outcome.
+        // (or the helper was ended) before the helper recorded the outcome. The next start
+        // of the new version settles it once its page loads.
         let (root, dirs) = temp_dirs("restart");
         seed(&dirs, Phase::AwaitingStart, V0, V1, Duration::from_secs(90));
         Confirmation {
@@ -1156,7 +1177,7 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(dirs.previous().join("program")).unwrap();
         let u = Updater::new(V1, dirs.clone());
-        u.settle_attempt(false);
+        u.page_ready_with(false);
         let st = UpdateState::load(&dirs.updates).unwrap();
         assert!(st.attempt.is_none(), "the attempt no longer blocks updates");
         let last = st.last.unwrap();
@@ -1182,10 +1203,38 @@ mod tests {
     fn an_install_cut_short_after_the_installer_ran_is_settled_by_the_running_version() {
         let (root, dirs) = temp_dirs("installing");
         seed(&dirs, Phase::Installing, V0, V1, Duration::from_secs(10));
-        Updater::new(V1, dirs.clone()).settle_attempt(false);
+        Updater::new(V1, dirs.clone()).page_ready_with(false);
         let st = UpdateState::load(&dirs.updates).unwrap();
         assert!(st.attempt.is_none());
         assert_eq!(st.last.unwrap().kind, OutcomeKind::Updated);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn running_as_the_target_is_not_success_until_the_page_loads() {
+        // An orphaned attempt whose new version starts but whose UI fails before its page
+        // loads: nothing is recorded as updated and the previous-version copy stays.
+        let (root, dirs) = temp_dirs("nopage");
+        seed(&dirs, Phase::AwaitingStart, V0, V1, Duration::from_secs(90));
+        std::fs::create_dir_all(dirs.previous().join("program")).unwrap();
+        let u = Updater::new(V1, dirs.clone());
+        u.settle_attempt(false, false);
+        u.settle_stale_attempt();
+        let st = UpdateState::load(&dirs.updates).unwrap();
+        assert!(st.attempt.is_some(), "still waiting for a confirmed start");
+        assert!(st.last.is_none());
+        assert!(
+            dirs.previous().join("program").exists(),
+            "the copy to go back to is kept"
+        );
+        // A fresh start of the same version whose page does load settles it.
+        let again = Updater::new(V1, dirs.clone());
+        assert!(UpdateState::load(&dirs.updates).unwrap().attempt.is_some());
+        again.page_ready_with(false);
+        let st = UpdateState::load(&dirs.updates).unwrap();
+        assert!(st.attempt.is_none());
+        assert_eq!(st.last.unwrap().kind, OutcomeKind::Updated);
+        assert!(!dirs.previous().exists());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1194,7 +1243,7 @@ mod tests {
         let (root, dirs) = temp_dirs("old");
         seed(&dirs, Phase::AwaitingStart, V0, V1, Duration::from_secs(10));
         std::fs::create_dir_all(dirs.previous().join("program")).unwrap();
-        Updater::new(V0, dirs.clone()).settle_attempt(false);
+        Updater::new(V0, dirs.clone()).settle_attempt(false, false);
         let st = UpdateState::load(&dirs.updates).unwrap();
         assert!(st.attempt.is_none());
         let last = st.last.unwrap();
@@ -1209,10 +1258,10 @@ mod tests {
         let (root, dirs) = temp_dirs("live");
         let u = Updater::new(V1, dirs.clone());
         seed(&dirs, Phase::AwaitingStart, V0, V1, Duration::from_secs(10));
-        u.settle_attempt(true);
+        u.settle_attempt(true, true);
         assert!(UpdateState::load(&dirs.updates).unwrap().attempt.is_some());
         seed(&dirs, Phase::Staged, V0, V1, Duration::from_secs(5));
-        u.settle_attempt(false);
+        u.settle_attempt(false, true);
         assert!(UpdateState::load(&dirs.updates).unwrap().attempt.is_some());
         // An old staged attempt whose helper never ran is settled.
         seed(
@@ -1222,7 +1271,7 @@ mod tests {
             V1,
             STAGED_GRACE + Duration::from_secs(1),
         );
-        u.settle_attempt(false);
+        u.settle_attempt(false, false);
         let st = UpdateState::load(&dirs.updates).unwrap();
         assert!(st.attempt.is_none());
         assert_eq!(st.last.unwrap().kind, OutcomeKind::Failed);
