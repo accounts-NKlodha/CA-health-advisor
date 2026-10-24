@@ -21,6 +21,7 @@ chrono-tz.workspace = true
 chrono.workspace = true
 data-encoding.workspace = true
 getrandom.workspace = true
+minisign-verify.workspace = true
 reqwest = { workspace = true, optional = true }
 rusqlite.workspace = true
 rustls = { workspace = true, optional = true }
