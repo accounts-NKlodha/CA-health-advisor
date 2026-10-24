@@ -1525,7 +1525,10 @@ impl Engine {
                     });
                 }
                 self.s.pause = None;
+                // A Pomodoro replaces an exercise: the movement guide and a meditation
+                // pause stop (recorded as stopped) before its timer starts.
                 self.interrupt_guide(ctx, out);
+                self.interrupt_meditation(ctx, out);
                 self.s.exercise_since = None;
                 self.s.pomodoro = Some(Pomodoro {
                     work_ms: ms(work),
@@ -1822,7 +1825,9 @@ impl Engine {
                 None => self.prompt_blocked(ctx),
             }
             || (p.is_recovery_card()
-                && self.s.now.saturating_sub(self.s.prompt_since) >= ms(CARD_CLOSES_AFTER));
+                && self.s.now.saturating_sub(self.s.prompt_since) >= ms(CARD_CLOSES_AFTER))
+            // The meditation invitation keeps to work hours (the check-in may run late).
+            || (p == Prompt::MeditationInvite && self.off_hours(ctx));
         if withdraw {
             self.clear_prompt();
             out.significant = true;

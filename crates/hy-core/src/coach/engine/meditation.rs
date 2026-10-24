@@ -152,6 +152,14 @@ impl Engine {
                 if !MEDITATION_MINUTES.contains(&minutes) {
                     return Invalid("choose 2, 5 or 10 minutes");
                 }
+                // Revalidate against the holds now in force (work may have ended, or a
+                // meeting begun, since the invitation opened): a pause starts only when
+                // the invitation could open.
+                if self.prompt_blocked(ctx) || self.off_hours(ctx) || !self.visible(ctx) {
+                    self.clear_prompt();
+                    out.significant = true;
+                    return Ignored("the meditation invitation is no longer open");
+                }
                 self.clear_prompt();
                 self.s.meditation.seq += 1;
                 let id = self.meditation_id(self.s.meditation.seq);

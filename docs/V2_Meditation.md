@@ -12,8 +12,10 @@ review** (like the movement routines), and every meditation screen says so.
   It is shown at most once a day, only when no card would be held back (not during a
   meeting, presentation, focus, Pomodoro, exercise, pause, lock or away), and after the
   reminders' calm gap. If the time passes during a hold, it comes when the hold ends, the
-  same day. Unanswered, it closes quietly after 10 minutes. It is never replayed and
-  never carried to the next day.
+  same day. Unanswered, it closes quietly after 10 minutes. It is withdrawn when work
+  hours end or a hold begins, and a length clicked after that starts nothing (a click is
+  checked against the holds in force). It is never replayed and never carried to the
+  next day.
 - **The pause:** five short text parts of equal length (the chosen length divided by
   five), one at a time, with a part counter, **Next** (**Finish** on the last part),
   **Pause** or **Resume**, **Stop**, and a link to the other version: breath-focused, or
@@ -21,8 +23,8 @@ review** (like the movement routines), and every meditation screen says so.
   claims. While it runs it is the only bubble: reminders and cards wait (an exercise).
 - **End:** "Done. Back to work whenever you are ready." closes after a minute or on OK.
   Stop, the bubble's close button, any hold that starts (lock, sleep, coaching paused,
-  focus, a presentation, a meeting, the end of work hours) and the app closing end it as
-  stopped.
+  focus, a presentation, a meeting, the end of work hours), starting a Pomodoro from the
+  pet menu (as with the movement guide) and the app closing end it as stopped.
 
 ## What is recorded
 
@@ -46,11 +48,13 @@ existing `events` table, so no migration is needed.
 
 ## Tests
 
-- `hy-core` `coach_engine` (10 meditation traces): off until set; once a day with Not
+- `hy-core` `coach_engine` (13 meditation traces): off until set; once a day with Not
   today and the next day; never starts by itself and closes quietly; meetings, focus and
   a time after work hours; the five parts time out and Done is recorded; Next, Pause,
   Resume, Switch and Stop; Finish and OK; stopped by a lock, a meeting, the close button
-  and a restart; a pause running at the end of work hours stops then; the
+  and a restart; a pause running at the end of work hours stops then; an invitation
+  showing when work ends is withdrawn and a later click starts nothing, also within the
+  same step; a meeting refuses Start; a Pomodoro started from the menu stops the pause; the
   state saves and loads (and loads without the field).
 - `hy-core` unit tests: the content (five short parts, no breath in the eyes-open
   version), the setting (off by default, whole minutes), the event's rules, and the
@@ -62,8 +66,10 @@ existing `events` table, so no migration is needed.
 
 ## Needs physical testing
 
-None beyond the general V1 checks: the pause is text on the pet's bubble and is covered
-by the tests above. The content review is a release-checklist item.
+In integrated UAT on the office PCs: the invitation and pause cards' readability (text
+size at 100 to 200% scaling, light and dark backgrounds, the part counter), and
+accessibility (keyboard-only use of every button, Narrator reading the title, lines,
+counter and buttons, reduced motion). The content review is a release-checklist item.
 
 ## Decisions to confirm
 

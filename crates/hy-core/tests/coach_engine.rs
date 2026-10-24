@@ -5029,3 +5029,76 @@ fn meditation_pause_stops_at_the_end_of_work_hours() {
         vec![(10, MeditationVersion::Breath, MeditationOutcome::Stopped, 3)]
     );
 }
+
+#[test]
+fn meditation_invitation_showing_when_work_ends_is_withdrawn_and_cannot_start() {
+    // Work ends at 18:30; the invitation opens at 18:29.
+    let mut h = meditation_harness(18, 28, Some(hm(18, 29)));
+    h.wait_until(mins(2), meditation_invited);
+    assert_eq!(h.local(), hm(18, 29));
+    // At the end of work hours it is withdrawn ...
+    h.wait_until(mins(2), |v| !meditation_invited(v));
+    assert!(h.local() <= hm(18, 30), "withdrawn at {}", h.local());
+    // ... and 5 minutes clicked at 18:31 starts nothing.
+    h.wait(mins(1));
+    assert_eq!(
+        h.med(MeditationAction::Start(5)),
+        InputOutcome::Ignored("no meditation invitation open")
+    );
+    assert!(meditation(h.view()).is_none());
+    assert!(h.meditation_sessions().is_empty());
+
+    // A click that arrives in the same step that crosses the boundary is revalidated.
+    let mut h = meditation_harness(18, 28, Some(hm(18, 29)));
+    h.wait_until(mins(2), meditation_invited);
+    let out = h.step(mins(2), Input::Meditation(MeditationAction::Start(5)));
+    assert!(
+        matches!(out.outcome, InputOutcome::Ignored(_)),
+        "{:?}",
+        out.outcome
+    );
+    assert!(meditation(h.view()).is_none());
+    assert!(!meditation_invited(h.view()));
+    assert!(h.meditation_sessions().is_empty());
+}
+
+#[test]
+fn meditation_invitation_start_is_refused_once_a_meeting_begins() {
+    let mut h = meditation_harness(14, 59, Some(hm(15, 0)));
+    h.wait_until(mins(2), meditation_invited);
+    h.input(Input::SetMeeting(true));
+    assert!(!meditation_invited(h.view()));
+    assert!(matches!(
+        h.med(MeditationAction::Start(2)),
+        InputOutcome::Ignored(_)
+    ));
+    assert!(h.meditation_sessions().is_empty());
+}
+
+#[test]
+fn starting_a_pomodoro_from_the_menu_stops_a_running_meditation_pause() {
+    let mut h = meditation_harness(14, 59, Some(hm(15, 0)));
+    h.wait_until(mins(2), meditation_invited);
+    h.med(MeditationAction::Start(5));
+    h.med(MeditationAction::Next);
+    let out = h.input(Input::StartPomodoro {
+        preset: PomodoroPreset::Classic,
+        replace_focus: false,
+        resume_coaching: false,
+    });
+    assert_eq!(out.outcome, InputOutcome::Applied);
+    // Like the movement guide: the pause stops (recorded) before the timer starts.
+    assert!(meditation(h.view()).is_none());
+    assert_eq!(
+        h.meditation_sessions(),
+        vec![(5, MeditationVersion::Breath, MeditationOutcome::Stopped, 2)]
+    );
+    assert!(h.view().pomodoro.is_some());
+    // Nothing of the pause is left running.
+    assert_eq!(
+        h.med(MeditationAction::Next),
+        InputOutcome::Ignored("no meditation pause running")
+    );
+    h.wait(mins(10));
+    assert_eq!(h.meditation_sessions().len(), 1);
+}
