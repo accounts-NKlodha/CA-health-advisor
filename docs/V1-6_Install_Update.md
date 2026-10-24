@@ -41,15 +41,16 @@ The process is in Settings > App & updates > **Choose update file...** (or on th
    - starts the old version.
 
    App & updates then says "The update to X did not start, so HealthierYou went back to Y". The personal data is not touched by an update or a rollback.
-5. **Data.** Before a schema migration, the store keeps a copy of the database (pre-migration copy, V1-0). If an older version finds a newer database after going back, it offers to restore that copy. The restore is failure-safe:
+5. **Data.** Before a schema migration, the store keeps a copy of the database (pre-migration copy, V1-0). If an older version finds a newer database after going back, it offers to restore that copy. The restore is failure- and crash-safe:
    - the copy is copied beside the database, flushed and checked (whole, with a readable schema) before anything else changes;
-   - the newer database is folded into one file and renamed to `hy.db.newer-<time>.bak` (never deleted);
-   - the checked copy is renamed into place.
+   - the newer database is folded into one file;
+   - a recovery record (`hy.db.restore-journal`, naming both files) is written, flushed and its folder flushed **before anything is moved**; if it cannot be saved, nothing changes;
+   - the newer database is renamed to `hy.db.newer-<time>.bak` (never deleted), then the checked copy is renamed into place, then the record is removed.
 
-   If the copy cannot be read, the copy fails part way, or the copy is damaged, nothing changes. If the final rename fails, the newer database is moved back. Only if that fails too is the database left set aside, with a marker beside it; the next start then offers to put it back and never opens (so never creates) an empty database. The message says which of these happened.
+   If the copy cannot be read, fails part way or is damaged, nothing changes. If the final rename fails, the newer database is moved back. **At every start, before the database is opened,** a recovery record left by a crash or power loss at any point, or by an undo that failed, is reconciled from the state of the files: not yet moved (nothing changed), set aside but not swapped (the checked copy is put in place if still whole, otherwise the newer database is put back), or completed (the record is cleared). A record that cannot be read, or files in a state no restore leaves, stop the companion with a message **without opening, and so without creating, a database**. The message says which of these happened.
 
 **An attempt cut short.** A helper holds a named mutex while it runs. When the companion starts with an attempt recorded and no helper running:
-- if it is the attempt's target version and the installer had run (the PC restarted, or the helper was ended, after the install), the update is recorded as done, the previous-version copy is cleared and going back stays possible;
+- if it is the attempt's target version and the installer had run (the PC restarted, or the helper was ended, after the install), the update is recorded as done only once that version **confirms its start** (its pet page loads, the same confirmation the helper waits for); only then is the previous-version copy cleared, and going back stays possible. Merely starting as the target settles nothing: if its window fails before the page loads, the attempt and the copy to go back to are kept;
 - otherwise the attempt is recorded once as not finished, with the version that is running.
 
 A just-staged attempt is left alone for two minutes (its helper may still be starting). So an orphaned attempt never blocks later updates. The helper's log is `updates\update.log`.
