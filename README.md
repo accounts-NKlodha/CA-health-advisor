@@ -13,6 +13,7 @@ User target: V1, V2 and V3 by 5 November 2026. Codex plans/reviews; Claude devel
 - [Wearable feasibility](docs/Wearable_Feasibility.md)
 - [Delivery and coordination](docs/Delivery_and_Claude_Protocol.md)
 - [Current status](docs/STATUS.md)
+- [Install, update and uninstall (V1-6)](docs/V1-6_Install_Update.md)
 
 Documents are draft proposals where labelled. Neither a prototype nor a specification is proof of integration feasibility. No existing app, installer or wearable integration is claimed.
 
@@ -40,4 +41,4 @@ cargo test --workspace --exclude hy-companion --locked
 (cd apps/companion/ui && npm ci && npm run build)
 ```
 
-The companion builds and is tested on the Windows CI job (`.github/workflows/ci.yml`).
+The companion builds and is tested on the Windows CI job (`.github/workflows/ci.yml`), which also builds the per-user installers and runs the install, update, rollback and uninstall test (`scripts/windows/Test-CompanionLifecycle.ps1`). Release signing and the checks that need a real office PC are in `docs/V1-6_Install_Update.md`.

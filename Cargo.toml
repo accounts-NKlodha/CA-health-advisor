@@ -27,6 +27,9 @@ argon2 = { version = "0.5.3", default-features = false, features = ["alloc"] }
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock", "serde"] }
 chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
 getrandom = "0.4.3"
+# V1-6 signed update files: minisign signature checks (the format the Tauri CLI's `signer`
+# writes). Pure Rust, no dependencies; the same verifier Tauri's own updater uses.
+minisign-verify = "0.2.5"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

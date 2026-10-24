@@ -1,7 +1,8 @@
 //! IPC commands. Each window may call only the commands its capability file grants
 //! (`capabilities/*.json`). The commands are synchronous, so Tauri runs them on the main
 //! thread, which the shell requires; the exceptions are the server-link commands that
-//! wait on the network, which are async and touch only the store.
+//! wait on the network, which are async and touch only the store, and the update-file
+//! dialog, which waits on the user.
 
 use std::sync::Arc;
 
@@ -19,9 +20,11 @@ use uuid::Uuid;
 
 use crate::server_link::{self, LinkView};
 use crate::shell::{BackupDone, ImportOutcome, Shell, SuggestionAnswer};
+use crate::update::{AppPage, UpdateCheck, Updater};
 use crate::view::{PanelView, PetView, PlanPage, ReviewPage, SettingsPage, SettingsView};
 
 type ShellState<'a> = State<'a, Arc<Shell>>;
+type UpdaterState<'a> = State<'a, Arc<Updater>>;
 
 // ------------------------------------------------------------------ pet window
 
@@ -31,10 +34,12 @@ pub fn pet_bootstrap(shell: ShellState<'_>) -> PetView {
     shell.current_pet_view()
 }
 
-/// The pet page drew its first view.
+/// The pet page drew its first view. After an update this is the new version's
+/// confirmation that it started (the bundled WebView2 runtime works).
 #[tauri::command]
-pub fn pet_ready(shell: ShellState<'_>) {
+pub fn pet_ready(shell: ShellState<'_>, updater: UpdaterState<'_>) {
     shell.mark_page_ready();
+    updater.page_ready();
 }
 
 /// A click on the pet (pointer down and up without moving).
@@ -470,4 +475,77 @@ pub fn server_set_address(shell: ShellState<'_>, address: String) -> Result<Link
 #[tauri::command]
 pub fn server_notice_seen(shell: ShellState<'_>, device_ref: String) -> Result<LinkView, String> {
     server_link::notice_seen(&shell, &device_ref)
+}
+
+// ------------------------------------------------------------- app and updates (V1-6)
+
+/// Settings > App & updates.
+#[tauri::command]
+pub fn app_page(updater: UpdaterState<'_>) -> AppPage {
+    updater.page()
+}
+
+/// "Install update from file": the Open dialog, then the signature and version checks.
+/// `None` if the user cancelled the dialog. Async: the dialog waits on the user and the
+/// check hashes the whole installer, so neither may hold the main thread.
+///
+/// # Errors
+/// Why the file is refused, worded for the page; nothing changed.
+#[tauri::command]
+pub async fn update_choose(
+    app: tauri::AppHandle,
+    updater: UpdaterState<'_>,
+) -> Result<Option<UpdateCheck>, String> {
+    use tauri::Manager;
+    let owner = app
+        .get_webview_window(crate::shell::SCREENS)
+        .as_ref()
+        .and_then(crate::shell::hwnd_of)
+        .unwrap_or(0);
+    let updater = Arc::clone(&updater);
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(path) = choose_installer(owner) else {
+            return Ok(None);
+        };
+        updater.check(&path).map(Some)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[cfg(windows)]
+fn choose_installer(owner: isize) -> Option<std::path::PathBuf> {
+    crate::win32::choose_installer(owner, "Choose the HealthierYou update file")
+}
+
+#[cfg(not(windows))]
+fn choose_installer(_owner: isize) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// "Install and restart": stage the checked file, start the update helper, then close
+/// normally (the coaching engine saves first) once the page has its answer.
+///
+/// # Errors
+/// Why nothing was installed, worded for the page.
+#[tauri::command]
+pub fn update_install(app: tauri::AppHandle, updater: UpdaterState<'_>) -> Result<(), String> {
+    updater.start_install()?;
+    let _ = std::thread::Builder::new()
+        .name("hy-update-exit".into())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            app.exit(0);
+        });
+    Ok(())
+}
+
+/// Start at sign-in on or off.
+///
+/// # Errors
+/// Not an installed copy, or a registry or file error, worded for the page.
+#[tauri::command]
+pub fn set_autostart(updater: UpdaterState<'_>, enabled: bool) -> Result<AppPage, String> {
+    crate::update::set_autostart(updater.dirs(), enabled)?;
+    Ok(updater.page())
 }

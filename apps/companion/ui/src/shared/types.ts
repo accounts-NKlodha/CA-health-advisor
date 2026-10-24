@@ -523,3 +523,38 @@ export interface PlanPage {
   water_goal_ml: number | null;
   a11y: Accessibility;
 }
+
+// Settings > App & updates (slice V1-6; AppPage in update.rs).
+
+export type UpdatePlan = 'upgrade' | 'rollback';
+export type UpdateOutcomeKind = 'updated' | 'rolled_back' | 'blocked' | 'failed';
+
+export interface UpdateCheck {
+  current: string;
+  version: string;
+  plan: UpdatePlan;
+  size_mb: number;
+  /** Windows marked the file as downloaded: it may show its own warning. */
+  marked_from_internet: boolean;
+}
+
+export interface UpdateOutcome {
+  kind: UpdateOutcomeKind;
+  from: string;
+  to: string;
+  /** Local time, "YYYY-MM-DD HH:MM". */
+  at: string;
+  detail: string;
+}
+
+export interface AppPage {
+  version: string;
+  install_dir: string | null;
+  data_dir: string;
+  /** Why update files cannot be installed here, if they cannot. */
+  update_blocked: string | null;
+  previous_version: string | null;
+  in_progress: boolean;
+  last: UpdateOutcome | null;
+  autostart: { enabled: boolean; switched_off_in_windows: boolean } | null;
+}

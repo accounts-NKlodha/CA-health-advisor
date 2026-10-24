@@ -32,9 +32,20 @@
       "icons/icon.ico"
     ],
     "windows": {
+      "allowDowngrades": true,
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "languages": [
+          "English"
+        ],
+        "displayLanguageSelector": false,
+        "customLanguageFiles": {
+          "English": "./windows/English.nsh"
+        },
+        "installerHooks": "./windows/installer-hooks.nsh"
       }
-    }
+    },
+    "publisher": "HealthierYou",
+    "shortDescription": "HealthierYou desktop companion"
   }
 }

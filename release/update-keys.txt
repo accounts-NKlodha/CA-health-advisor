@@ -1,0 +1,12 @@
+# HealthierYou update public keys (slice V1-6).
+#
+# The companion (and the server's verify-release command) accept an update file only if
+# its .sig verifies against a key listed here. Each key is one line: the content of the
+# .pub file that `tauri signer generate` writes. Lines starting with # are ignored.
+#
+# PUBLIC keys only. The matching secret key stays on the owner's PC or USB stick and is
+# never committed, uploaded or put in a CI secret. See docs/V1-6_Install_Update.md,
+# "Release signing".
+#
+# No key is listed yet: builds made from this file refuse every update file until the
+# owner adds theirs.

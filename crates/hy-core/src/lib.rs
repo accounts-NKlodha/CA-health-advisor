@@ -23,6 +23,10 @@
 //! companion and the simulator (pairing slip, fingerprint words, control-log chain,
 //! signed heads, `/v1` bodies); [`secret`]: redacting, zeroizing secret values; and, with
 //! the `link` feature, [`link`]: the pinned TLS 1.3 client.
+//!
+//! Slice V1-6 adds [`update`]: signed update files (minisign signatures checked against
+//! built-in keys), what may be installed, the update record, keeping and restoring the
+//! previous program files, and restoring the pre-migration copy of the database.
 
 pub mod backup;
 pub mod clock;
@@ -40,6 +44,7 @@ pub mod secret;
 pub mod settings;
 pub mod store;
 pub mod time;
+pub mod update;
 
 pub use error::{Error, Result};
 

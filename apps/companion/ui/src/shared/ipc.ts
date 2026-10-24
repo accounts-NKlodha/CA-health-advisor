@@ -5,6 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   Accessibility,
+  AppPage,
   BackupDone,
   CoachChange,
   ImportFinished,
@@ -22,6 +23,7 @@ import type {
   SettingsView,
   SuggestionAnswer,
   SuggestionKind,
+  UpdateCheck,
   WaterChange,
   WeekReview,
   WorkweekChange,
@@ -82,6 +84,11 @@ interface Commands {
   server_notice_dismiss: { args: { id: number }; result: LinkView };
   server_share_preview: { args: { category: string }; result: string | null };
   server_restore: { args: undefined; result: LinkView };
+  app_page: { args: undefined; result: AppPage };
+  /** Opens the Open dialog; null if the user cancelled it. */
+  update_choose: { args: undefined; result: UpdateCheck | null };
+  update_install: { args: undefined; result: void };
+  set_autostart: { args: { enabled: boolean }; result: AppPage };
 }
 
 type Name = keyof Commands;

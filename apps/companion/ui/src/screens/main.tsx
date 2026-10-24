@@ -2,7 +2,7 @@
 // the window is created on demand and destroyed on close (A7).
 // Settings (wireframes W3 to W9 and W12): Pet (slice V1-1), then Reminders, Water and
 // workweek, Movement programme, Focus and Pomodoro, Sharing and server, Backup, and
-// Accessibility (slice V1-4). The
+// Accessibility (slice V1-4), and App & updates (slice V1-6). The
 // navigation collapses to a row above the content below 760 px. Every change goes to the
 // shell, which validates it, saves it in the local store and answers with the new page;
 // the pet and the coaching follow at once.
@@ -12,13 +12,23 @@ import { applyA11y, followA11y } from '../shared/a11y';
 import { call, on, report } from '../shared/ipc';
 import type { SettingsPage } from '../shared/types';
 import { AccessibilityTab } from './Accessibility';
+import { AppTab } from './AppTab';
 import { newer } from './changes';
 import { FocusTab, MovementTab, RemindersTab } from './Coaching';
 import { BackupTab, SharingTab } from './Data';
 import { PetSettings } from './PetSettings';
 import { WaterTab } from './Water';
 
-type Tab = 'pet' | 'reminders' | 'water' | 'movement' | 'focus' | 'sharing' | 'backup' | 'a11y';
+type Tab =
+  | 'pet'
+  | 'reminders'
+  | 'water'
+  | 'movement'
+  | 'focus'
+  | 'sharing'
+  | 'backup'
+  | 'a11y'
+  | 'app';
 
 const TABS: [Tab, string][] = [
   ['pet', 'Pet'],
@@ -29,6 +39,7 @@ const TABS: [Tab, string][] = [
   ['sharing', 'Sharing & server'],
   ['backup', 'Backup'],
   ['a11y', 'Accessibility'],
+  ['app', 'App & updates'],
 ];
 
 /** How a tab saves: the shell's answer becomes the page, and `done` the status line. */
@@ -76,6 +87,7 @@ function App() {
 
   const body = () => {
     if (tab === 'pet') return <PetSettings />;
+    if (tab === 'app') return <AppTab />;
     if (error) {
       return (
         <main class="pane">
@@ -147,7 +159,7 @@ function App() {
         </nav>
         <div>
           {body()}
-          {tab === 'pet' || tab === 'backup' ? null : (
+          {tab === 'pet' || tab === 'backup' || tab === 'app' ? null : (
             <p class="status" role="status">
               {status}
             </p>

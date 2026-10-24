@@ -198,6 +198,41 @@ fn run(shell: &Arc<Shell>) -> Report {
         webview2: tauri::webview_version().unwrap_or_default(),
         ..Report::default()
     };
+    // Display scaling (slice V1-6): the manifest declares per-monitor v2 DPI awareness, so
+    // Windows never bitmap-stretches the pet or the screens.
+    #[cfg(windows)]
+    {
+        let awareness = crate::win32::dpi_awareness();
+        r.check(
+            "dpi_per_monitor_aware",
+            awareness == 2,
+            format!("DPI awareness {awareness} (2 = per monitor)"),
+        );
+    }
+    // Run on the installed app (CI lifecycle job): the bundled fixed WebView2 runtime is
+    // the one in use, so nothing is downloaded and no system runtime is needed. Only
+    // booleans are reported, never the folder (it contains the user name).
+    if std::env::var_os("HY_SELFTEST_EXPECT_FIXED_RUNTIME").is_some() {
+        let folder = std::env::var_os("WEBVIEW2_BROWSER_EXECUTABLE_FOLDER").map(PathBuf::from);
+        let next_to_exe = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.join("webview2-fixed")));
+        // Tauri sets the folder from its own canonical exe path, so compare canonical
+        // forms (a verbatim `\\?\` prefix names the same folder).
+        let canonical =
+            |p: &Option<PathBuf>| p.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
+        let set = folder.is_some();
+        let runtime = folder
+            .as_ref()
+            .is_some_and(|f| f.join("msedgewebview2.exe").is_file());
+        let same = canonical(&folder).is_some() && canonical(&folder) == canonical(&next_to_exe);
+        let ok = set && runtime && same;
+        r.check(
+            "fixed_webview2_runtime",
+            ok,
+            format!("runtime folder set {set}, runtime there {runtime}, beside the app {same}"),
+        );
+    }
     let loaded = wait_until(Duration::from_secs(60), || shell.page_ready());
     r.check(
         "pet_page_loaded",
