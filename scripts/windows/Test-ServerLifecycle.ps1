@@ -148,8 +148,9 @@ function Open-Up {
 # Every owner and access entry in the data folder that is not SYSTEM, Administrators or
 # the service (read independently of hy-server check-acl).
 function Find-Open {
-  $sid = (New-Object Security.Principal.NTAccount($Account)).Translate([Security.Principal.SecurityIdentifier]).Value
-  $ok = @('S-1-5-18', 'S-1-5-32-544', $sid)
+  # Before the first install the service (and so its account) does not exist yet.
+  $ok = @('S-1-5-18', 'S-1-5-32-544')
+  try { $ok += (New-Object Security.Principal.NTAccount($Account)).Translate([Security.Principal.SecurityIdentifier]).Value } catch { }
   $found = [System.Collections.Generic.List[string]]::new()
   foreach ($item in @(Get-Item -Force $Data) + @(Get-ChildItem -Force -Recurse $Data)) {
     $acl = Get-Acl -LiteralPath $item.FullName
