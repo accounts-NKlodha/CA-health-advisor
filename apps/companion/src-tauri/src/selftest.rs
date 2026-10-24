@@ -29,6 +29,9 @@
 //! The setup wizard (W1) opens and loads, shows its sample reminder beside the pet and
 //! finishes; and an encrypted backup (W9) is exported and opened again with its password.
 //!
+//! With `HY_SELFTEST_SOAK_S` set it then runs the accelerated soak ([`soak`], slice V1-7)
+//! before it reports.
+//!
 //! A CI runner is not an office PC: focus checks that depend on an interactive desktop
 //! are recorded as informational, and real Windows acceptance of focus and DPI remains a
 //! UAT item (architecture 11; A6, A8).
@@ -52,6 +55,8 @@ use serde::Serialize;
 use crate::coach::CoachRunner;
 use crate::shell::{Shell, current_monitors};
 
+pub mod soak;
+
 /// Where the simulated clock starts: Monday 26 Oct 2026, 10:00 in Kolkata, inside the
 /// default work hours.
 pub fn sim_start() -> DateTime<Utc> {
@@ -74,6 +79,8 @@ struct Report {
     checks: Vec<Check>,
     monitors: Vec<Monitor>,
     webview2: String,
+    /// The accelerated soak, if it ran (slice V1-7).
+    soak: Option<soak::SoakSummary>,
 }
 
 impl Report {
@@ -172,6 +179,7 @@ pub fn spawn(
     coach: Option<(Arc<CoachRunner>, Arc<ManualClock>)>,
     report_path: PathBuf,
     idle_after: Duration,
+    soak: Option<soak::SoakPlan>,
 ) {
     let _ = std::thread::Builder::new()
         .name("hy-selftest".into())
@@ -180,6 +188,11 @@ pub fn spawn(
             match &coach {
                 Some((runner, clock)) => coach_end_to_end(&mut report, &shell, runner, clock),
                 None => report.check("coach_started", false, "the coaching engine did not start"),
+            }
+            let passed = report.checks.iter().all(|c| c.ok || !c.required);
+            if let (Some(plan), Some((runner, clock)), true) = (&soak, &coach, passed) {
+                let summary = soak::run(&mut report, &shell, runner, clock, plan);
+                report.soak = Some(summary);
             }
             report.ok = report.checks.iter().all(|c| c.ok || !c.required);
             std::thread::sleep(idle_after);

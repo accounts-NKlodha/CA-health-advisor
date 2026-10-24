@@ -69,6 +69,38 @@ fn selftest_report() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// `hy-companion.exe --hy-soak-stats <since, Unix ms> --report <file> [--db <file>]`
+/// (slice V1-7): write what the local store holds since a soak started (sizes, event
+/// counts by type, reminder timing; never a payload, path or id) as JSON, for
+/// `scripts/windows/Test-Soak.ps1`. Read-only: the running app is not disturbed. The
+/// database defaults to the signed-in user's. Exit code 0 when read, 1 when not, 4 on bad
+/// arguments; `None` if the first argument is not this command.
+fn soak_stats(args: &[std::ffi::OsString]) -> Option<i32> {
+    if args.first()? != "--hy-soak-stats" {
+        return None;
+    }
+    let since = args.get(1).and_then(|a| a.to_str()?.parse::<i64>().ok());
+    let value = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .map(PathBuf::from)
+    };
+    let db = value("--db")
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(|d| store_path(PathBuf::from(d))));
+    let (Some(since), Some(report), Some(db)) = (since, value("--report"), db) else {
+        return Some(4);
+    };
+    let (code, text) = match hy_core::soak::read(&db, since) {
+        Ok(stats) => (0, serde_json::to_string_pretty(&stats).unwrap_or_default()),
+        Err(e) => (1, serde_json::json!({ "error": e.to_string() }).to_string()),
+    };
+    match std::fs::write(&report, text) {
+        Ok(()) => Some(code),
+        Err(_) => Some(1),
+    }
+}
+
 fn setup(
     app: &mut tauri::App,
     version: hy_core::update::Version,
@@ -165,6 +197,7 @@ fn setup(
             runner.zip(sim),
             report,
             Duration::from_secs(idle),
+            selftest::soak::SoakPlan::from_env(path.clone()),
         );
     }
     Ok(())
@@ -179,7 +212,12 @@ fn main() {
         .to_string()
         .parse()
         .unwrap_or(hy_core::update::Version::new(0, 0, 0));
-    // The update helper and the command-line update steps run without any window.
+    // The soak statistics, the update helper and the command-line update steps run
+    // without any window.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if let Some(code) = soak_stats(&args) {
+        std::process::exit(code);
+    }
     if let Some(code) = update::command_line(version) {
         std::process::exit(code);
     }
@@ -283,6 +321,61 @@ mod tests {
             store.migration_report().to,
             hy_core::migrations::latest_version()
         );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn soak_stats_reads_a_store_without_payloads_and_refuses_bad_arguments() {
+        use std::ffi::OsString;
+        let dir = std::env::temp_dir().join(format!("hy-companion-soak-{}", std::process::id()));
+        let path = store_path(dir.clone());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut store = Store::open(&path, Arc::new(SystemClock::new())).unwrap();
+        store
+            .append_event(hy_core::schema::NewEvent::manual(
+                hy_core::schema::EventPayload::WaterLogged { amount_ml: 1234 },
+            ))
+            .unwrap();
+        let report = dir.join("soak.json");
+        let args = |a: &[&std::path::Path]| -> Vec<OsString> {
+            a.iter().map(|p| p.as_os_str().to_owned()).collect()
+        };
+        let p = std::path::Path::new;
+        let ok = args(&[
+            p("--hy-soak-stats"),
+            p("0"),
+            p("--report"),
+            &report,
+            p("--db"),
+            &path,
+        ]);
+        assert_eq!(soak_stats(&ok), Some(0));
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+        assert_eq!(json["events_by_type"]["water.logged"], 1);
+        let text = json.to_string();
+        assert!(
+            !text.contains("1234") && !text.contains("hy-companion-soak"),
+            "{text}"
+        );
+        // Not this command; no start time; a missing database (not created).
+        assert_eq!(soak_stats(&args(&[p("--hy-update-check")])), None);
+        assert_eq!(
+            soak_stats(&args(&[p("--hy-soak-stats"), p("--report"), &report])),
+            Some(4)
+        );
+        let missing = dir.join("none.db");
+        let gone = args(&[
+            p("--hy-soak-stats"),
+            p("0"),
+            p("--report"),
+            &report,
+            p("--db"),
+            &missing,
+        ]);
+        assert_eq!(soak_stats(&gone), Some(1));
+        assert!(!missing.exists());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

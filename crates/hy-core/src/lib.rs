@@ -27,6 +27,9 @@
 //! Slice V1-6 adds [`update`]: signed update files (minisign signatures checked against
 //! built-in keys), what may be installed, the update record, keeping and restoring the
 //! previous program files, and restoring the pre-migration copy of the database.
+//!
+//! Slice V1-7 adds [`soak`]: what an unattended soak run left in the local store (sizes,
+//! event counts by type, reminder timing), read without changing it.
 
 pub mod backup;
 pub mod clock;
@@ -42,6 +45,7 @@ pub mod review;
 pub mod schema;
 pub mod secret;
 pub mod settings;
+pub mod soak;
 pub mod store;
 pub mod time;
 pub mod update;

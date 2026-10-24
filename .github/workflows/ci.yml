@@ -21,6 +21,16 @@
 # clock, tray hide and show, presentation hiding, bubble layout and the panel hotkey, then
 # the coaching engine end to end on a simulated clock (a due reminder as the single bubble,
 # the answer recorded in the store, a presentation hiding it with nothing replayed).
+# V1-7 (soak and network capture; the real runs are on office PCs, docs/V1_Acceptance.md):
+# the Windows job runs the soak's shortened variants with accelerated clocks. The installed
+# companion runs 72 simulated office hours in 12 minutes (reminders answered on the real
+# bubble, lock, sleep, windows opened and closed; cadence and store bounds checked by the
+# app) and hy-sim runs the real server with 10 simulated companions over 30 simulated days;
+# scripts/windows/Test-Soak.ps1 samples each process tree and fails on a growth trend in
+# memory, handles or threads. The Linux job feeds the companion's real TLS traffic
+# (T-S23 on the wire, crates/hy-server/tests/capture.rs) to the capture script's analyser,
+# and both scripts' analysis self-tests run under PowerShell 7 (Linux) and Windows
+# PowerShell 5.1 (Windows), the versions office PCs have.
 name: ci
 
 on:
@@ -67,6 +77,20 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace --exclude hy-companion --locked
+
+      # V1-7: the capture analyser on genuine companion traffic (the real client and server
+      # through a recording relay, written as pcapng), a negative control (text that is in
+      # clear in every ClientHello must be found), and the analysers' self-tests.
+      - name: Network capture analyser (T-S23 on the wire) and soak analysis self-tests
+        run: |
+          pcap="$RUNNER_TEMP/t-s23.pcapng"
+          HY_CAPTURE_PCAP="$pcap" cargo test -p hy-server --test capture --locked
+          pwsh -NoProfile -File scripts/windows/Test-NetworkCapture.ps1 -SelfTest
+          pwsh -NoProfile -File scripts/windows/Test-NetworkCapture.ps1 -Analyze "$pcap" -ServerIp 192.168.50.10 -Canary CANARY_LABEL_5b1e,CANARY_ALIAS_7f3a
+          if pwsh -NoProfile -File scripts/windows/Test-NetworkCapture.ps1 -Analyze "$pcap" -ServerIp 192.168.50.10 -Canary hy/1; then
+            echo "the analyser missed the ALPN name, which is in clear in every ClientHello"; exit 1
+          fi
+          pwsh -NoProfile -File scripts/windows/Test-Soak.ps1 -SelfTest
 
   ui:
     name: Companion UI - type check and build
@@ -242,6 +266,19 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "Pet shell self-test failed (exit code $($p.ExitCode))" }
           if (-not $bundledSeen -or $otherSeen) { throw 'The installed app did not run on its bundled WebView2 runtime only' }
 
+      # V1-7: the soak's CI variant on the installed app (accelerated clock, see the header).
+      - name: Accelerated soak of the installed app (72 simulated hours in 12 minutes)
+        timeout-minutes: 40
+        run: |
+          ./scripts/windows/Test-Soak.ps1 -CiSelfTest -Minutes 12 -Report (Join-Path $env:RUNNER_TEMP 'hy-soak\soak-companion.txt')
+
+      - name: Soak and capture analysis self-tests under Windows PowerShell 5.1
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Test-Soak.ps1 -SelfTest
+          if ($LASTEXITCODE -ne 0) { throw 'Test-Soak.ps1 -SelfTest failed under Windows PowerShell 5.1' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Test-NetworkCapture.ps1 -SelfTest
+          if ($LASTEXITCODE -ne 0) { throw 'Test-NetworkCapture.ps1 -SelfTest failed under Windows PowerShell 5.1' }
+
       - name: Update, rollback, refusals and uninstall of the installed app
         timeout-minutes: 25
         run: ./scripts/windows/Test-CompanionLifecycle.ps1 -Phase Lifecycle -Installers (Join-Path $env:RUNNER_TEMP 'hy-installers') -OtherKeyDir (Join-Path $env:RUNNER_TEMP 'hy-other-key') -Work (Join-Path $env:RUNNER_TEMP 'hy-lifecycle')
@@ -279,6 +316,11 @@ jobs:
           Build-Server '0.1.3' (Join-Path $bin 'hy-server-schema-then-fail.exe') $out key1
           Build-Server '0.1.1' $real $other key2
 
+      # V1-7: the soak's CI variant for the server (accelerated clock, see the header).
+      - name: Accelerated server soak (hy-sim, 30 simulated days in 8 minutes)
+        timeout-minutes: 25
+        run: ./scripts/windows/Test-Soak.ps1 -Role Server -Sim (Join-Path $env:RUNNER_TEMP 'hy-server-bin\hy-sim.exe') -Minutes 8 -SimDays 30 -Report (Join-Path $env:RUNNER_TEMP 'hy-soak\soak-server.txt')
+
       - name: Server install, service, upgrade, rollback and uninstall (administrator)
         timeout-minutes: 35
         run: |
@@ -301,6 +343,7 @@ jobs:
             ${{ runner.temp }}/hy-installers/HealthierYou_0.1.0_x64-setup.exe
             ${{ runner.temp }}/hy-installers/HealthierYou_0.1.0_x64-setup.exe.sig
             ${{ runner.temp }}/hy-lifecycle/*.csv
+            ${{ runner.temp }}/hy-soak/*
             ${{ runner.temp }}/webview2-fixed.txt
 
       # The server's first start on Windows: keys sealed with machine-scope DPAPI, then

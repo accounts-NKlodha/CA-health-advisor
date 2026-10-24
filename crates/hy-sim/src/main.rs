@@ -12,6 +12,9 @@
 //! After each phase it checks that the server holds exactly what each PC should have
 //! shared, and that the control log and the mirror agree. Any difference is a failure
 //! (non-zero exit code). It prints only counts and timings, never data.
+//!
+//! `hy-sim soak` ([`soak`], slice V1-7) runs the same server and PCs under a steady
+//! office load for many simulated days, for the soak's CI variant.
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -35,6 +38,8 @@ use hy_server::{Config, Server, db};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+
+mod soak;
 
 const USERS: usize = 5;
 const PCS_PER_USER: usize = 2;
@@ -275,6 +280,49 @@ fn check(server: &Server, pcs: &[Pc], users: &[[u8; 16]], exp: &Expect) -> Resul
     Ok(checked)
 }
 
+/// Create the users and pair and confirm each one's PCs (5 users, 2 PCs each), each PC
+/// with its own in-memory store and loopback address.
+async fn pair_pcs(
+    server: &Server,
+    clock: &Arc<ManualClock>,
+) -> Result<(Vec<[u8; 16]>, Vec<Pc>), Fail> {
+    let mut users = Vec::new();
+    let mut pcs = Vec::new();
+    for u in 0..USERS {
+        let user = server.create_user(&format!("sim-user-{u}")).map_err(fail)?;
+        users.push(user);
+        for p in 0..PCS_PER_USER {
+            let clock_dyn: Arc<dyn Clock> = clock.clone();
+            let mut store = Store::open_in_memory(clock_dyn).map_err(fail)?;
+            let slip = server.issue_slip(&user).map_err(fail)?;
+            let vault = EphemeralVault::new();
+            let facts = DeviceFacts {
+                origin_device: store.device_id(),
+                label: format!("SIM-{u}-{p}"),
+                app_version: env!("CARGO_PKG_VERSION").into(),
+                windows_build: "26100".into(),
+            };
+            let opts = opts(pcs.len());
+            let r = redeem_slip(&slip, &facts, &vault, opts)
+                .await
+                .map_err(|e| fail(format!("pairing: {e:?}")))?;
+            store.save_pairing(&r.link, "v1-5-notice-1").map_err(fail)?;
+            let device_ref = *r.link.device_ref.as_bytes();
+            server
+                .confirm_device(&device_ref, &device_check_code(&device_ref))
+                .map_err(fail)?;
+            pcs.push(Pc {
+                user: u,
+                store: Arc::new(Mutex::new(store)),
+                vault: Arc::new(vault),
+                logged: BTreeMap::new(),
+                opts,
+            });
+        }
+    }
+    Ok((users, pcs))
+}
+
 async fn run(tmp: &Path) -> Result<String, Fail> {
     let dir = tmp.join("data");
     let mirror_dir = tmp.join("mirror");
@@ -326,43 +374,7 @@ async fn run_in(
     let mut report = Vec::new();
 
     // Pair and confirm 10 PCs.
-    let mut users = Vec::new();
-    let mut pcs = Vec::new();
-    for u in 0..USERS {
-        let user = srv
-            .server
-            .create_user(&format!("sim-user-{u}"))
-            .map_err(fail)?;
-        users.push(user);
-        for p in 0..PCS_PER_USER {
-            let clock_dyn: Arc<dyn Clock> = clock.clone();
-            let mut store = Store::open_in_memory(clock_dyn).map_err(fail)?;
-            let slip = srv.server.issue_slip(&user).map_err(fail)?;
-            let vault = EphemeralVault::new();
-            let facts = DeviceFacts {
-                origin_device: store.device_id(),
-                label: format!("SIM-{u}-{p}"),
-                app_version: env!("CARGO_PKG_VERSION").into(),
-                windows_build: "26100".into(),
-            };
-            let opts = opts(pcs.len());
-            let r = redeem_slip(&slip, &facts, &vault, opts)
-                .await
-                .map_err(|e| fail(format!("pairing: {e:?}")))?;
-            store.save_pairing(&r.link, "v1-5-notice-1").map_err(fail)?;
-            let device_ref = *r.link.device_ref.as_bytes();
-            srv.server
-                .confirm_device(&device_ref, &device_check_code(&device_ref))
-                .map_err(fail)?;
-            pcs.push(Pc {
-                user: u,
-                store: Arc::new(Mutex::new(store)),
-                vault: Arc::new(vault),
-                logged: BTreeMap::new(),
-                opts,
-            });
-        }
-    }
+    let (users, mut pcs) = pair_pcs(&srv.server, &clock).await?;
     let (outs, _) = sync_all(&pcs).await?;
     if !outs.iter().all(|o| matches!(o, SyncOutcome::Synced { .. })) {
         return Err(fail("a PC did not sync after confirmation"));
@@ -527,6 +539,11 @@ fn main() -> std::process::ExitCode {
             }
         };
     }
+    if let Some(cmd) = args.first()
+        && cmd == "soak"
+    {
+        return soak_cmd(&args[1..]);
+    }
     let seed = match args.as_slice() {
         [] => None,
         // `hy-sim seed <data dir> <mirror file>`: a populated server data folder with
@@ -539,7 +556,7 @@ fn main() -> std::process::ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: hy-sim [seed <data dir> <mirror file> [<stale mirror copy>] | count <data dir>]"
+                "usage: hy-sim [seed <data dir> <mirror file> [<stale mirror copy>] | count <data dir> | soak <real seconds> <simulated days> [<report.json>]]"
             );
             return std::process::ExitCode::FAILURE;
         }
@@ -582,6 +599,45 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// `hy-sim soak <real seconds> <simulated days> [<report.json>]`.
+fn soak_cmd(args: &[String]) -> std::process::ExitCode {
+    let parsed = match args {
+        [secs, days] | [secs, days, _] => secs.parse::<u64>().ok().zip(days.parse::<i64>().ok()),
+        _ => None,
+    };
+    let Some((secs, days)) = parsed.filter(|&(_, d)| d >= 1) else {
+        eprintln!("usage: hy-sim soak <real seconds> <simulated days, 1 or more> [<report.json>]");
+        return std::process::ExitCode::FAILURE;
+    };
+    let tmp = std::env::temp_dir().join(format!("hy-sim-soak-{}", std::process::id()));
+    let out = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(fail)
+        .and_then(|rt| rt.block_on(soak::run(&tmp, Duration::from_secs(secs), days)));
+    let _ = std::fs::remove_dir_all(&tmp);
+    match out {
+        Ok((ok, line, report)) => {
+            println!("{line}");
+            if let Some(file) = args.get(2)
+                && let Err(e) = std::fs::write(file, report)
+            {
+                eprintln!("hy-sim: cannot write the report: {e}");
+                return std::process::ExitCode::FAILURE;
+            }
+            if ok {
+                std::process::ExitCode::SUCCESS
+            } else {
+                std::process::ExitCode::FAILURE
+            }
+        }
+        Err(e) => {
+            eprintln!("hy-sim soak: FAILED: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -594,5 +650,26 @@ mod tests {
         let line = rt.block_on(super::run(tmp.path())).unwrap();
         assert!(line.contains("10 PCs paired"), "{line}");
         assert!(line.contains("users released"), "{line}");
+    }
+
+    #[test]
+    fn two_simulated_workdays_of_office_load_stay_within_bounds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (ok, line, report) = rt
+            .block_on(super::soak::run(tmp.path(), std::time::Duration::ZERO, 2))
+            .unwrap();
+        assert!(ok, "{line}");
+        let v: serde_json::Value = serde_json::from_str(&report).unwrap();
+        let days = v["days"].as_array().unwrap();
+        assert_eq!(days.len(), 2);
+        // 36 sync rounds of 10 PCs on each workday; every PC's day verified.
+        assert_eq!(days[0]["syncs"], 360);
+        assert_eq!(days[1]["rows_verified"], 20);
+        assert!(days[1]["backups"].as_u64().unwrap() >= 1, "{report}");
+        assert!(!report.contains("sim-user"), "no alias in the report");
     }
 }
