@@ -640,4 +640,5 @@ export type PageCommand =
   | { kind: 'restart_worker' }
   | { kind: 'fps'; fps: number }
   | { kind: 'freeze' }
-  | { kind: 'probe' };
+  | { kind: 'probe' }
+  | { kind: 'hang' };

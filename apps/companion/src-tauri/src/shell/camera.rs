@@ -98,6 +98,8 @@ pub enum PageCommand {
     Freeze,
     /// Self-test only: the worker tries to reach the network.
     Probe,
+    /// Self-test only: the page ignores every command from now on (a hung page).
+    Hang,
 }
 
 /// The camera's state on the shell.
@@ -191,13 +193,13 @@ impl Shell {
     /// "Posture check" from the pet menu, the panel, the tray or Settings: the camera
     /// page on screen, with the consent text if none is recorded, else its status.
     pub fn camera_open(self: &Arc<Self>) {
-        lock(&self.camera).show_next = true;
         if let Some(w) = self.camera_window() {
             let _ = w.show();
             let _ = w.unminimize();
             let _ = w.set_focus();
             return;
         }
+        lock(&self.camera).show_next = true;
         self.create_camera_window(true);
     }
 
@@ -437,7 +439,16 @@ impl Shell {
                     }
                 }
                 Action::RequestStop => self.camera_send(PageCommand::Stop),
-                Action::ClosePage => self.close_camera_window(),
+                Action::ClosePage => {
+                    if !self.close_camera_window(false) {
+                        self.camera_close_done();
+                    }
+                }
+                Action::DestroyPage => {
+                    if !self.close_camera_window(true) {
+                        self.camera_close_done();
+                    }
+                }
                 Action::RestartWorker => self.camera_send(PageCommand::RestartWorker),
                 Action::Retry => self.camera_send(PageCommand::Start),
                 Action::SetFps(fps) => self.camera_send(PageCommand::Fps { fps }),
@@ -493,17 +504,31 @@ impl Shell {
         }
     }
 
-    /// Destroy the camera page, unless the user is looking at it and it explains why the
-    /// camera cannot be used (it stays, without capture, until they close it).
-    fn close_camera_window(&self) {
+    /// Destroy the camera page, unless (`forced` false: the page confirmed its capture
+    /// ended) the user is looking at it and it explains why the camera cannot be used: it
+    /// then stays, without capture, until they close it. A forced close (the page did not
+    /// confirm its stop in time) always destroys it, so a hung page cannot keep the
+    /// camera. Returns whether a window is being destroyed (its end is reported by the
+    /// window's Destroyed event).
+    fn close_camera_window(&self, forced: bool) -> bool {
         let Some(w) = self.camera_window() else {
-            return;
+            return false;
         };
         let explains = matches!(self.camera_status(), Status::Unavailable(_));
-        if explains && w.is_visible().unwrap_or(false) {
-            return;
+        if !forced && explains && w.is_visible().unwrap_or(false) {
+            return false;
         }
-        let _ = w.destroy();
+        w.destroy().is_ok()
+    }
+
+    /// No window end will be reported for the last close (none, or kept on screen).
+    fn camera_close_done(self: &Arc<Self>) {
+        let actions = {
+            let mut c = lock(&self.camera);
+            let now = c.now();
+            c.machine.close_done(now)
+        };
+        self.camera_apply(actions);
     }
 
     fn camera_notice(self: &Arc<Self>, notice: CameraNotice) {

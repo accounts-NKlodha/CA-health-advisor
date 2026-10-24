@@ -227,17 +227,22 @@ pub(super) fn camera_end_to_end(r: &mut Report, shell: &Arc<Shell>) {
             status(shell)
         ),
     );
+    // This time the page is on screen and hangs (ignores Stop): an on-screen page that
+    // explains a failure is normally kept, but a forced close must destroy it.
+    let _ = on_main(shell, |s| s.camera_open());
     let _ = on_main(shell, |s| s.camera_test_command(PageCommand::Freeze));
+    let _ = on_main(shell, |s| s.camera_test_command(PageCommand::Hang));
     let stopped = wait_until(Duration::from_secs(20), || {
         page(shell).is_some_and(|p| p.status == Status::Unavailable(Unavailable::Stalled) && !p.on)
     });
     let gone = wait_until(Duration::from_secs(5), || !camera_window(shell));
     let p = page(shell);
+    let forced = p.as_ref().is_some_and(|p| p.stats.last_stop_forced);
     r.check(
         "camera_second_stall_stops",
-        stopped && gone,
+        stopped && gone && forced,
         format!(
-            "stopped {stopped}; hidden camera page closed {gone}; stalls {:?}; stop took {:?} ms",
+            "stopped {stopped}; visible hung camera page destroyed {gone}; forced {forced}; stalls {:?}; stop took {:?} ms",
             p.as_ref().map(|p| p.stats.stalls),
             p.as_ref().and_then(|p| p.stats.last_stop_ms)
         ),

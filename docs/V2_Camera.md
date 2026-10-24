@@ -64,7 +64,12 @@ stops the camera, turns the choice off and tells the user. The self-test checks 
 then closes the worker (ended after 600 ms if it does not answer), then reports
 "stopped". If the page does not confirm within 1 s, the shell closes the window. The
 stop time is measured (`CameraStats.last_stop_ms`), and the self-test requires 2 s or
-less, confirmed by the page.
+less, confirmed by the page. A page that did not confirm is always destroyed, even when it
+is on screen explaining a failure (only a page that confirmed its capture ended may stay
+to explain). A start that comes while the previous capture is still stopping (a hold that
+ends at once, or Off then On) waits: it starts on the same page once the stop is
+confirmed, or on a new page once the old one has gone, never on a page mid-stop. The
+self-test covers a visible page that hangs and ignores Stop.
 
 **Frame rate:** the governor starts at 3 fps. It drops to 1 fps when the mean inference
 time over 10 frames uses more than 6% of the PC's CPU, or exceeds 250 ms. It returns to

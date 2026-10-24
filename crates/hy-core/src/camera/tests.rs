@@ -258,8 +258,13 @@ fn off_releases_within_two_seconds_even_if_the_page_hangs() {
     // The page never confirms: destroyed after CLOSE_AFTER, inside STOP_WITHIN.
     let mut m = capturing(s(0));
     m.turn_off(s(10));
-    assert!(!m.tick(ms(10_900)).contains(&Action::ClosePage));
-    assert!(m.tick(s(11)).contains(&Action::ClosePage));
+    assert!(!m.tick(ms(10_900)).contains(&Action::DestroyPage));
+    let fx = m.tick(s(11));
+    assert!(fx.contains(&Action::DestroyPage), "{fx:?}");
+    assert!(
+        !fx.contains(&Action::ClosePage),
+        "a forced close destroys, it never keeps"
+    );
     let st = m.stats();
     assert!(st.last_stop_forced);
     assert!(Duration::from_millis(st.last_stop_ms.unwrap()) < STOP_WITHIN);
@@ -283,6 +288,7 @@ fn holds_release_capture_and_capture_starts_again_after() {
         assert_eq!(m.status(), Status::Held(hold));
         assert!(m.settings().on, "a hold keeps the user's choice");
         assert_eq!(m.page_stopped(ms(3_200)), vec![Action::ClosePage]);
+        assert!(m.page_gone(ms(3_300)).is_empty());
         // No watchdog during a hold.
         assert!(m.tick(s(60)).is_empty());
         let fx = m.set_hold(s(61), None);
@@ -293,6 +299,7 @@ fn holds_release_capture_and_capture_starts_again_after() {
     let mut m = capturing(s(0));
     m.set_hold(s(1), Some(CameraHold::Meeting));
     m.page_stopped(s(1));
+    m.page_gone(s(1));
     let fx = m.set_hold(s(2), Some(CameraHold::Away));
     assert!(!fx.contains(&Action::OpenPage), "{fx:?}");
     assert!(!m.page_open());
@@ -382,6 +389,8 @@ fn conflicts_are_named_and_a_busy_or_missing_camera_is_tried_again() {
     assert_eq!(m.status(), Status::Unavailable(Unavailable::Denied));
     assert_eq!(m.status().words(), "Camera blocked by Windows");
     m.page_stopped(s(1));
+    // The shell keeps the page on screen to explain (its capture has ended).
+    assert!(m.close_done(s(1)).is_empty());
     assert!(m.tick(s(300)).is_empty());
     // "Try again" starts it once more.
     assert!(m.try_again(s(301)).contains(&Action::OpenPage));
@@ -407,6 +416,7 @@ fn conflicts_are_named_and_a_busy_or_missing_camera_is_tried_again() {
     let fx = m.set_hold(s(2), Some(CameraHold::Meeting));
     assert!(fx.contains(&Action::RequestStop));
     m.page_stopped(s(2));
+    m.page_gone(s(2));
     assert!(m.tick(s(120)).is_empty());
     assert!(m.set_hold(s(121), None).contains(&Action::OpenPage));
 
@@ -583,4 +593,113 @@ fn settings_store_numbers_and_choices_only() {
             .is_err()
     );
     assert!(!CameraSettings::default().on);
+}
+
+#[test]
+fn a_forced_close_destroys_a_page_that_explains_a_failure() {
+    // A page that fails to start (or stalls twice) and then ignores Stop: the deadline
+    // destroys it, even though an Unavailable page on screen is normally kept.
+    let mut m = Machine::new(CameraSettings::default());
+    m.consent(at());
+    m.turn_on(s(0)).unwrap();
+    let fx = m.tick(START_TIMEOUT);
+    assert!(fx.contains(&Action::RequestStop), "{fx:?}");
+    assert_eq!(m.status(), Status::Unavailable(Unavailable::Failed));
+    let fx = m.tick(START_TIMEOUT + CLOSE_AFTER);
+    assert!(fx.contains(&Action::DestroyPage), "{fx:?}");
+    assert!(!fx.contains(&Action::ClosePage));
+    assert!(m.stats().last_stop_forced);
+
+    // The same after a second stall.
+    let mut m = capturing(s(0));
+    feed(&mut m, s(0), s(2), ms(333), person());
+    m.tick(s(8));
+    feed(&mut m, s(8), s(10), ms(333), person());
+    let fx = m.tick(s(16));
+    assert!(fx.contains(&Action::RequestStop), "{fx:?}");
+    assert_eq!(m.status(), Status::Unavailable(Unavailable::Stalled));
+    assert!(m.tick(s(17)).contains(&Action::DestroyPage));
+}
+
+#[test]
+fn a_hold_ending_before_the_stop_is_confirmed_waits_for_the_old_capture() {
+    // Capture, a meeting, the meeting ends before the page confirms its stop.
+    let mut m = capturing(s(0));
+    feed(&mut m, s(0), s(3), ms(333), person());
+    assert!(
+        m.set_hold(s(3), Some(CameraHold::Meeting))
+            .contains(&Action::RequestStop)
+    );
+    let fx = m.set_hold(ms(3_200), None);
+    assert!(
+        !fx.iter()
+            .any(|a| matches!(a, Action::OpenPage | Action::Retry)),
+        "no start on a page that is still stopping: {fx:?}"
+    );
+    assert_eq!(m.status(), Status::Starting);
+    assert!(!m.wants_capture(), "the old page gets no permission");
+    // The old capture confirms: the new one starts on the same page, not closed.
+    let fx = m.page_stopped(ms(3_400));
+    assert_eq!(fx, vec![Action::Retry]);
+    assert!(m.page_open());
+    assert!(m.wants_capture());
+    m.page_started(ms(3_900), started());
+    feed(&mut m, ms(3_900), s(6), ms(333), person());
+    assert_eq!(m.status(), Status::Reading);
+
+    // The old page never confirms: it is destroyed, and the new capture gets a new page
+    // once the old one has gone.
+    let mut m = capturing(s(0));
+    m.set_hold(s(3), Some(CameraHold::Meeting));
+    m.set_hold(ms(3_200), None);
+    let fx = m.tick(s(4));
+    assert!(fx.contains(&Action::DestroyPage), "{fx:?}");
+    assert!(!fx.contains(&Action::OpenPage));
+    assert!(!m.page_open());
+    assert_eq!(m.page_gone(ms(4_100)), vec![Action::OpenPage]);
+    assert!(m.page_open());
+    assert!(m.wants_capture());
+    // The new page's start is not mistaken for the old one's end.
+    let fx = m.page_started(s(5), started());
+    assert!(fx.contains(&Action::SetFps(FPS_HIGH)), "{fx:?}");
+    assert!(matches!(m.status(), Status::NoReading(_)));
+}
+
+#[test]
+fn off_then_on_before_the_stop_is_confirmed_waits_for_the_old_capture() {
+    let mut m = capturing(s(0));
+    feed(&mut m, s(0), s(3), ms(333), person());
+    assert!(m.turn_off(s(3)).contains(&Action::RequestStop));
+    let fx = m.turn_on(ms(3_100)).unwrap();
+    assert!(
+        !fx.iter()
+            .any(|a| matches!(a, Action::OpenPage | Action::Retry)),
+        "{fx:?}"
+    );
+    assert_eq!(m.status(), Status::Starting);
+    assert_eq!(m.page_stopped(ms(3_300)), vec![Action::Retry]);
+    assert!(m.wants_capture());
+
+    // Off, then On after the page closed but before its window's end was reported.
+    let mut m = capturing(s(0));
+    m.turn_off(s(3));
+    assert_eq!(m.page_stopped(ms(3_200)), vec![Action::ClosePage]);
+    let fx = m.turn_on(ms(3_300)).unwrap();
+    assert!(!fx.contains(&Action::OpenPage), "{fx:?}");
+    assert_eq!(m.page_gone(ms(3_400)), vec![Action::OpenPage]);
+    // ... or the shell had no window to close.
+    let mut m = capturing(s(0));
+    m.turn_off(s(3));
+    m.page_stopped(ms(3_200));
+    m.turn_on(ms(3_300)).unwrap();
+    assert_eq!(m.close_done(ms(3_300)), vec![Action::OpenPage]);
+
+    // Off again while the restart waits: nothing starts.
+    let mut m = capturing(s(0));
+    m.turn_off(s(3));
+    m.turn_on(ms(3_100)).unwrap();
+    m.turn_off(ms(3_150));
+    assert_eq!(m.page_stopped(ms(3_300)), vec![Action::ClosePage]);
+    assert!(m.page_gone(ms(3_400)).is_empty());
+    assert_eq!(m.status(), Status::Off);
 }

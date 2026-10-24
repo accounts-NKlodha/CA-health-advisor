@@ -338,8 +338,15 @@ pub enum Action {
     /// Ask the page to end its track and close its worker, then wait for
     /// [`Machine::page_stopped`] or [`CLOSE_AFTER`].
     RequestStop,
-    /// Destroy the camera page (its memory and any capture end with it).
+    /// The page confirmed its capture ended: close it. The shell may keep a page that is
+    /// on screen explaining why the camera cannot be used (its capture has ended); it then
+    /// calls [`Machine::close_done`], as it does when there was no page to close.
     ClosePage,
+    /// The page did not confirm its stop in time: destroy it whatever it shows, so a hung
+    /// page cannot keep the camera (its memory and any capture end with it). The shell
+    /// reports the window's end through [`Machine::page_gone`], or [`Machine::close_done`]
+    /// if there was none.
+    DestroyPage,
     /// Ask the page to restart its worker (the watchdog's one restart).
     RestartWorker,
     /// Ask the page to try the camera again (busy or missing).
@@ -492,6 +499,11 @@ pub struct Machine {
     page_open: bool,
     /// A stop was requested at this time and the page has not confirmed or been closed.
     stopping: Option<Duration>,
+    /// The page was asked to close (or be destroyed) and its end has not been reported.
+    closing: bool,
+    /// A start came while the previous capture was still being torn down: it begins once
+    /// that page has stopped or gone, never on the old page mid-stop.
+    restart_pending: bool,
     stall_times: VecDeque<Duration>,
     window: VecDeque<(Duration, Option<FrameIssue>)>,
     cores: u32,
@@ -511,6 +523,8 @@ impl Machine {
             hold: None,
             page_open: false,
             stopping: None,
+            closing: false,
+            restart_pending: false,
             stall_times: VecDeque::new(),
             window: VecDeque::new(),
             cores: 1,
@@ -552,6 +566,8 @@ impl Machine {
     pub const fn wants_capture(&self) -> bool {
         matches!(self.phase, Phase::Starting { .. } | Phase::Capturing { .. })
             && self.stopping.is_none()
+            && !self.closing
+            && !self.restart_pending
     }
 
     /// Whether a page is open (or asked to open) and not yet closed.
@@ -758,19 +774,53 @@ impl Machine {
         if let Some(asked) = self.stopping.take() {
             self.stats.last_stop_ms = Some(millis(now.saturating_sub(asked)));
             self.stats.last_stop_forced = false;
-            self.page_open = false;
-            out.push(Action::ClosePage);
+            if self.restart_pending {
+                // The old capture has ended; the new one starts on the same page.
+                self.restart_pending = false;
+                out.push(Action::Retry);
+            } else {
+                self.page_open = false;
+                self.closing = true;
+                out.push(Action::ClosePage);
+            }
         }
         out
+    }
+
+    /// The shell closed no window for [`Action::ClosePage`] or [`Action::DestroyPage`]
+    /// (there was none, or it kept a released page on screen): no
+    /// [`Machine::page_gone`] will follow. A start that waited for it begins now.
+    pub fn close_done(&mut self, _now: Duration) -> Vec<Action> {
+        let mut out = Vec::new();
+        if std::mem::take(&mut self.closing) {
+            self.open_pending(&mut out);
+        }
+        out
+    }
+
+    fn open_pending(&mut self, out: &mut Vec<Action>) {
+        if std::mem::take(&mut self.restart_pending) && matches!(self.phase, Phase::Starting { .. })
+        {
+            self.page_open = true;
+            out.push(Action::OpenPage);
+        }
     }
 
     /// The camera page went away without being asked (its window was destroyed or its
     /// web content crashed).
     pub fn page_gone(&mut self, now: Duration) -> Vec<Action> {
         let mut out = Vec::new();
+        if std::mem::take(&mut self.closing) {
+            // The page asked to close (an earlier capture) has gone: a start that waited
+            // for it gets a new page.
+            self.page_open = false;
+            self.open_pending(&mut out);
+            return out;
+        }
         let was_open = self.page_open;
         self.page_open = false;
         if self.stopping.take().is_some() {
+            self.open_pending(&mut out);
             return out;
         }
         if was_open && self.settings.on {
@@ -797,9 +847,10 @@ impl Machine {
         {
             self.stopping = None;
             self.page_open = false;
+            self.closing = true;
             self.stats.last_stop_ms = Some(millis(now.saturating_sub(asked)));
             self.stats.last_stop_forced = true;
-            out.push(Action::ClosePage);
+            out.push(Action::DestroyPage);
         }
         match self.phase {
             Phase::Starting { since } if now.saturating_sub(since) >= START_TIMEOUT => {
@@ -812,7 +863,7 @@ impl Machine {
             }
             Phase::Unavailable {
                 retry_at: Some(at), ..
-            } if now >= at && self.hold.is_none() => {
+            } if now >= at && self.hold.is_none() && self.stopping.is_none() && !self.closing => {
                 self.phase = Phase::Starting { since: now };
                 // The page stays open while it retries; it is reopened if it went.
                 out.push(if self.page_open {
@@ -838,7 +889,10 @@ impl Machine {
         }
         self.phase = Phase::Starting { since: now };
         self.window.clear();
-        if self.page_open && self.stopping.is_none() {
+        if self.stopping.is_some() || self.closing {
+            // The previous capture is still being torn down: start once it has ended.
+            self.restart_pending = true;
+        } else if self.page_open {
             out.push(Action::Retry);
         } else {
             self.page_open = true;
@@ -848,6 +902,7 @@ impl Machine {
     }
 
     fn release(&mut self, now: Duration, out: &mut Vec<Action>) {
+        self.restart_pending = false;
         if self.page_open && self.stopping.is_none() {
             self.stopping = Some(now);
             out.push(Action::RequestStop);
