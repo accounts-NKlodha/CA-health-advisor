@@ -32,6 +32,7 @@ The process is in Settings > App & updates > **Choose update file...** (or on th
 3. **Install and restart.** The file is copied to `updates\staged` with its downloaded-file mark kept, and then checked again. The companion then closes and a helper copy of it takes over. The helper:
    - copies the program folder to `updates\previous`;
    - exports the uninstall entry;
+   - checks the staged installer and its signature again, just before it runs (time has passed since the first check, and the updates folder is the user's own; nothing makes the staged file immutable);
    - runs the installer silently with `/UPDATE`;
    - starts the new version, which must show its pet page within 2 minutes.
 4. **Rollback.** If the installer fails, or the new version does not confirm its start, the helper:
@@ -40,9 +41,18 @@ The process is in Settings > App & updates > **Choose update file...** (or on th
    - starts the old version.
 
    App & updates then says "The update to X did not start, so HealthierYou went back to Y". The personal data is not touched by an update or a rollback.
-5. **Data.** Before a schema migration, the store keeps a copy of the database (pre-migration copy, V1-0). If an older version finds a newer database after going back, it offers to restore that copy. The newer database is set aside, never deleted.
+5. **Data.** Before a schema migration, the store keeps a copy of the database (pre-migration copy, V1-0). If an older version finds a newer database after going back, it offers to restore that copy. The restore is failure-safe:
+   - the copy is copied beside the database, flushed and checked (whole, with a readable schema) before anything else changes;
+   - the newer database is folded into one file and renamed to `hy.db.newer-<time>.bak` (never deleted);
+   - the checked copy is renamed into place.
 
-An attempt cut short (for example, the PC restarted mid-update) is reported once as unfinished. The helper's log is `updates\update.log`.
+   If the copy cannot be read, the copy fails part way, or the copy is damaged, nothing changes. If the final rename fails, the newer database is moved back. Only if that fails too is the database left set aside, with a marker beside it; the next start then offers to put it back and never opens (so never creates) an empty database. The message says which of these happened.
+
+**An attempt cut short.** A helper holds a named mutex while it runs. When the companion starts with an attempt recorded and no helper running:
+- if it is the attempt's target version and the installer had run (the PC restarted, or the helper was ended, after the install), the update is recorded as done, the previous-version copy is cleared and going back stays possible;
+- otherwise the attempt is recorded once as not finished, with the version that is running.
+
+A just-staged attempt is left alone for two minutes (its helper may still be starting). So an orphaned attempt never blocks later updates. The helper's log is `updates\update.log`.
 
 ### Releasing (the owner, offline)
 
@@ -109,7 +119,8 @@ A CI runner is an administrator account on Windows Server, with no SmartScreen r
 
 ## 7. Deviations and readings
 
-- **Updates are from a file only in V1-6a.** Architecture section 8 also describes getting the update file from the office server. That needs a server endpoint, so it is left to a later slice. The file format and the check are the same, so the server only has to hand over the same two files.
+- **Updates are from a file only in V1-6a. Server-delivered updates remain required, approved work: they are deferred, not dropped.** Architecture section 8 also describes getting the update file from the office server. That needs a server endpoint and is tracked as open work for a later slice. The file format and the check are the same, so the server only has to hand over the same two files.
+- **No updateable release exists yet.** `release/update-keys.txt` holds no production public key, so a release build refuses every update file. CI's passing signatures use keys made for each run and thrown away. The owner must generate the key offline and commit its public half (section 2) before any release can be updated.
 - **"Rollback one release back"** is read as: the only older version accepted is the exact version this PC last updated from. After a rollback, nothing older is accepted until the next update.
 - The previous-version program copy is deleted once the new version confirms its start. Going back after that uses the old installer file and its signature.
 - The program folder and the data folder share the parent `%LOCALAPPDATA%\HealthierYou`, which is the Tauri template's install path. The uninstaller removes everything but `data\`.

@@ -88,6 +88,11 @@ fn setup(
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    // A data restore that could not be finished set the database aside: never open (and
+    // so create) an empty one in its place.
+    if selftest.is_none() && !update::settle_incomplete_restore(&path) {
+        std::process::exit(1);
+    }
     let store = match Store::open(&path, Arc::new(SystemClock::new())) {
         // An older version after a rollback, facing data a newer one changed: offer the
         // copy taken before that upgrade, or close without changing anything.

@@ -795,32 +795,239 @@ pub fn usable_pre_migration_copy(db: &Path, migrations: &[Migration]) -> Option<
     })
 }
 
-/// Put a pre-migration copy back as the database. The newer database is first folded
-/// into one file (its write-ahead log checkpointed) and set aside as
-/// `<db>.newer-<millis>.bak`, never deleted; the copy itself stays where it was.
-/// Returns where the newer database was set aside.
+/// Where the data stands after a failed [`restore_pre_migration_copy`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoreState {
+    /// The database is in place as it was (perhaps folded into one file); the copy was
+    /// not put back.
+    Unchanged,
+    /// The database is no longer at its name: it was set aside at this path and could not
+    /// be moved back. A marker beside it ([`incomplete_restore`]) stops the next start
+    /// from creating an empty database in its place.
+    SetAside(PathBuf),
+}
+
+/// A pre-migration restore that did not happen, and where the data stands.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{reason}")]
+pub struct RestoreError {
+    /// What failed, without paths.
+    pub reason: String,
+    /// Where the data stands.
+    pub state: RestoreState,
+}
+
+impl RestoreError {
+    fn unchanged(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            state: RestoreState::Unchanged,
+        }
+    }
+}
+
+/// The file operations a restore uses (failures are injected in tests).
+#[doc(hidden)]
+pub trait RestoreFs {
+    /// Copy `from` to `to` and flush it to disk.
+    ///
+    /// # Errors
+    /// An I/O error.
+    fn copy(&self, from: &Path, to: &Path) -> std::io::Result<()>;
+    /// Rename `from` to `to` (same folder).
+    ///
+    /// # Errors
+    /// An I/O error.
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()>;
+}
+
+/// The real file system.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct RealFs;
+
+impl RestoreFs for RealFs {
+    fn copy(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::copy(from, to)?;
+        std::fs::OpenOptions::new().write(true).open(to)?.sync_all()
+    }
+    fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::rename(from, to)
+    }
+}
+
+fn side_path(db: &Path, suffix: &str) -> PathBuf {
+    PathBuf::from(format!("{}{suffix}", db.display()))
+}
+
+/// The marker left when a restore set the database aside and could not move it back.
+fn marker_path(db: &Path) -> PathBuf {
+    side_path(db, ".restore-incomplete")
+}
+
+/// If a restore set the database aside and could not move it back, where it is. The
+/// program must not open (and so create) a database at `db` while this is `Some`.
+#[must_use]
+pub fn incomplete_restore(db: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(marker_path(db)).ok()?;
+    let name = text.trim();
+    // Only a file name in the same folder is accepted.
+    if name.is_empty() || name.contains(['/', '\\']) {
+        return None;
+    }
+    db.parent().map(|d| d.join(name))
+}
+
+/// Move a database a failed restore set aside back to its name and clear the marker.
 ///
 /// # Errors
-/// A database or file-system failure; if the set-aside rename failed, nothing changed.
-pub fn restore_pre_migration_copy(db: &Path, copy: &Path, now_ms: i64) -> crate::Result<PathBuf> {
-    {
-        // Any schema can be checkpointed; this opens no tables.
-        let conn = rusqlite::Connection::open(db)?;
+/// The set-aside file is missing, a database is already at `db`, or the rename failed.
+pub fn recover_incomplete_restore(db: &Path) -> std::io::Result<()> {
+    let aside = incomplete_restore(db)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no restore marker"))?;
+    if db.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "a database is already in place",
+        ));
+    }
+    std::fs::rename(&aside, db)?;
+    std::fs::remove_file(marker_path(db))
+}
+
+/// Check that `path` is a whole SQLite database with a HealthierYou schema.
+fn validate_database(path: &Path) -> Result<u32, String> {
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("the copy could not be opened: {e}"))?;
+    let check: String = conn
+        .query_row("PRAGMA quick_check", [], |r| r.get(0))
+        .map_err(|e| format!("the copy could not be checked: {e}"))?;
+    if check != "ok" {
+        return Err("the copy is damaged".into());
+    }
+    let status = migrations::schema_status(&conn)
+        .map_err(|e| format!("the copy has no readable schema: {e}"))?;
+    if status.version < 1 {
+        return Err("the copy has no HealthierYou schema".into());
+    }
+    Ok(status.version)
+}
+
+/// Put a pre-migration copy back as the database, failure-safe:
+///
+/// 1. the copy is copied beside the database (`<db>.restore-<millis>.tmp`), flushed and
+///    checked (whole, readable schema) before anything else changes;
+/// 2. the newer database is folded into one file (its write-ahead log checkpointed);
+/// 3. it is renamed to `<db>.newer-<millis>.bak` (never deleted);
+/// 4. the checked copy is renamed into place.
+///
+/// If step 4 fails, the newer database is moved back. Only if that fails too is the
+/// database left aside, with a marker so the next start does not create an empty one
+/// ([`incomplete_restore`]). The pre-migration copy itself is never changed. Returns
+/// where the newer database was set aside.
+///
+/// # Errors
+/// [`RestoreError`], which says where the data stands.
+pub fn restore_pre_migration_copy(
+    db: &Path,
+    copy: &Path,
+    now_ms: i64,
+) -> Result<PathBuf, RestoreError> {
+    restore_pre_migration_copy_with(&RealFs, db, copy, now_ms)
+}
+
+/// As [`restore_pre_migration_copy`] with the file operations supplied (tests).
+///
+/// # Errors
+/// [`RestoreError`].
+#[doc(hidden)]
+pub fn restore_pre_migration_copy_with(
+    fs: &dyn RestoreFs,
+    db: &Path,
+    copy: &Path,
+    now_ms: i64,
+) -> Result<PathBuf, RestoreError> {
+    // 1. Stage and check the replacement; nothing has changed yet.
+    let staged = side_path(db, &format!(".restore-{now_ms}.tmp"));
+    let _ = std::fs::remove_file(&staged);
+    if let Err(e) = fs.copy(copy, &staged) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(RestoreError::unchanged(format!(
+            "the earlier copy could not be copied ({e})"
+        )));
+    }
+    if let Err(why) = validate_database(&staged) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(RestoreError::unchanged(why));
+    }
+    // 2. Fold the newer database into one file. Any schema can be checkpointed.
+    let folded = (|| -> rusqlite::Result<()> {
+        let conn =
+            rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         let _: (i64, i64, i64) = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })?;
         conn.pragma_update(None, "journal_mode", "DELETE")?;
+        Ok(())
+    })();
+    let wal_left = ["-wal", "-shm"].iter().any(|ext| {
+        side_path(db, ext).exists()
+            && std::fs::metadata(side_path(db, ext)).is_ok_and(|m| m.len() > 0)
+    });
+    if let Err(e) = folded {
+        let _ = std::fs::remove_file(&staged);
+        return Err(RestoreError::unchanged(format!(
+            "the current data could not be prepared ({e})"
+        )));
     }
-    let aside = PathBuf::from(format!("{}.newer-{now_ms}.bak", db.display()));
-    std::fs::rename(db, &aside)?;
+    if wal_left {
+        let _ = std::fs::remove_file(&staged);
+        return Err(RestoreError::unchanged(
+            "the current data is still in use by another program",
+        ));
+    }
+    // 3. Set the newer database aside.
+    let aside = side_path(db, &format!(".newer-{now_ms}.bak"));
+    if let Err(e) = fs.rename(db, &aside) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(RestoreError::unchanged(format!(
+            "the current data could not be set aside ({e})"
+        )));
+    }
     for ext in ["-wal", "-shm"] {
-        let side = PathBuf::from(format!("{}{ext}", db.display()));
-        if side.exists() {
-            std::fs::remove_file(side)?;
+        let _ = std::fs::remove_file(side_path(db, ext));
+    }
+    // 4. Swap the checked copy in.
+    match fs.rename(&staged, db) {
+        Ok(()) => Ok(aside),
+        Err(e) => {
+            let _ = std::fs::remove_file(&staged);
+            match fs.rename(&aside, db) {
+                Ok(()) => Err(RestoreError::unchanged(format!(
+                    "the earlier copy could not be put in place ({e}); the current data was put back"
+                ))),
+                Err(back) => {
+                    let name = aside
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let marked = std::fs::write(marker_path(db), &name).is_ok();
+                    Err(RestoreError {
+                        reason: format!(
+                            "the earlier copy could not be put in place ({e}) and the current data could not be moved back ({back}){}",
+                            if marked {
+                                ""
+                            } else {
+                                "; the safety marker could not be written either"
+                            }
+                        ),
+                        state: RestoreState::SetAside(aside),
+                    })
+                }
+            }
         }
     }
-    std::fs::copy(copy, db)?;
-    Ok(aside)
 }
 
 #[cfg(test)]
@@ -1322,5 +1529,164 @@ mod tests {
             .unwrap();
         assert!(kept);
         assert!(copy.exists());
+    }
+
+    /// A newer database (with a table only it has) and a pre-migration copy beside it.
+    fn newer_db_with_copy(dir: &Path) -> (PathBuf, PathBuf) {
+        let db = dir.join("hy.db");
+        let all = migrations::MIGRATIONS;
+        db_at(&db, &all[..all.len() - 1]);
+        db_at(&db, all);
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE newer_only (x INTEGER); INSERT INTO newer_only VALUES (7);",
+            )
+            .unwrap();
+        let copy = pre_migration_copies(&db).remove(0).1;
+        (db, copy)
+    }
+
+    fn has_newer(db: &Path) -> bool {
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row("SELECT x FROM newer_only", [], |r| r.get::<_, i64>(0))
+            .is_ok_and(|x| x == 7)
+    }
+
+    fn leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".restore-") || n.contains(".newer-"))
+            .collect()
+    }
+
+    type RenameRule = Box<dyn Fn(&Path, &Path) -> bool>;
+
+    /// File operations that fail on request.
+    struct Faulty {
+        partial_copy: bool,
+        fail_rename: RenameRule,
+    }
+
+    impl RestoreFs for Faulty {
+        fn copy(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            if self.partial_copy {
+                // Half the file lands, then the disk is full.
+                let bytes = std::fs::read(from)?;
+                std::fs::write(to, &bytes[..bytes.len() / 2])?;
+                return Err(std::io::Error::other("disk full"));
+            }
+            RealFs.copy(from, to)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            if (self.fail_rename)(from, to) {
+                return Err(std::io::Error::other("access denied"));
+            }
+            RealFs.rename(from, to)
+        }
+    }
+
+    fn renames_fail_when(f: impl Fn(&Path, &Path) -> bool + 'static) -> Faulty {
+        Faulty {
+            partial_copy: false,
+            fail_rename: Box::new(f),
+        }
+    }
+
+    #[test]
+    fn a_restore_whose_source_cannot_be_read_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, _) = newer_db_with_copy(dir.path());
+        let missing = dir.path().join("hy.db.pre-v1.bak.gone");
+        let err = restore_pre_migration_copy(&db, &missing, 1).unwrap_err();
+        assert_eq!(err.state, RestoreState::Unchanged);
+        assert!(has_newer(&db));
+        assert!(
+            leftovers(dir.path()).is_empty(),
+            "{:?}",
+            leftovers(dir.path())
+        );
+        assert!(incomplete_restore(&db).is_none());
+    }
+
+    #[test]
+    fn a_restore_whose_copy_fails_part_way_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, copy) = newer_db_with_copy(dir.path());
+        let fs = Faulty {
+            partial_copy: true,
+            fail_rename: Box::new(|_, _| false),
+        };
+        let err = restore_pre_migration_copy_with(&fs, &db, &copy, 2).unwrap_err();
+        assert_eq!(err.state, RestoreState::Unchanged);
+        assert!(err.reason.contains("disk full"));
+        assert!(has_newer(&db));
+        assert!(leftovers(dir.path()).is_empty());
+        assert!(copy.exists());
+    }
+
+    #[test]
+    fn a_damaged_copy_is_refused_before_anything_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, copy) = newer_db_with_copy(dir.path());
+        let bytes = std::fs::read(&copy).unwrap();
+        std::fs::write(&copy, &bytes[..bytes.len() / 3]).unwrap();
+        let err = restore_pre_migration_copy(&db, &copy, 3).unwrap_err();
+        assert_eq!(err.state, RestoreState::Unchanged);
+        assert!(has_newer(&db));
+        assert!(leftovers(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_restore_that_cannot_set_the_data_aside_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, copy) = newer_db_with_copy(dir.path());
+        let live = db.clone();
+        let fs = renames_fail_when(move |from, _| from == live);
+        let err = restore_pre_migration_copy_with(&fs, &db, &copy, 4).unwrap_err();
+        assert_eq!(err.state, RestoreState::Unchanged);
+        assert!(has_newer(&db));
+        assert!(leftovers(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_failed_swap_puts_the_current_data_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, copy) = newer_db_with_copy(dir.path());
+        let fs = renames_fail_when(|from, _| from.to_string_lossy().contains(".restore-"));
+        let err = restore_pre_migration_copy_with(&fs, &db, &copy, 5).unwrap_err();
+        assert_eq!(err.state, RestoreState::Unchanged);
+        assert!(err.reason.contains("put back"));
+        assert!(has_newer(&db));
+        assert!(leftovers(dir.path()).is_empty());
+        assert!(incomplete_restore(&db).is_none());
+    }
+
+    #[test]
+    fn a_swap_that_cannot_be_undone_leaves_a_marker_and_never_an_empty_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, copy) = newer_db_with_copy(dir.path());
+        let live = db.clone();
+        // Renaming anything onto the live name fails.
+        let fs = renames_fail_when(move |_, to| to == live);
+        let err = restore_pre_migration_copy_with(&fs, &db, &copy, 6).unwrap_err();
+        let RestoreState::SetAside(aside) = err.state.clone() else {
+            panic!("expected the data set aside: {err:?}");
+        };
+        assert!(!db.exists());
+        assert!(
+            has_newer(&aside),
+            "the current data is whole where it was set aside"
+        );
+        // The next start sees the marker (and must not create a database), and can
+        // move the data back.
+        assert_eq!(incomplete_restore(&db), Some(aside.clone()));
+        recover_incomplete_restore(&db).unwrap();
+        assert!(has_newer(&db));
+        assert!(incomplete_restore(&db).is_none());
+        assert!(!aside.exists());
     }
 }

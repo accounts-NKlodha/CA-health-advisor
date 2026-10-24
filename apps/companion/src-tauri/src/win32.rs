@@ -596,10 +596,26 @@ pub fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
 
 /// The named mutex that says a HealthierYou companion is running in this session.
 const RUNNING_MUTEX: &str = "Local\\HealthierYou.Companion.Running";
+const HELPER_MUTEX: &str = "Local\\HealthierYou.Companion.UpdateHelper";
 
 /// Record that the companion is running (for the lifetime of this process).
 pub fn mark_running() {
-    let name = wide(RUNNING_MUTEX);
+    hold_mutex(RUNNING_MUTEX);
+}
+
+/// Marks this process as the update helper until it ends (slice V1-6), so a companion
+/// started meanwhile leaves the helper's attempt alone.
+pub fn mark_update_helper() {
+    hold_mutex(HELPER_MUTEX);
+}
+
+/// Whether an update helper is running in this session.
+pub fn update_helper_running() -> bool {
+    mutex_exists(HELPER_MUTEX)
+}
+
+fn hold_mutex(mutex: &str) {
+    let name = wide(mutex);
     // SAFETY: a null security descriptor and a live name. The handle is deliberately kept
     // open until the process ends, which is what marks the app as running.
     unsafe {
@@ -609,7 +625,11 @@ pub fn mark_running() {
 
 /// Whether a companion is running in this session (one that called [`mark_running`]).
 pub fn companion_running() -> bool {
-    let name = wide(RUNNING_MUTEX);
+    mutex_exists(RUNNING_MUTEX)
+}
+
+fn mutex_exists(mutex: &str) -> bool {
+    let name = wide(mutex);
     // SAFETY: a live name; a returned handle is closed at once.
     unsafe {
         let h = OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr());
