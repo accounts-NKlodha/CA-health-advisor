@@ -90,7 +90,8 @@ fn take_slot(counts: &Arc<Mutex<Counts>>, ip: IpAddr, limits: &Limits) -> Option
     })
 }
 
-/// Serve the LAN API on `listener` until `shutdown` turns true.
+/// Serve the LAN API on `listener` until `shutdown` turns true, then stop every
+/// connection and wait for the blocking operations they started.
 ///
 /// # Errors
 /// A rustls error if the TLS configuration cannot be built.
@@ -103,9 +104,14 @@ pub async fn serve_api(
     let acceptor = TlsAcceptor::from(crate::tls::server_config(&server.keys)?);
     let router = api::router(server.clone());
     let counts = Arc::new(Mutex::new(Counts::default()));
-    // Every open connection holds the server; on shutdown they are stopped and awaited,
-    // so the caller holds the last reference once this returns (the database can then
-    // be closed, e.g. before a restore replaces it).
+    // Every open connection holds the server, and so does every blocking operation a
+    // request started (it runs to the end even when its connection is stopped). On
+    // shutdown the connections are stopped and awaited, then this waits until no
+    // blocking operation is left running ([`Server::idle`]). So once this has returned,
+    // and `serve_admin` too if it runs on the same server, nothing either listener
+    // started holds a reference: what remains is the caller's own (tested by
+    // `crates/hy-server/tests/shutdown.rs`). Other work the caller spawned with the
+    // server, such as the executable's maintenance task, is the caller's to stop.
     let mut connections = tokio::task::JoinSet::new();
     loop {
         while connections.try_join_next().is_some() {}
@@ -113,6 +119,8 @@ pub async fn serve_api(
             a = listener.accept() => a,
             _ = shutdown.changed() => {
                 connections.shutdown().await;
+                drop(router);
+                server.idle().await;
                 return Ok(());
             }
         };
@@ -161,7 +169,7 @@ pub fn admin_address_ok(addr: &SocketAddr) -> bool {
 }
 
 /// Serve the admin page on `listener` (which must be bound to a loopback address) until
-/// `shutdown` turns true.
+/// `shutdown` turns true, then stop and wait as [`serve_api`] does.
 ///
 /// # Errors
 /// `InvalidInput` if the listener is not on a loopback address.
@@ -177,18 +185,27 @@ pub async fn serve_admin(
             "the admin page is served on a loopback address only",
         ));
     }
-    let router = crate::admin::router(server, local.port());
+    let router = crate::admin::router(server.clone(), local.port());
+    // As in `serve_api`: connections are stopped and awaited on shutdown, then the
+    // blocking operations they started (a sign-in check) are waited for.
+    let mut connections = tokio::task::JoinSet::new();
     loop {
+        while connections.try_join_next().is_some() {}
         let accepted = tokio::select! {
             a = listener.accept() => a,
-            _ = shutdown.changed() => return Ok(()),
+            _ = shutdown.changed() => {
+                connections.shutdown().await;
+                drop(router);
+                server.idle().await;
+                return Ok(());
+            }
         };
         let Ok((tcp, _peer)) = accepted else {
             tokio::time::sleep(Duration::from_millis(50)).await;
             continue;
         };
         let router = router.clone();
-        tokio::spawn(async move {
+        connections.spawn(async move {
             let svc = router.map_request(|r: hyper::Request<hyper::body::Incoming>| {
                 r.map(axum::body::Body::new)
             });

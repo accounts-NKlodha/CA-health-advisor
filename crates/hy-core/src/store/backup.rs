@@ -350,6 +350,20 @@ impl Store {
                 rusqlite::params![theirs.to_string(), theirs],
             )?;
         }
+        // Tracker tallies carry no origin. After another PC's backup, no day they cover
+        // is ever shared as this PC's work session (T-L7); the mark lives in
+        // `store_meta`, which no backup carries, and only ever moves later.
+        if c.origin_device != self.device_id {
+            let latest: Option<String> =
+                tx.query_row("SELECT MAX(local_date) FROM activity_day", [], |r| r.get(0))?;
+            if let Some(latest) = latest {
+                tx.execute(
+                    "INSERT INTO store_meta (key, value) VALUES (?1, ?2)
+                     ON CONFLICT (key) DO UPDATE SET value = max(value, excluded.value)",
+                    rusqlite::params![super::sync::FOREIGN_TALLIES, latest],
+                )?;
+            }
+        }
         // The imported data replaces this PC's, so its server link no longer describes
         // it: unpair in the same transaction (the link's removal trigger clears the
         // receipt, the device cache and the queue) and switch every category off. The PC

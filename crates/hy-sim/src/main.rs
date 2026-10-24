@@ -141,7 +141,10 @@ async fn start(
 async fn stop(r: Running) -> Result<(), Fail> {
     let _ = r.shutdown.send(true);
     r.task.await.map_err(fail)?;
-    // The database must be closed before a restore replaces it.
+    // The database must be closed before a restore replaces it. `serve_api` returns only
+    // after its connections and the blocking operations they started have ended
+    // (`hy-server/tests/shutdown.rs`), and no admin listener runs here, so this is the
+    // last reference; anything else is refused rather than restored over.
     Arc::try_unwrap(r.server)
         .map(drop)
         .map_err(|_| fail("the server is still referenced after shutdown"))

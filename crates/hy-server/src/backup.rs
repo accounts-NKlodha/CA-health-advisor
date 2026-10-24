@@ -16,8 +16,13 @@
 //! `backup.key` is 32 random bytes protected like the other server keys (machine-scope
 //! DPAPI on Windows) and never written into a backup, so a backup cannot be restored on
 //! another machine (contract 10). **If the key is lost, every existing backup is
-//! permanently unrecoverable**: the administrator keeps a protected copy of the keys
-//! folder (the admin page and the `hy-server` usage text say so). The snapshot records its own `snapshot_id`; a restore
+//! permanently unrecoverable**. A copy of the keys folder opens only on this same Windows
+//! installation (machine-scope DPAPI), so it guards against the files being deleted, not
+//! against losing the PC: it is not a portable recovery route. On a replacement server,
+//! after an OS reinstall, or whenever the keys cannot be opened, the approved route is the
+//! full reset: new keys, every PC re-pairs with a new slip, and the old backups cannot be
+//! opened (contract 6.2, owner decision O4). The admin page, the `hy-server` usage text and
+//! `docs/Server_Operations.md` say so. The snapshot records its own `snapshot_id`; a restore
 //! marks the restored database so the next start puts every user in recovery hold and
 //! voids every unused slip (contract 9).
 
