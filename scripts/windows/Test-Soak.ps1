@@ -227,7 +227,7 @@ function Get-ProcessSample([int[]]$Roots, [datetime]$Start) {
 # A CI run ends when the program exits by itself: a sample taken while it was exiting is
 # not a crash (its exit code and report decide that).
 function Remove-TrailingExit($Samples) {
-  $list = @($Samples)
+  $list = @(foreach ($x in $Samples) { $x })
   $n = $list.Count
   while ($n -gt 0 -and -not $list[$n - 1].roots_alive) { $n-- }
   if ($n -eq 0) { return @() }
@@ -269,7 +269,7 @@ function Write-Environment {
 
 # Trend, crash and awake checks over the samples (after the warm-up).
 function Test-Samples($Samples, [double]$WarmupFraction, [double]$NeedAwakeH) {
-  $s = @($Samples)
+  $s = @(foreach ($x in $Samples) { $x })
   $dead = @($s | Where-Object { -not $_.roots_alive })
   Add-Check 'no crash or restart' ($dead.Count -eq 0 -and $s.Count -gt 0) $(if ($dead.Count) { "the main process was gone from $($dead[0].t_s) s" } else { "$($s.Count) samples, same main process throughout" })
   $secs = [double[]]@($s | ForEach-Object { $_.t_s })
@@ -342,6 +342,16 @@ function Invoke-SelfTest {
   Expect 'three samples over 5% fail' (Test-Cpu $s30 $spike 2 5 3).Pass $false
   $blip = [double[]](0..60 | ForEach-Object { if ($_ -eq 10) { 30.0 } else { 0.2 } })
   Expect 'one short spike passes' (Test-Cpu $s30 $blip 2 5 3).Pass $true
+  # The samples as the sampling loops collect them: ordered dictionaries in a generic list.
+  $list = New-Object System.Collections.Generic.List[object]
+  foreach ($i in 0..11) { $list.Add([ordered]@{ t_s = 10.0 * $i; roots_alive = ($i -lt 10); locked = $false; working_set_mb = 100.0; private_bytes_mb = 80.0; handles = 500; threads = 30 }) }
+  $kept = @(Remove-TrailingExit $list)
+  Expect 'samples taken while the program exited are dropped' ($kept.Count -eq 10 -and $kept[9].t_s -eq 90) $true
+  $before = $Checks.Count
+  $w = @(Test-Samples $list 0.0 0)
+  $new = @($Checks | Select-Object -Skip $before)
+  Expect 'collected samples analyse; an exit mid-run is a crash' ($w.Count -eq 10 -and $new.Count -eq 5 -and -not $new[0].Pass -and -not ($new | Select-Object -Skip 1 | Where-Object { -not $_.Pass })) $true
+  while ($Checks.Count -gt $before) { $Checks.RemoveAt($Checks.Count - 1) }
   if ($script:selfBad) { throw "Soak analysis self-test: $($script:selfBad) case(s) wrong" }
   Write-Host 'Soak analysis self-test: all cases right.'
 }
