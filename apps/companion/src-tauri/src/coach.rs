@@ -214,6 +214,15 @@ impl CoachRunner {
         }
     }
 
+    /// Queue `f` on the engine thread without waiting for it (the posture cue asks the
+    /// engine and hears back through a post to the shell). Whether it was queued.
+    pub fn submit(&self, f: impl FnOnce(&mut CoachLink) + Send + 'static) -> bool {
+        self.send(Msg::Job(Box::new(move |link| {
+            f(link);
+            Flow::Continue
+        })))
+    }
+
     /// Run `f` on the engine thread and wait for its result, for reads and the
     /// self-test: `None` whatever the reason.
     pub fn call<T: Send + 'static>(

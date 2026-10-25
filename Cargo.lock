@@ -1749,6 +1749,7 @@ dependencies = [
  "hy-core",
  "hy-server",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

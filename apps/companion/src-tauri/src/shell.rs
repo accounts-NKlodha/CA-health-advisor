@@ -747,8 +747,9 @@ impl Shell {
 
     /// An action in the engine's bubble.
     ///
-    /// Two answers also open a window: "Edit plan" on the planned recovery day (the plan
-    /// window, W15) and "Open" on the weekly review offer (the review on that week, W13).
+    /// Three answers also open a window: "Edit plan" on the planned recovery day (the plan
+    /// window, W15), "Open" on the weekly review offer (the review on that week, W13) and
+    /// "Recalibrate" on the posture cue (the camera page).
     /// The engine closes the card either way.
     pub fn bubble_action(self: &Arc<Self>, bubble_id: &str, action_id: &str) {
         let offered = matches!(
@@ -761,6 +762,9 @@ impl Shell {
         }
         if action_id == action::EDIT_PLAN {
             self.open_plan();
+        } else if action_id == action::POSTURE_RECALIBRATE {
+            // The camera page, where Calibrate is (slice V2-2).
+            self.camera_open();
         } else if let Some(week) = hy_pet::link::review_week(action_id) {
             self.open_review_on(week);
         }

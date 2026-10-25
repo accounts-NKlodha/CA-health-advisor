@@ -354,6 +354,8 @@ fn every_payload_kind_round_trips_through_the_store() {
             EventPayload::PostureObservation {
                 kind: crate::schema::PostureKind::BaselineSuspect,
                 duration_s: 120,
+                reason: Some(crate::schema::PostureReason::CameraMoved),
+                cue: None,
             },
             MeasurementStatus::NoReading,
         ),

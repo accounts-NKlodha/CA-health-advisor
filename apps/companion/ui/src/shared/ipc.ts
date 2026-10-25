@@ -103,6 +103,7 @@ interface Commands {
   camera_withdraw: { args: undefined; result: CameraPage };
   camera_report: { args: { report: PageReport }; result: void };
   camera_frame: { args: { report: FrameReport }; result: void };
+  camera_calibrate: { args: { start: boolean }; result: CameraPage };
 }
 
 type Name = keyof Commands;

@@ -285,6 +285,10 @@ pub enum Input {
     Review(ReviewAnswer),
     /// An answer on the meditation invitation or in the pause (V2-4; wireframe B12).
     Meditation(MeditationAction),
+    /// The posture check asks for its cue: a drift episode started (slice V2-2). Applied
+    /// if the card opened; otherwise ignored with the reason
+    /// ([`crate::coach::engine::CUE_FOCUS`] and the others).
+    PostureCue,
 }
 
 /// What the user chose on the meditation invitation or in the pause (V2-4; wireframe
@@ -336,6 +340,7 @@ impl Input {
                 | Self::Resume
                 | Self::PresentationChanged(_)
                 | Self::MediaInUseChanged(_)
+                | Self::PostureCue
         )
     }
 }
@@ -591,6 +596,9 @@ pub enum Bubble {
     /// The meditation pause: five short text parts with Next, Pause or Resume, Stop and
     /// the other version, then "Done. Back to work whenever you are ready."
     Meditation(MeditationView),
+    /// The posture cue (slice V2-2): a sustained change from the calibration. OK, or
+    /// Recalibrate (the shell opens the camera page).
+    PostureCue,
 }
 
 /// The meditation pause, for its card (V2-4).

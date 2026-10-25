@@ -242,6 +242,7 @@ fn all_bubbles() -> Vec<CoachBubble> {
             ..meditation_view(4, true, false)
         }),
         CoachBubble::Meditation(meditation_view(4, false, true)),
+        CoachBubble::PostureCue,
     ]
 }
 
@@ -3152,6 +3153,28 @@ fn the_meditation_cards_offer_their_choices_and_route_them() {
         assert_eq!(bubble_command(k, id), Some(Input::Meditation(want)), "{id}");
     }
     assert_eq!(bubble_command(k, "meditate_5"), None);
+}
+
+#[test]
+fn the_posture_cue_offers_ok_and_recalibrate() {
+    let v = view(PetMode::Idle);
+    let b = present::bubble(&CoachBubble::PostureCue, &v);
+    assert!(b.lines.iter().all(|l| l.len() <= 200));
+    assert_eq!(b.title, "Posture check");
+    assert_eq!(all_actions(&b), vec!["ok", "posture_recalibrate"]);
+    // No judgement and no medical claim in its words.
+    let text = format!("{} {}", b.title, b.lines.join(" ")).to_lowercase();
+    for word in ["bad", "poor", "wrong", "slouch", "health", "pain", "injur"] {
+        assert!(!text.contains(word), "{word}: {text}");
+    }
+    let k = BubbleKind::PostureCue;
+    assert_eq!(BubbleKind::parse(&k.id(2)), Some(k));
+    assert_eq!(bubble_command(k, "ok"), Some(Input::CloseBubble));
+    assert_eq!(
+        bubble_command(k, "posture_recalibrate"),
+        Some(Input::CloseBubble)
+    );
+    assert_eq!(bubble_command(k, "review_skip"), None);
 }
 
 #[test]

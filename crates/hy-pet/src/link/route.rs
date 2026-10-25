@@ -357,6 +357,10 @@ pub fn bubble_command(kind: BubbleKind, action_id: &str) -> Option<Input> {
             a::OK => MeditationAction::Close,
             _ => return None,
         }),
+        BubbleKind::PostureCue => match action_id {
+            a::OK | a::POSTURE_RECALIBRATE => Input::CloseBubble,
+            _ => return None,
+        },
         BubbleKind::ReviewOffer => Input::Review(match action_id {
             a::REVIEW_LATER => ReviewAnswer::Later,
             a::REVIEW_SKIP => ReviewAnswer::Skip,

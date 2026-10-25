@@ -176,6 +176,10 @@ pub mod action {
     /// "Stop" in the pause.
     pub const MEDITATE_STOP: &str = "meditate_stop";
 
+    // The posture cue (slice V2-2).
+    /// "Recalibrate": closes the cue; the companion opens the camera page to calibrate.
+    pub const POSTURE_RECALIBRATE: &str = "posture_recalibrate";
+
     // Pet menu, keyboard panel and tray (B1, B5, B6, T1).
     /// "Show waiting reminder" or "Show Pomodoro card".
     pub const OPEN_PENDING: &str = "open_pending";
@@ -283,6 +287,8 @@ pub enum BubbleKind {
     MeditationInvite,
     /// The meditation pause.
     Meditation,
+    /// The posture cue.
+    PostureCue,
 }
 
 impl BubbleKind {
@@ -310,11 +316,12 @@ impl BubbleKind {
             CoachBubble::ReviewOffer { .. } => Self::ReviewOffer,
             CoachBubble::MeditationInvite => Self::MeditationInvite,
             CoachBubble::Meditation(_) => Self::Meditation,
+            CoachBubble::PostureCue => Self::PostureCue,
         }
     }
 
     /// The fixed keys (every kind but a reminder, whose key carries its offer).
-    const FIXED: [(Self, &'static str); 19] = [
+    const FIXED: [(Self, &'static str); 20] = [
         (Self::PomodoroBreak, "pomodoro-break"),
         (Self::PomodoroRoundDone, "pomodoro-round"),
         (Self::PomodoroPaused, "pomodoro-paused"),
@@ -334,6 +341,7 @@ impl BubbleKind {
         (Self::ReviewOffer, "review-offer"),
         (Self::MeditationInvite, "meditation-invite"),
         (Self::Meditation, "meditation"),
+        (Self::PostureCue, "posture-cue"),
     ];
 
     fn key(self) -> String {
@@ -1226,6 +1234,14 @@ pub fn bubble(b: &CoachBubble, view: &CoachView) -> Bubble {
             }
         }
         CoachBubble::Meditation(m) => meditation_card(&m),
+        CoachBubble::PostureCue => card(
+            POSTURE_CUE_TITLE,
+            vec![POSTURE_CUE_LINE.to_owned()],
+            vec![
+                act(action::OK, "OK", Primary),
+                act(action::POSTURE_RECALIBRATE, "Recalibrate", Link),
+            ],
+        ),
     }
 }
 
@@ -1289,6 +1305,12 @@ fn meditation_card(m: &MeditationView) -> Bubble {
         ..Bubble::default()
     }
 }
+
+/// The posture cue's title (slice V2-2).
+pub const POSTURE_CUE_TITLE: &str = "Posture check";
+/// The posture cue's line: a change from the user's own calibration, never a judgement
+/// of their posture and not medical advice.
+pub const POSTURE_CUE_LINE: &str = "For about a minute you have been sitting differently from your calibration. Settle back into a position that is comfortable for you, if you like.";
 
 /// Whether a click on the pet should reopen something the engine holds (a waiting
 /// reminder, the movement guide waiting behind the pet, or a Pomodoro card the user has

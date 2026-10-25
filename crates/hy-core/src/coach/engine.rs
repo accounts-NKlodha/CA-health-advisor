@@ -50,8 +50,11 @@
 mod guide;
 mod meditation;
 mod note;
+mod posture;
 mod recovery;
 mod review;
+
+pub use posture::{CUE_BUSY, CUE_COOLDOWN, CUE_FOCUS, CUE_HELD, POSTURE_CUE_COOLDOWN};
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -220,6 +223,7 @@ enum Prompt {
     RecoveryReflection,
     ReviewOffer,
     MeditationInvite,
+    PostureCue,
 }
 
 impl Prompt {
@@ -353,6 +357,9 @@ pub struct EngineState {
     /// The meditation invitation and pause (slice V2-4).
     #[serde(default)]
     meditation: meditation::Meditation,
+    /// The posture cue's cooldown (slice V2-2).
+    #[serde(default)]
+    posture: posture::PostureCue,
 }
 
 /// What one step produced.
@@ -434,6 +441,7 @@ impl Engine {
                 note: None,
                 review: review::ReviewOffer::default(),
                 meditation: meditation::Meditation::default(),
+                posture: posture::PostureCue::default(),
             },
         }
     }
@@ -1650,6 +1658,7 @@ impl Engine {
             Input::Phone(p) => self.phone_input(ctx, p, out),
             Input::Review(answer) => self.review_input(ctx, answer, out),
             Input::Meditation(action) => self.meditation_input(ctx, action, out),
+            Input::PostureCue => self.posture_cue_input(ctx, out),
         }
     }
 
@@ -1828,7 +1837,9 @@ impl Engine {
             || (p.is_recovery_card()
                 && self.s.now.saturating_sub(self.s.prompt_since) >= ms(CARD_CLOSES_AFTER))
             // The meditation invitation keeps to work hours (the check-in may run late).
-            || (p == Prompt::MeditationInvite && self.off_hours(ctx));
+            || (p == Prompt::MeditationInvite && self.off_hours(ctx))
+            // The posture cue keeps to work hours (the check-in may run late).
+            || (p == Prompt::PostureCue && self.off_hours(ctx));
         if withdraw {
             self.clear_prompt();
             out.significant = true;
@@ -2048,6 +2059,7 @@ impl Engine {
                 Prompt::Lighter => Bubble::LighterSchedule,
                 Prompt::ReviewOffer => self.review_bubble()?,
                 Prompt::MeditationInvite => Bubble::MeditationInvite,
+                Prompt::PostureCue => Bubble::PostureCue,
                 _ => self.recovery_bubble(ctx, p)?,
             });
         }

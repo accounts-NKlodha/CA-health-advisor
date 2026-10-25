@@ -331,7 +331,7 @@ text_enum! {
 }
 
 text_enum! {
-    /// Kinds of V2 posture observation (architecture 4.5). Provisional until V2-2.
+    /// Kinds of V2 posture observation (architecture 4.5).
     PostureKind {
         /// A sustained drift episode relative to calibration.
         DriftEpisode => "drift_episode",
@@ -339,6 +339,58 @@ text_enum! {
         NoReading => "no_reading",
         /// An interval with a suspect or invalid baseline.
         BaselineSuspect => "baseline_suspect",
+    }
+}
+
+text_enum! {
+    /// Why a posture interval had no reading or a suspect baseline (architecture 4.5).
+    PostureReason {
+        /// No reading: nobody in view.
+        Absent => "absent",
+        /// No reading: a person, but not visible enough.
+        LowConfidence => "low_confidence",
+        /// No reading: a shoulder outside the frame.
+        OutOfFrame => "out_of_frame",
+        /// No reading: the pose worker stopped answering.
+        Stalled => "stalled",
+        /// Suspect: the app started with a stored calibration.
+        AppRestart => "app_restart",
+        /// Suspect: the camera stream started again (after a hold, sleep or a conflict).
+        CameraRestart => "camera_restart",
+        /// Suspect: a step change in where the shoulders sit in the frame or their scale.
+        CameraMoved => "camera_moved",
+        /// Suspect: the head-to-shoulder width ratio left its calibration band while
+        /// posture stayed steady (the camera's viewpoint changed).
+        ViewpointChanged => "viewpoint_changed",
+    }
+}
+
+impl PostureReason {
+    /// Whether the reason belongs to a no-reading interval (else to a suspect baseline).
+    #[must_use]
+    pub const fn is_no_reading(self) -> bool {
+        matches!(
+            self,
+            Self::Absent | Self::LowConfidence | Self::OutOfFrame | Self::Stalled
+        )
+    }
+}
+
+text_enum! {
+    /// What became of a drift episode's cue (architecture 4.5 quality report).
+    CueOutcome {
+        /// The pet showed the cue.
+        Shown => "shown",
+        /// Suppressed: within the cooldown after the last cue.
+        Cooldown => "cooldown",
+        /// Dropped: quiet focus was on.
+        Focus => "focus",
+        /// Suppressed: a meeting, presentation or other hold.
+        Held => "held",
+        /// Suppressed: another card, exercise or Pomodoro was on show, or the calm gap.
+        Busy => "busy",
+        /// The coaching engine did not answer.
+        NoAnswer => "no_answer",
     }
 }
 
@@ -570,6 +622,12 @@ pub enum EventPayload {
         kind: PostureKind,
         /// Length of the interval or episode in seconds.
         duration_s: u32,
+        /// Why (no-reading and suspect intervals only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<PostureReason>,
+        /// What became of the cue (drift episodes only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cue: Option<CueOutcome>,
     },
     /// A sharing category changed state on this device.
     #[serde(rename = "sharing.policy_changed")]
@@ -726,9 +784,28 @@ impl EventPayload {
                     return Err(Error::invalid("a done meditation pause reached every part"));
                 }
             }
-            Self::PostureObservation { duration_s, .. } => {
+            Self::PostureObservation {
+                kind,
+                duration_s,
+                reason,
+                cue,
+            } => {
                 if *duration_s == 0 || *duration_s > 24 * 3600 {
                     return Err(Error::invalid("posture duration must be 1 s to 24 h"));
+                }
+                let consistent = match kind {
+                    PostureKind::DriftEpisode => reason.is_none() && cue.is_some(),
+                    PostureKind::NoReading => {
+                        cue.is_none() && reason.is_some_and(PostureReason::is_no_reading)
+                    }
+                    PostureKind::BaselineSuspect => {
+                        cue.is_none() && reason.is_some_and(|r| !r.is_no_reading())
+                    }
+                };
+                if !consistent {
+                    return Err(Error::invalid(
+                        "a drift episode has a cue outcome; no-reading and suspect intervals have their own reasons",
+                    ));
                 }
             }
             Self::SessionState { .. }
@@ -1029,6 +1106,8 @@ mod tests {
             EventPayload::PostureObservation {
                 kind: PostureKind::DriftEpisode,
                 duration_s: 75,
+                reason: None,
+                cue: Some(CueOutcome::Shown),
             },
             EventPayload::SharingPolicyChanged {
                 category: Category::Hydration,
@@ -1076,6 +1155,8 @@ mod tests {
         check(PhoneLabel::ALL);
         check(SessionState::ALL);
         check(PostureKind::ALL);
+        check(PostureReason::ALL);
+        check(CueOutcome::ALL);
         check(GoalKind::ALL);
         check(PolicyOpKind::ALL);
         check(PolicyOpState::ALL);
@@ -1207,6 +1288,8 @@ mod tests {
         let p = |d| EventPayload::PostureObservation {
             kind: PostureKind::NoReading,
             duration_s: d,
+            reason: Some(PostureReason::Absent),
+            cue: None,
         };
         assert!(p(0).validate().is_err());
         assert!(p(1).validate().is_ok());
@@ -1235,6 +1318,69 @@ mod tests {
         assert!(e.validate().is_ok());
         e.source = EventSource::Inferred;
         assert!(e.validate().is_err());
+    }
+
+    #[test]
+    fn posture_reasons_and_cues_belong_to_their_kinds() {
+        let p = |kind, reason, cue| EventPayload::PostureObservation {
+            kind,
+            duration_s: 60,
+            reason,
+            cue,
+        };
+        use PostureKind::{BaselineSuspect, DriftEpisode, NoReading};
+        assert!(
+            p(DriftEpisode, None, Some(CueOutcome::Focus))
+                .validate()
+                .is_ok()
+        );
+        assert!(p(DriftEpisode, None, None).validate().is_err());
+        assert!(
+            p(
+                DriftEpisode,
+                Some(PostureReason::Absent),
+                Some(CueOutcome::Shown)
+            )
+            .validate()
+            .is_err()
+        );
+        assert!(
+            p(NoReading, Some(PostureReason::Stalled), None)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            p(NoReading, Some(PostureReason::CameraMoved), None)
+                .validate()
+                .is_err()
+        );
+        assert!(p(NoReading, None, None).validate().is_err());
+        assert!(
+            p(BaselineSuspect, Some(PostureReason::ViewpointChanged), None)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            p(BaselineSuspect, Some(PostureReason::Absent), None)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            p(
+                BaselineSuspect,
+                Some(PostureReason::AppRestart),
+                Some(CueOutcome::Shown)
+            )
+            .validate()
+            .is_err()
+        );
+        // Stored without the optional fields, an episode is refused (V2-2 always writes
+        // them; nothing earlier wrote posture events).
+        let old: EventPayload = serde_json::from_str(
+            r#"{"type":"posture.observation","data":{"kind":"drift_episode","duration_s":75}}"#,
+        )
+        .unwrap();
+        assert!(old.validate().is_err());
     }
 
     #[test]

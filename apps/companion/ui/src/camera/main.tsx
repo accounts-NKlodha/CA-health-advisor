@@ -10,7 +10,7 @@ import { applyA11y, followA11y } from '../shared/a11y';
 import { call, on, report } from '../shared/ipc';
 import type { CameraPage } from '../shared/types';
 import { capture } from './capture';
-import { CONSENT_LINES, offersRetry, statsLine, statusDetail } from './text';
+import { CALIBRATION_HELP, CONSENT_LINES, offersRetry, postureDetail, statsLine, statusDetail } from './text';
 
 function closeWindow(): void {
   getCurrentWindow().close().catch(report);
@@ -94,6 +94,7 @@ function App() {
         </p>
         <p role={s.kind === 'unavailable' ? 'alert' : undefined}>{statusDetail(s)}</p>
         {capturing ? <p class="note">{statsLine(page)}</p> : null}
+        {page.on ? <Calibration page={page} act={act} /> : null}
         <p class="note">
           Frames stay in memory on this PC and are never saved or sent. Closing this window
           keeps the posture check running; turn it off here, from the pet menu or the tray.
@@ -119,6 +120,43 @@ function App() {
         </div>
       </main>
     </div>
+  );
+}
+
+/** Calibration and the baseline (slice V2-2). */
+function Calibration({ page, act }: { page: CameraPage; act: (p: Promise<CameraPage>) => void }) {
+  const p = page.posture;
+  const calibrating = p.state.kind === 'calibrating';
+  return (
+    <section aria-labelledby="cal-h">
+      <h2 id="cal-h">Calibration</h2>
+      <p role="status">
+        <strong>{p.words}</strong>
+      </p>
+      {calibrating ? (
+        <progress max={p.state.kind === 'calibrating' ? p.state.detail.needed : 1} value={p.state.kind === 'calibrating' ? p.state.detail.valid : 0}>
+          {p.state.kind === 'calibrating' ? `${p.state.detail.valid} of ${p.state.detail.needed}` : ''}
+        </progress>
+      ) : null}
+      <p role={p.state.kind === 'not_usable' || p.state.kind === 'recalibrate' ? 'alert' : undefined}>{postureDetail(p)}</p>
+      {p.state.kind === 'not_calibrated' ? <p class="note">{CALIBRATION_HELP}</p> : null}
+      <div class="actions">
+        {calibrating ? (
+          <button type="button" class="btn" onClick={() => act(call('camera_calibrate', { start: false }))}>
+            Cancel
+          </button>
+        ) : (
+          <button
+            type="button"
+            class="btn"
+            disabled={!p.can_calibrate}
+            onClick={() => act(call('camera_calibrate', { start: true }))}
+          >
+            {p.state.kind === 'not_calibrated' ? 'Calibrate' : 'Recalibrate'}
+          </button>
+        )}
+      </div>
+    </section>
   );
 }
 

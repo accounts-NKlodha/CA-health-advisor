@@ -617,6 +617,8 @@ export interface CameraPage {
   capture: boolean;
   fps: number;
   stats: CameraStats;
+  /** Calibration and the baseline (slice V2-2). */
+  posture: PostureView;
   selftest: boolean;
   a11y: Accessibility;
 }
@@ -627,6 +629,64 @@ export interface FrameReport {
   issue: FrameIssue | null;
   inference_ms: number;
   visibility: number;
+  /** A valid frame's posture numbers (slice V2-2; hy_core::posture::Features). */
+  features?: Features;
+}
+
+/** A few numbers from one valid frame (hy_core::posture::Features). */
+export interface Features {
+  head: 'ears' | 'eyes';
+  gap: number;
+  width: number;
+  tilt: number;
+  roll: number;
+  mid_x: number;
+  mid_y: number;
+  span: number;
+  turn: number;
+}
+
+export type CalibrationIssue =
+  | 'too_few_frames'
+  | 'out_of_view'
+  | 'too_far'
+  | 'too_close'
+  | 'poorly_visible'
+  | 'moved'
+  | 'interrupted';
+
+export type PostureReason =
+  | 'absent'
+  | 'low_confidence'
+  | 'out_of_frame'
+  | 'stalled'
+  | 'app_restart'
+  | 'camera_restart'
+  | 'camera_moved'
+  | 'viewpoint_changed';
+
+export type PostureState =
+  | { kind: 'not_calibrated' }
+  | { kind: 'calibrating'; detail: { valid: number; needed: number } }
+  | { kind: 'not_usable'; detail: CalibrationIssue }
+  | { kind: 'ready' }
+  | { kind: 'suspect'; detail: PostureReason }
+  | { kind: 'recalibrate' };
+
+export interface PostureView {
+  state: PostureState;
+  words: string;
+  issue: string | null;
+  calibrated_at: string | null;
+  can_calibrate: boolean;
+  stats: {
+    calibrations: number;
+    episodes: number;
+    cues_shown: number;
+    cues_suppressed: number;
+    suspects: number;
+    invalidations: number;
+  };
 }
 
 export type CapturePath = 'processor' | 'video';

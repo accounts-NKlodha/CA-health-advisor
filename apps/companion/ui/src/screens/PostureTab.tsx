@@ -1,10 +1,11 @@
 // Settings > Posture check (V2-1; wireframe W10): the status, Set up (the consent and
 // camera page), Turn camera on or off, Try again, Withdraw consent, and the privacy note.
-// Calibration and Recalibrate come with slice V2-2.
+// Slice V2-2 adds the calibration's state; Calibrate is on the camera page, where the
+// user can see their progress.
 import { useEffect, useState } from 'preact/hooks';
 import { call, on, report } from '../shared/ipc';
 import type { CameraPage } from '../shared/types';
-import { offersRetry, statusDetail } from '../camera/text';
+import { offersRetry, postureDetail, statusDetail } from '../camera/text';
 
 export function PostureTab() {
   const [page, setPage] = useState<CameraPage | null>(null);
@@ -61,6 +62,21 @@ export function PostureTab() {
           ) : null}
         </div>
       </section>
+      {page.consented ? (
+        <section aria-labelledby="cam-cal-h">
+          <h3 id="cam-cal-h">Calibration</h3>
+          <p>
+            <strong>{page.posture.words}</strong>
+          </p>
+          <p>{postureDetail(page.posture)}</p>
+          {page.posture.calibrated_at ? (
+            <p class="note">Calibrated {new Date(page.posture.calibrated_at).toLocaleString()}.</p>
+          ) : null}
+          <button type="button" class="btn" onClick={() => void call('camera_open').catch(report)}>
+            Calibrate on the camera page
+          </button>
+        </section>
+      ) : null}
       <section aria-labelledby="cam-privacy-h">
         <h3 id="cam-privacy-h">Privacy</h3>
         <p class="note">

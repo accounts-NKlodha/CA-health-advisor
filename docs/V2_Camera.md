@@ -174,7 +174,7 @@ or pictures).
 | Webcam light off within 2 s of Off | V2-1 | `-Phase Session` |
 | A second (USB) webcam unplugged and plugged back | V2-1 | `-Phase Session` |
 | 2-hour soak: memory growth, no stop for "not responding", holds during normal work | V2-5 | `-Phase Soak -Minutes 120` |
-| Calibration quality, floors, drift and the viewpoint cue | V2-2 / V2-3 | (with V2-2) |
+| Calibration quality, floors, drift and the viewpoint cue | V2-2 / V2-3 | `-Phase Calibration` (see `docs/V2_Posture.md`) |
 
 ## Deviations and decisions to confirm
 
