@@ -417,12 +417,15 @@ fn posture(shell: &Arc<Shell>, r: &mut Report) {
     );
 
     // A sustained drift: one cue asked of the engine, one episode recorded with its
-    // outcome when it ends.
-    let fed =
-        feed(shell, &mut t, 85, |f| Features { gap: 0.40, ..f }) && feed(shell, &mut t, 20, |f| f);
+    // outcome when it ends. The frames arrive far faster than real time and the engine
+    // answers on its own thread (busy during the CI soak), so wait for its answer after
+    // the cue (asked after 60 s of drift) before the drift goes on and ends, as at a desk.
+    let slump: fn(Features) -> Features = |f| Features { gap: 0.40, ..f };
+    let mut fed = feed(shell, &mut t, 75, slump);
     let answered = wait_until(Duration::from_secs(10), || {
         on_main(shell, |s| !s.camera_test_facts().cue_outcomes.is_empty()) == Some(true)
     });
+    fed = fed && feed(shell, &mut t, 10, slump) && feed(shell, &mut t, 20, |f| f);
     let facts = on_main(shell, |s| s.camera_test_facts());
     let outcomes = facts
         .as_ref()
