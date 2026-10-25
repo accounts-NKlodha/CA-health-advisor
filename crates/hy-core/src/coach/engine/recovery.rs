@@ -385,7 +385,11 @@ impl Engine {
     /// The bubble for a recovery card (`None` if it no longer applies).
     pub(super) fn recovery_bubble(&self, ctx: &Context, p: Prompt) -> Option<Bubble> {
         Some(match p {
-            Prompt::CheckIn | Prompt::Lighter | Prompt::ReviewOffer | Prompt::PostureCue => {
+            Prompt::CheckIn
+            | Prompt::Lighter
+            | Prompt::ReviewOffer
+            | Prompt::MeditationInvite
+            | Prompt::PostureCue => {
                 return None;
             }
             Prompt::DeadlineDay => Bubble::DeadlineDay,

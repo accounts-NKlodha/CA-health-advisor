@@ -20,7 +20,9 @@ use super::config::PomodoroPreset;
 use super::recovery::{RecoveryAction, RecoveryPlan, RecoveryView};
 use super::water::{Servings, WaterEntry, WaterPace};
 use crate::camera::HoldSources;
-use crate::schema::{Activity, PhoneLabel, RoutineOutcome, RoutineVariant, SessionState};
+use crate::schema::{
+    Activity, MeditationVersion, PhoneLabel, RoutineOutcome, RoutineVariant, SessionState,
+};
 
 /// How long the user paused coaching for (wireframe B5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,10 +283,36 @@ pub enum Input {
     Phone(PhoneInput),
     /// An answer on the weekly review offer (wireframe B9).
     Review(ReviewAnswer),
+    /// An answer on the meditation invitation or in the pause (V2-4; wireframe B12).
+    Meditation(MeditationAction),
     /// The posture check asks for its cue: a drift episode started (slice V2-2). Applied
     /// if the card opened; otherwise ignored with the reason
     /// ([`crate::coach::engine::CUE_FOCUS`] and the others).
     PostureCue,
+}
+
+/// What the user chose on the meditation invitation or in the pause (V2-4; wireframe
+/// B12, flow 10). The pause never starts by itself: only [`MeditationAction::Start`] on the
+/// invitation starts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeditationAction {
+    /// 2, 5 or 10 minutes on the invitation.
+    Start(u32),
+    /// "Not today": skipped for today, with no backlog.
+    NotToday,
+    /// "Next": the next part now.
+    Next,
+    /// "Pause": the part's time stops.
+    Pause,
+    /// "Resume".
+    Resume,
+    /// Switch between the breath-focused and the eyes-open, non-breath versions.
+    Switch,
+    /// "Stop": ends the pause (recorded as stopped).
+    Stop,
+    /// "OK" on the last screen.
+    Close,
 }
 
 /// An answer on the weekly review offer (wireframe B9).
@@ -562,9 +590,32 @@ pub enum Bubble {
         /// "Later" is offered (the first offer of the week).
         later: bool,
     },
+    /// The daily meditation invitation (V2-4; wireframe B12): 2, 5 (default) or 10
+    /// minutes, or Not today.
+    MeditationInvite,
+    /// The meditation pause: five short text parts with Next, Pause or Resume, Stop and
+    /// the other version, then "Done. Back to work whenever you are ready."
+    Meditation(MeditationView),
     /// The posture cue (slice V2-2): a sustained change from the calibration. OK, or
     /// Recalibrate (the shell opens the camera page).
     PostureCue,
+}
+
+/// The meditation pause, for its card (V2-4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeditationView {
+    /// The length chosen: 2, 5 or 10 minutes.
+    pub minutes: u32,
+    /// Breath-focused or eyes open.
+    pub version: MeditationVersion,
+    /// The part on screen, from 0 (0 to 4).
+    pub part: u32,
+    /// Paused by the user.
+    pub paused: bool,
+    /// Time left in this part.
+    pub part_left: Duration,
+    /// Every part is over: the last screen.
+    pub done: bool,
 }
 
 /// Where the movement guide is (wireframe B4, flow 3).

@@ -497,11 +497,13 @@ mod tests {
             "long_day_check_in": { "enabled": true, "hours": 10 },
             "pomodoro_auto_start": true,
             "movement_version": "seated",
-            "review": { "day": "fri", "at": "18:00" }
+            "review": { "day": "fri", "at": "18:00" },
+            "meditation": { "at": "15:00" }
         }))
         .unwrap();
         config.validate().unwrap();
         assert_eq!(config.review.day, chrono::Weekday::Fri);
+        assert!(config.meditation.at.is_some());
         // Saves send one field at a time (CoachChange, WaterChange, WorkweekChange).
         use hy_core::settings::{CoachChange, WaterChange, WorkweekChange};
         for (sent, field) in [
@@ -519,6 +521,14 @@ mod tests {
             (
                 serde_json::json!({ "review": { "day": "fri", "at": "18:00" } }),
                 "review",
+            ),
+            (
+                serde_json::json!({ "meditation": { "at": "15:00" } }),
+                "meditation",
+            ),
+            (
+                serde_json::json!({ "meditation": { "at": null } }),
+                "meditation off",
             ),
         ] {
             let change: CoachChange = serde_json::from_value(sent.clone()).unwrap();

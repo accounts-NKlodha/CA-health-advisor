@@ -10,8 +10,8 @@
 use chrono::{NaiveDate, Weekday};
 use hy_core::coach::water::WATER_PANEL_RANGE_ML;
 use hy_core::coach::{
-    CheckInAnswer, GuideAction, Input, PauseLength, PomodoroPreset, RecoveryAction, Reflection,
-    Response, ReviewAnswer, WaterInput,
+    CheckInAnswer, GuideAction, Input, MeditationAction, PauseLength, PomodoroPreset,
+    RecoveryAction, Reflection, Response, ReviewAnswer, WaterInput,
 };
 use hy_core::schema::{PhoneLabel, RoutineOutcome, RoutineVariant};
 use uuid::Uuid;
@@ -338,6 +338,25 @@ pub fn bubble_command(kind: BubbleKind, action_id: &str) -> Option<Input> {
             a::OK => Input::CloseBubble,
             _ => return None,
         },
+        BubbleKind::MeditationInvite => Input::Meditation(match action_id {
+            a::MEDITATE_NOT_TODAY => MeditationAction::NotToday,
+            other => {
+                let minutes: u32 = other.strip_prefix(a::MEDITATE_PREFIX)?.parse().ok()?;
+                if !hy_core::schema::MEDITATION_MINUTES.contains(&minutes) {
+                    return None;
+                }
+                MeditationAction::Start(minutes)
+            }
+        }),
+        BubbleKind::Meditation => Input::Meditation(match action_id {
+            a::MEDITATE_NEXT => MeditationAction::Next,
+            a::MEDITATE_PAUSE => MeditationAction::Pause,
+            a::MEDITATE_RESUME => MeditationAction::Resume,
+            a::MEDITATE_SWITCH => MeditationAction::Switch,
+            a::MEDITATE_STOP => MeditationAction::Stop,
+            a::OK => MeditationAction::Close,
+            _ => return None,
+        }),
         BubbleKind::PostureCue => match action_id {
             a::OK | a::POSTURE_RECALIBRATE => Input::CloseBubble,
             _ => return None,

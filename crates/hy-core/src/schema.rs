@@ -270,6 +270,33 @@ text_enum! {
 }
 
 text_enum! {
+    /// The meditation pause's version (V2-4; CAL-01): breath-focused, or eyes open with no
+    /// attention on the breath.
+    MeditationVersion {
+        /// Breath-focused.
+        Breath => "breath",
+        /// Eyes open, attention on sounds, touch and the room; nothing about the breath.
+        EyesOpen => "eyes_open",
+    }
+}
+
+text_enum! {
+    /// How a meditation pause ended. It stays on this PC.
+    MeditationOutcome {
+        /// Every part was reached and the time ran out (or Next on the last part).
+        Done => "done",
+        /// Stopped by the user, closed, or ended by a hold (a lock, meeting, presentation,
+        /// focus, pause, the end of work hours) or the app closing.
+        Stopped => "stopped",
+    }
+}
+
+/// The meditation pause lengths offered, in minutes (2, 5 or 10; 5 is the default).
+pub const MEDITATION_MINUTES: [u32; 3] = [2, 5, 10];
+/// Parts in a meditation pause.
+pub const MEDITATION_PARTS: u32 = 5;
+
+text_enum! {
     /// Label of a phone self-report (DIS-01).
     PhoneLabel {
         /// No label chosen.
@@ -573,6 +600,21 @@ pub enum EventPayload {
         /// The answer ("Skip" records nothing).
         answer: ReflectionAnswer,
     },
+    /// A meditation pause (V2-4; CAL-01): started from the daily invitation, text only.
+    /// Stays on this PC and is never shared.
+    #[serde(rename = "meditation.session")]
+    MeditationSession {
+        /// The pause's id.
+        session_id: Uuid,
+        /// The length chosen: 2, 5 or 10 minutes.
+        minutes: u32,
+        /// The version in use when it ended.
+        version: MeditationVersion,
+        /// Done or stopped.
+        outcome: MeditationOutcome,
+        /// Parts reached (1 to 5).
+        parts_reached: u32,
+    },
     /// A V2 posture observation (derived numbers only, never frames or landmarks).
     #[serde(rename = "posture.observation")]
     PostureObservation {
@@ -614,6 +656,7 @@ impl EventPayload {
             Self::RecoveryCheckIn { .. } => "recovery.check_in",
             Self::RecoveryPlanChanged { .. } => "recovery.plan",
             Self::RecoveryReflection { .. } => "recovery.reflection",
+            Self::MeditationSession { .. } => "meditation.session",
             Self::PhoneInterruption { .. } => "phone.interruption",
             Self::PostureObservation { .. } => "posture.observation",
             Self::SharingPolicyChanged { .. } => "sharing.policy_changed",
@@ -642,6 +685,7 @@ impl EventPayload {
                 | Self::RecoveryCheckIn { .. }
                 | Self::RecoveryPlanChanged { .. }
                 | Self::RecoveryReflection { .. }
+                | Self::MeditationSession { .. }
         )
     }
 
@@ -722,6 +766,22 @@ impl EventPayload {
                     return Err(Error::invalid(format!(
                         "routine outcome {outcome} does not match {steps_done} of {steps_total} steps done"
                     )));
+                }
+            }
+            Self::MeditationSession {
+                minutes,
+                outcome,
+                parts_reached,
+                ..
+            } => {
+                if !MEDITATION_MINUTES.contains(minutes) {
+                    return Err(Error::invalid("a meditation pause is 2, 5 or 10 minutes"));
+                }
+                if !(1..=MEDITATION_PARTS).contains(parts_reached) {
+                    return Err(Error::invalid("a meditation pause reaches 1 to 5 parts"));
+                }
+                if *outcome == MeditationOutcome::Done && *parts_reached != MEDITATION_PARTS {
+                    return Err(Error::invalid("a done meditation pause reached every part"));
                 }
             }
             Self::PostureObservation {
@@ -1036,6 +1096,13 @@ mod tests {
             EventPayload::PhoneInterruption {
                 label: PhoneLabel::Work,
             },
+            EventPayload::MeditationSession {
+                session_id: Uuid::nil(),
+                minutes: 5,
+                version: MeditationVersion::EyesOpen,
+                outcome: MeditationOutcome::Done,
+                parts_reached: 5,
+            },
             EventPayload::PostureObservation {
                 kind: PostureKind::DriftEpisode,
                 duration_s: 75,
@@ -1083,6 +1150,8 @@ mod tests {
         check(CheckInReply::ALL);
         check(PlanChange::ALL);
         check(ReflectionAnswer::ALL);
+        check(MeditationVersion::ALL);
+        check(MeditationOutcome::ALL);
         check(PhoneLabel::ALL);
         check(SessionState::ALL);
         check(PostureKind::ALL);
@@ -1225,6 +1294,30 @@ mod tests {
         assert!(p(0).validate().is_err());
         assert!(p(1).validate().is_ok());
         assert!(p(24 * 3600 + 1).validate().is_err());
+    }
+
+    #[test]
+    fn meditation_session_rules() {
+        let m = |minutes, outcome, parts_reached| EventPayload::MeditationSession {
+            session_id: Uuid::nil(),
+            minutes,
+            version: MeditationVersion::Breath,
+            outcome,
+            parts_reached,
+        };
+        for minutes in MEDITATION_MINUTES {
+            assert!(m(minutes, MeditationOutcome::Done, 5).validate().is_ok());
+        }
+        assert!(m(3, MeditationOutcome::Done, 5).validate().is_err());
+        assert!(m(5, MeditationOutcome::Stopped, 1).validate().is_ok());
+        assert!(m(5, MeditationOutcome::Stopped, 0).validate().is_err());
+        assert!(m(5, MeditationOutcome::Stopped, 6).validate().is_err());
+        assert!(m(5, MeditationOutcome::Done, 4).validate().is_err());
+        // Only the user starts one.
+        let mut e = NewEvent::manual(m(5, MeditationOutcome::Done, 5));
+        assert!(e.validate().is_ok());
+        e.source = EventSource::Inferred;
+        assert!(e.validate().is_err());
     }
 
     #[test]

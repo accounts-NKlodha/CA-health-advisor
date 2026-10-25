@@ -11,8 +11,9 @@ use chrono::{DateTime, NaiveDate, NaiveTime, Utc, Weekday};
 use hy_core::coach::config::{CALM_GAP, Categories, LongDayCheckIn, SNOOZE};
 use hy_core::coach::*;
 use hy_core::schema::{
-    Activity, CheckInOrigin, CheckInReply, EventPayload, NewEvent, PhoneLabel, PlanChange,
-    ReflectionAnswer, ReminderOutcome, RoutineOutcome, RoutineVariant, SessionState, StepOutcome,
+    Activity, CheckInOrigin, CheckInReply, EventPayload, MeditationOutcome, MeditationVersion,
+    NewEvent, PhoneLabel, PlanChange, ReflectionAnswer, ReminderOutcome, RoutineOutcome,
+    RoutineVariant, SessionState, StepOutcome,
 };
 use hy_core::time::{UserZone, WeekdaySet, WorkSchedule};
 use uuid::Uuid;
@@ -4746,6 +4747,360 @@ fn default_movement_version_reaches_the_guide() {
     let mut ask = H::new();
     ask.input(Input::RoutineStarted);
     assert_eq!(ask.guide().default_variant, None);
+}
+
+// ------------------------------------------------------- meditation pause (V2-4)
+
+fn meditation_invited(v: &CoachView) -> bool {
+    matches!(v.bubble, Some(Bubble::MeditationInvite))
+}
+
+fn meditation(v: &CoachView) -> Option<MeditationView> {
+    match v.bubble {
+        Some(Bubble::Meditation(m)) => Some(m),
+        _ => None,
+    }
+}
+
+/// Only the meditation invitation can open (no reminders), Tuesday 20 Oct at `h:m`, with
+/// the invitation at `at` (or off).
+fn meditation_harness(h: u32, m: u32, at: Option<NaiveTime>) -> H {
+    let config = CoachConfig {
+        meditation: MeditationTime { at },
+        ..cats(false, false, false)
+    };
+    H::at(ist(20, h, m), config, WaterSnapshot::default())
+}
+
+impl H {
+    fn med(&mut self, action: MeditationAction) -> InputOutcome {
+        self.input(Input::Meditation(action)).outcome
+    }
+
+    fn meditation_sessions(&self) -> Vec<(u32, MeditationVersion, MeditationOutcome, u32)> {
+        self.events
+            .iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::MeditationSession {
+                    minutes,
+                    version,
+                    outcome,
+                    parts_reached,
+                    ..
+                } => {
+                    e.validate().unwrap();
+                    Some((minutes, version, outcome, parts_reached))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+#[test]
+fn meditation_invitation_is_off_until_a_time_is_set() {
+    let mut h = meditation_harness(9, 40, None);
+    h.wait(mins(9 * 60));
+    assert!(!meditation_invited(h.view()));
+    assert!(h.meditation_sessions().is_empty());
+}
+
+#[test]
+fn meditation_invitation_comes_once_a_day_at_the_chosen_time() {
+    let mut h = meditation_harness(14, 55, Some(hm(15, 0)));
+    h.wait(mins(4));
+    assert!(!meditation_invited(h.view()), "not before 15:00");
+    h.wait_until(mins(2), meditation_invited);
+    assert_eq!(h.local(), hm(15, 0));
+    // "Not today": skipped, with no backlog and nothing recorded.
+    assert_eq!(h.med(MeditationAction::NotToday), InputOutcome::Applied);
+    assert_eq!(h.view().bubble, None);
+    h.wait(mins(120));
+    assert!(!meditation_invited(h.view()), "once a day");
+    assert!(h.meditation_sessions().is_empty());
+    // The next day it comes again at the same time.
+    h.wall = ist(21, 14, 58);
+    h.wait_until(mins(3), meditation_invited);
+    assert_eq!(h.local(), hm(15, 0));
+}
+
+#[test]
+fn meditation_invitation_never_starts_by_itself_and_closes_quietly() {
+    let mut h = meditation_harness(14, 59, Some(hm(15, 0)));
+    h.wait_until(mins(2), meditation_invited);
+    h.wait_until(mins(11), |v| !meditation_invited(v));
+    assert_eq!(h.view().bubble, None);
+    h.wait(mins(60));
+    assert_eq!(h.view().bubble, None);
+    assert!(h.meditation_sessions().is_empty(), "never auto-starts");
+    assert_eq!(
+        h.med(MeditationAction::Start(5)),
+        InputOutcome::Ignored("no meditation invitation open")
+    );
+}
+
+#[test]
+fn meditation_invitation_respects_meetings_focus_and_off_hours() {
+    let mut h = meditation_harness(14, 55, Some(hm(15, 0)));
+    h.input(Input::SetMeeting(true));
+    h.wait(mins(20));
+    assert!(!meditation_invited(h.view()), "held during a meeting");
+    h.input(Input::SetMeeting(false));
+    h.wait_until(mins(6), meditation_invited);
+    h.med(MeditationAction::NotToday);
+
+    let mut f = meditation_harness(14, 55, Some(hm(15, 0)));
+    f.input(Input::StartFocus {
+        minutes: 30,
+        replace_pomodoro: false,
+    });
+    f.wait(mins(25));
+    assert!(!meditation_invited(f.view()), "held during focus");
+    f.wait_until(mins(15), meditation_invited);
+    assert!(f.local() >= hm(15, 25));
+
+    // A time after work hours (18:30 by default) is never offered.
+    let mut o = meditation_harness(18, 0, Some(hm(19, 0)));
+    o.wait(mins(180));
+    assert!(!meditation_invited(o.view()));
+}
+
+#[test]
+fn meditation_pause_runs_its_five_parts_then_says_done() {
+    let mut h = meditation_harness(14, 59, Some(hm(15, 0)));
+    h.wait_until(mins(2), meditation_invited);
+    assert_eq!(
+        h.med(MeditationAction::Start(3)),
+        InputOutcome::Invalid("choose 2, 5 or 10 minutes")
+    );
+    assert_eq!(h.med(MeditationAction::Start(2)), InputOutcome::Applied);
+    let m = meditation(h.view()).unwrap();
+    assert_eq!((m.minutes, m.part, m.paused, m.done), (2, 0, false, false));
+    assert_eq!(m.version, MeditationVersion::Breath);
+    // An exercise: reminders are held while it runs.
+    assert_eq!(h.view().hold, Some(Hold::ExerciseOrPomodoro));
+    // Each part is 24 s of a 2-minute pause.
+    h.wait(secs(25));
+    assert_eq!(meditation(h.view()).unwrap().part, 1);
+    h.wait_until(secs(100), |v| meditation(v).is_some_and(|m| m.done));
+    assert_eq!(
+        h.meditation_sessions(),
+        vec![(2, MeditationVersion::Breath, MeditationOutcome::Done, 5)]
+    );
+    assert_eq!(h.view().hold, None);
+    // The last screen closes after a minute (or on OK), and nothing more is recorded.
+    h.wait_until(secs(65), |v| v.bubble.is_none());
+    assert_eq!(h.meditation_sessions().len(), 1);
+}
+
+#[test]
+fn meditation_pause_next_pause_resume_switch_and_stop() {
+    let mut h = meditation_harness(14, 59, Some(hm(15, 0)));
+    h.wait_until(mins(2), meditation_invited);
+    h.med(MeditationAction::Start(5));
+    assert_eq!(
+        h.med(MeditationAction::Resume),
+        InputOutcome::Ignored("not paused")
+    );
+    assert_eq!(h.med(MeditationAction::Next), InputOutcome::Applied);
+    assert_eq!(meditation(h.view()).unwrap().part, 1);
+    assert_eq!(h.med(MeditationAction::Pause), InputOutcome::Applied);
+    h.wait(mins(3));
+    let m = meditation(h.view()).unwrap();
+    assert_eq!(
+        (m.part, m.paused),
+        (1, true),
+        "the part's time stops while paused"
+    );
+    assert_eq!(h.med(MeditationAction::Resume), InputOutcome::Applied);
+    assert_eq!(h.med(MeditationAction::Switch), InputOutcome::Applied);
+    assert_eq!(
+        meditation(h.view()).unwrap().version,
+        MeditationVersion::EyesOpen
+    );
+    assert_eq!(
+        h.med(MeditationAction::Close),
+        InputOutcome::Ignored("the pause is not over")
+    );
+    assert_eq!(h.med(MeditationAction::Stop), InputOutcome::Applied);
+    assert_eq!(h.view().bubble, None);
+    assert_eq!(
+        h.meditation_sessions(),
+        vec![(
+            5,
+            MeditationVersion::EyesOpen,
+            MeditationOutcome::Stopped,
+            2
+        )]
+    );
+    assert_eq!(
+        h.med(MeditationAction::Next),
+        InputOutcome::Ignored("no meditation pause running")
+    );
+}
+
+#[test]
+fn meditation_pause_finish_on_the_last_part_and_ok() {
+    let mut h = meditation_harness(14, 59, Some(hm(15, 0)));
+    h.wait_until(mins(2), meditation_invited);
+    h.med(MeditationAction::Start(10));
+    for _ in 0..5 {
+        assert_eq!(h.med(MeditationAction::Next), InputOutcome::Applied);
+    }
+    assert!(meditation(h.view()).unwrap().done);
+    assert_eq!(h.med(MeditationAction::Close), InputOutcome::Applied);
+    assert_eq!(h.view().bubble, None);
+    assert_eq!(
+        h.meditation_sessions(),
+        vec![(10, MeditationVersion::Breath, MeditationOutcome::Done, 5)]
+    );
+}
+
+#[test]
+fn meditation_pause_ends_as_stopped_on_a_hold_the_close_button_or_a_restart() {
+    let start = |h: &mut H| {
+        h.wait_until(mins(2), meditation_invited);
+        h.med(MeditationAction::Start(5));
+        assert!(meditation(h.view()).is_some());
+    };
+    let stopped = |h: &H| h.meditation_sessions()[0].2 == MeditationOutcome::Stopped;
+
+    let mut lock = meditation_harness(14, 59, Some(hm(15, 0)));
+    start(&mut lock);
+    lock.input(Input::Lock);
+    assert_eq!(lock.view().bubble, None);
+    assert!(stopped(&lock));
+
+    let mut meeting = meditation_harness(14, 59, Some(hm(15, 0)));
+    start(&mut meeting);
+    meeting.input(Input::SetMeeting(true));
+    assert!(meditation(meeting.view()).is_none());
+    assert!(stopped(&meeting));
+
+    let mut close = meditation_harness(14, 59, Some(hm(15, 0)));
+    start(&mut close);
+    assert_eq!(
+        close.input(Input::CloseBubble).outcome,
+        InputOutcome::Applied
+    );
+    assert!(stopped(&close));
+
+    let mut restart = meditation_harness(14, 59, Some(hm(15, 0)));
+    start(&mut restart);
+    restart.wait(mins(1));
+    let out = restart.restart(mins(30));
+    assert_eq!(restart.view().bubble, None);
+    assert!(
+        out.events.iter().any(|e| matches!(
+            e.payload,
+            EventPayload::MeditationSession {
+                outcome: MeditationOutcome::Stopped,
+                parts_reached: 2,
+                ..
+            }
+        )),
+        "the time closed does not count as meditating"
+    );
+}
+
+#[test]
+fn meditation_state_saves_and_loads() {
+    let mut h = meditation_harness(14, 59, Some(hm(15, 0)));
+    h.wait_until(mins(2), meditation_invited);
+    h.med(MeditationAction::Start(5));
+    let state = serde_json::to_value(h.e.state()).unwrap();
+    let back: EngineState = serde_json::from_value(state.clone()).unwrap();
+    assert_eq!(&back, h.e.state());
+    // A state saved before V2-4 (no meditation field) still loads.
+    let mut old = state;
+    old.as_object_mut().unwrap().remove("meditation");
+    assert!(serde_json::from_value::<EngineState>(old).is_ok());
+}
+
+#[test]
+fn meditation_pause_stops_at_the_end_of_work_hours() {
+    let mut h = meditation_harness(18, 19, Some(hm(18, 25)));
+    h.wait_until(mins(7), meditation_invited);
+    h.med(MeditationAction::Start(10));
+    h.wait_until(mins(12), |v| meditation(v).is_none());
+    assert_eq!(h.local(), hm(18, 30));
+    assert_eq!(
+        h.meditation_sessions(),
+        vec![(10, MeditationVersion::Breath, MeditationOutcome::Stopped, 3)]
+    );
+}
+
+#[test]
+fn meditation_invitation_showing_when_work_ends_is_withdrawn_and_cannot_start() {
+    // Work ends at 18:30; the invitation opens at 18:29.
+    let mut h = meditation_harness(18, 28, Some(hm(18, 29)));
+    h.wait_until(mins(2), meditation_invited);
+    assert_eq!(h.local(), hm(18, 29));
+    // At the end of work hours it is withdrawn ...
+    h.wait_until(mins(2), |v| !meditation_invited(v));
+    assert!(h.local() <= hm(18, 30), "withdrawn at {}", h.local());
+    // ... and 5 minutes clicked at 18:31 starts nothing.
+    h.wait(mins(1));
+    assert_eq!(
+        h.med(MeditationAction::Start(5)),
+        InputOutcome::Ignored("no meditation invitation open")
+    );
+    assert!(meditation(h.view()).is_none());
+    assert!(h.meditation_sessions().is_empty());
+
+    // A click that arrives in the same step that crosses the boundary is revalidated.
+    let mut h = meditation_harness(18, 28, Some(hm(18, 29)));
+    h.wait_until(mins(2), meditation_invited);
+    let out = h.step(mins(2), Input::Meditation(MeditationAction::Start(5)));
+    assert!(
+        matches!(out.outcome, InputOutcome::Ignored(_)),
+        "{:?}",
+        out.outcome
+    );
+    assert!(meditation(h.view()).is_none());
+    assert!(!meditation_invited(h.view()));
+    assert!(h.meditation_sessions().is_empty());
+}
+
+#[test]
+fn meditation_invitation_start_is_refused_once_a_meeting_begins() {
+    let mut h = meditation_harness(14, 59, Some(hm(15, 0)));
+    h.wait_until(mins(2), meditation_invited);
+    h.input(Input::SetMeeting(true));
+    assert!(!meditation_invited(h.view()));
+    assert!(matches!(
+        h.med(MeditationAction::Start(2)),
+        InputOutcome::Ignored(_)
+    ));
+    assert!(h.meditation_sessions().is_empty());
+}
+
+#[test]
+fn starting_a_pomodoro_from_the_menu_stops_a_running_meditation_pause() {
+    let mut h = meditation_harness(14, 59, Some(hm(15, 0)));
+    h.wait_until(mins(2), meditation_invited);
+    h.med(MeditationAction::Start(5));
+    h.med(MeditationAction::Next);
+    let out = h.input(Input::StartPomodoro {
+        preset: PomodoroPreset::Classic,
+        replace_focus: false,
+        resume_coaching: false,
+    });
+    assert_eq!(out.outcome, InputOutcome::Applied);
+    // Like the movement guide: the pause stops (recorded) before the timer starts.
+    assert!(meditation(h.view()).is_none());
+    assert_eq!(
+        h.meditation_sessions(),
+        vec![(5, MeditationVersion::Breath, MeditationOutcome::Stopped, 2)]
+    );
+    assert!(h.view().pomodoro.is_some());
+    // Nothing of the pause is left running.
+    assert_eq!(
+        h.med(MeditationAction::Next),
+        InputOutcome::Ignored("no meditation pause running")
+    );
+    h.wait(mins(10));
+    assert_eq!(h.meditation_sessions().len(), 1);
 }
 
 #[test]

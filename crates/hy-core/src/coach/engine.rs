@@ -48,6 +48,7 @@
 //!   review time, like the recovery cards that open on their own.
 
 mod guide;
+mod meditation;
 mod note;
 mod posture;
 mod recovery;
@@ -221,6 +222,7 @@ enum Prompt {
     RecoveryWalk,
     RecoveryReflection,
     ReviewOffer,
+    MeditationInvite,
     PostureCue,
 }
 
@@ -352,6 +354,9 @@ pub struct EngineState {
     /// The weekly review offer (slice V1-4).
     #[serde(default)]
     review: review::ReviewOffer,
+    /// The meditation invitation and pause (slice V2-4).
+    #[serde(default)]
+    meditation: meditation::Meditation,
     /// The posture cue's cooldown (slice V2-2).
     #[serde(default)]
     posture: posture::PostureCue,
@@ -435,6 +440,7 @@ impl Engine {
                 plan: None,
                 note: None,
                 review: review::ReviewOffer::default(),
+                meditation: meditation::Meditation::default(),
                 posture: posture::PostureCue::default(),
             },
         }
@@ -519,6 +525,7 @@ impl Engine {
         // Close what the previous run left open, at the moment it stopped. A routine in the
         // guide keeps the movements already answered.
         self.interrupt_guide(ctx, &mut out);
+        self.interrupt_meditation(ctx, &mut out);
         if let Some(o) = self.s.offer {
             match o.phase {
                 OfferPhase::Showing { .. } | OfferPhase::Waiting => {
@@ -614,6 +621,7 @@ impl Engine {
 
     fn level3(&self) -> bool {
         self.s.exercise_since.is_some()
+            || self.meditation_running()
             || self.s.pomodoro.is_some_and(|p| {
                 p.card_open
                     || (p.paused.is_none()
@@ -877,6 +885,7 @@ impl Engine {
             self.resume_pomodoro_after_coaching_pause();
         }
         self.run_guide_timers(ctx, out);
+        self.run_meditation_timers(ctx, out);
         if self
             .s
             .exercise_since
@@ -1358,7 +1367,7 @@ impl Engine {
             }
             Input::Respond { offer, response } => self.respond(ctx, offer, response, out),
             Input::CloseBubble => {
-                if self.close_open_card(out) {
+                if self.close_open_card(ctx, out) {
                     Applied
                 } else {
                     Ignored("no bubble")
@@ -1525,7 +1534,10 @@ impl Engine {
                     });
                 }
                 self.s.pause = None;
+                // A Pomodoro replaces an exercise: the movement guide and a meditation
+                // pause stop (recorded as stopped) before its timer starts.
                 self.interrupt_guide(ctx, out);
+                self.interrupt_meditation(ctx, out);
                 self.s.exercise_since = None;
                 self.s.pomodoro = Some(Pomodoro {
                     work_ms: ms(work),
@@ -1645,6 +1657,7 @@ impl Engine {
             Input::Water(w) => self.water_input(ctx, w, out),
             Input::Phone(p) => self.phone_input(ctx, p, out),
             Input::Review(answer) => self.review_input(ctx, answer, out),
+            Input::Meditation(action) => self.meditation_input(ctx, action, out),
             Input::PostureCue => self.posture_cue_input(ctx, out),
         }
     }
@@ -1653,13 +1666,13 @@ impl Engine {
     /// reminder collapses to its waiting badge, the movement guide waits behind the pet, a
     /// check-in, offer or recovery card closes with the calm gap, a note closes, and a
     /// Pomodoro card closes (its phase stays for the menu). Returns false if none is open.
-    fn close_open_card(&mut self, out: &mut Out) -> bool {
+    fn close_open_card(&mut self, ctx: &Context, out: &mut Out) -> bool {
         if let Some(o) = self.s.offer
             && matches!(o.phase, OfferPhase::Showing { .. })
         {
             self.collapse(out);
             true
-        } else if self.close_guide_card(out) {
+        } else if self.close_guide_card(out) || self.close_meditation_card(ctx, out) {
             true
         } else if self.s.prompt.is_some() {
             self.clear_prompt();
@@ -1711,6 +1724,8 @@ impl Engine {
         // A hold that was not in force when the guide's card opened puts it behind the pet;
         // the routine keeps running.
         self.settle_guide(ctx, out);
+        // Any hold that starts ends a meditation pause (recorded as stopped).
+        self.settle_meditation(ctx, out);
         let hold = self.hold(ctx);
         // Anything holding reminders back withdraws a reminder that is showing or waiting.
         if let Some(o) = self.s.offer
@@ -1754,6 +1769,7 @@ impl Engine {
         let slot_free = self.s.offer.is_none()
             && self.s.prompt.is_none()
             && self.s.guide.is_none()
+            && !self.meditation_open()
             && self.s.note.is_none();
         let calm = now >= self.s.gap_until && now >= self.s.grace_until;
         let held = self.hold(ctx).is_some();
@@ -1782,6 +1798,9 @@ impl Engine {
             return;
         }
         if self.maybe_review_offer(ctx, out) {
+            return;
+        }
+        if self.maybe_meditation_invite(ctx, out) {
             return;
         }
         self.maybe_check_in(ctx, out);
@@ -1817,6 +1836,8 @@ impl Engine {
             }
             || (p.is_recovery_card()
                 && self.s.now.saturating_sub(self.s.prompt_since) >= ms(CARD_CLOSES_AFTER))
+            // The meditation invitation keeps to work hours (the check-in may run late).
+            || (p == Prompt::MeditationInvite && self.off_hours(ctx))
             // The posture cue keeps to work hours (the check-in may run late).
             || (p == Prompt::PostureCue && self.off_hours(ctx));
         if withdraw {
@@ -2027,6 +2048,9 @@ impl Engine {
         {
             return Some(Bubble::MovementGuide(g));
         }
+        if let Some(m) = self.meditation_view() {
+            return Some(Bubble::Meditation(m));
+        }
         if let Some(p) = self.s.prompt {
             return Some(match p {
                 Prompt::CheckIn => Bubble::LongDayCheckIn {
@@ -2034,6 +2058,7 @@ impl Engine {
                 },
                 Prompt::Lighter => Bubble::LighterSchedule,
                 Prompt::ReviewOffer => self.review_bubble()?,
+                Prompt::MeditationInvite => Bubble::MeditationInvite,
                 Prompt::PostureCue => Bubble::PostureCue,
                 _ => self.recovery_bubble(ctx, p)?,
             });

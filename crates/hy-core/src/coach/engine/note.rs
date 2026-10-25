@@ -87,7 +87,7 @@ impl Engine {
         if !self.visible(ctx) {
             return false;
         }
-        self.close_open_card(out);
+        self.close_open_card(ctx, out);
         self.s.note = Some(NoteCard {
             note,
             since: self.s.now,

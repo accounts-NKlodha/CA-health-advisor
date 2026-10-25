@@ -369,6 +369,8 @@ export interface CoachConfig {
   movement_version: MovementVersion;
   /** "HH:MM". */
   review: { day: WeekdayName; at: string };
+  /** The meditation pause's daily invitation, "HH:MM", or null while off. */
+  meditation: { at: string | null };
 }
 
 export interface WorkSchedule {
@@ -391,7 +393,8 @@ export type CoachChange =
   | { long_day_hours: number }
   | { pomodoro_auto_start: boolean }
   | { movement_version: MovementVersion }
-  | { review: { day: WeekdayName; at: string } };
+  | { review: { day: WeekdayName; at: string } }
+  | { meditation: { at: string | null } };
 
 /** One Water tab change (hy_core::settings::WaterChange). */
 export type WaterChange =

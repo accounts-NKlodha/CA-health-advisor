@@ -11,7 +11,7 @@
 use chrono::NaiveTime;
 use serde::{Deserialize, Serialize};
 
-use crate::coach::{CoachConfig, Intensity, MovementVersion, ReviewTime, Servings};
+use crate::coach::{CoachConfig, Intensity, MeditationTime, MovementVersion, ReviewTime, Servings};
 use crate::error::{Error, Result};
 use crate::time::{WeekdaySet, WorkSchedule};
 
@@ -42,6 +42,8 @@ pub enum CoachChange {
     MovementVersion(MovementVersion),
     /// When the weekly review is offered.
     Review(ReviewTime),
+    /// When the meditation pause is offered (off until a time is set).
+    Meditation(MeditationTime),
 }
 
 impl CoachChange {
@@ -60,6 +62,7 @@ impl CoachChange {
             Self::PomodoroAutoStart(v) => config.pomodoro_auto_start = v,
             Self::MovementVersion(v) => config.movement_version = v,
             Self::Review(v) => config.review = v,
+            Self::Meditation(v) => config.meditation = v,
         }
         config
     }
@@ -205,6 +208,13 @@ mod tests {
         let c: CoachChange =
             serde_json::from_str(r#"{"review":{"day":"fri","at":"18:00"}}"#).unwrap();
         assert!(matches!(c, CoachChange::Review(_)));
+        let c: CoachChange = serde_json::from_str(r#"{"meditation":{"at":"15:00"}}"#).unwrap();
+        assert!(matches!(
+            c,
+            CoachChange::Meditation(MeditationTime { at: Some(_) })
+        ));
+        let c: CoachChange = serde_json::from_str(r#"{"meditation":{"at":null}}"#).unwrap();
+        assert_eq!(c, CoachChange::Meditation(MeditationTime { at: None }));
         let c: CoachChange = serde_json::from_str(r#"{"movement_version":"seated"}"#).unwrap();
         assert_eq!(c, CoachChange::MovementVersion(MovementVersion::Seated));
         assert!(serde_json::from_str::<CoachChange>(r#"{"eye_rest":false,"water":true}"#).is_err());

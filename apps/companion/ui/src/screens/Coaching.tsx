@@ -1,6 +1,8 @@
-// Settings > Reminders (W4), Movement programme (W6) and Focus and Pomodoro (W7). Each
+// Settings > Reminders (W4), Movement programme (W6) and Focus and Pomodoro (W7, with
+// the meditation pause's time, W11). Each
 // change is saved at once as that one field (never the page's cached copy, which another
 // window may have made stale); the engine follows at once.
+import { useEffect, useState } from 'preact/hooks';
 import { call } from '../shared/ipc';
 import type { CoachChange, Intensity, MovementVersion, SettingsPage } from '../shared/types';
 import type { Save } from './main';
@@ -279,6 +281,59 @@ export function FocusTab(props: TabProps) {
           too.
         </p>
       </section>
+      <Meditation {...props} />
     </main>
+  );
+}
+
+/** The meditation pause's daily invitation (W11): off until a time is chosen. */
+function Meditation(props: TabProps) {
+  const saved = props.page.coach.meditation.at;
+  const coach = useCoach(props);
+  const [at, setAt] = useState(saved ?? '15:00');
+  useEffect(() => setAt(saved ?? '15:00'), [saved]);
+  return (
+    <section aria-labelledby="med-h">
+      <h3 id="med-h">Meditation pause</h3>
+      <p>
+        A short pause of 2, 5 or 10 minutes with text prompts and no sound. The pet invites
+        you once a day at your time; you choose the length, or Not today.
+      </p>
+      <Switch
+        checked={saved !== null}
+        onChange={(on) =>
+          coach(
+            { meditation: { at: on ? at : null } },
+            on ? `The pet invites you at ${at} on workdays.` : 'No daily invitation.',
+          )
+        }
+      >
+        Invite me once a day <span class="note">(off by default)</span>
+      </Switch>
+      <form
+        class="inline"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (at !== '') coach({ meditation: { at } }, `The pet invites you at ${at} on workdays.`);
+        }}
+      >
+        <label for="med-at">At</label>
+        <input
+          id="med-at"
+          type="time"
+          step={60}
+          value={at}
+          disabled={saved === null}
+          onInput={(e) => setAt(e.currentTarget.value)}
+        />
+        <button type="submit" class="btn" disabled={saved === null || at === '' || at === saved}>
+          Save time
+        </button>
+      </form>
+      <p class="note">
+        Only within work hours, never during a meeting, presentation, focus or Pomodoro, and
+        "Not today" skips it. Nothing is shared.
+      </p>
+    </section>
   );
 }
