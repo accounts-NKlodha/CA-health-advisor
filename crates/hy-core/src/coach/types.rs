@@ -19,6 +19,7 @@ use uuid::Uuid;
 use super::config::PomodoroPreset;
 use super::recovery::{RecoveryAction, RecoveryPlan, RecoveryView};
 use super::water::{Servings, WaterEntry, WaterPace};
+use crate::camera::HoldSources;
 use crate::schema::{Activity, PhoneLabel, RoutineOutcome, RoutineVariant, SessionState};
 
 /// How long the user paused coaching for (wireframe B5).
@@ -715,6 +716,11 @@ pub struct CoachView {
     /// The user's serving buttons (wireframe W5).
     #[serde(default)]
     pub servings: Servings,
+    /// Each hold now in force, for the V2 camera, which releases capture during some of
+    /// them ([`crate::camera::HoldSources::camera_hold`]). Presentation is reported
+    /// whatever the hiding setting.
+    #[serde(default)]
+    pub holds: HoldSources,
 }
 
 /// A movement routine or eye rest in progress (precedence level 3).

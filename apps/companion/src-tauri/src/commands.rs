@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use chrono::NaiveDate;
+use hy_core::camera::FrameReport;
 use hy_core::coach::RecoveryPlan;
 use hy_core::prefs::Accessibility;
 use hy_core::review::suggest::SuggestionKind;
@@ -19,9 +20,11 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::server_link::{self, LinkView};
-use crate::shell::{BackupDone, ImportOutcome, Shell, SuggestionAnswer};
+use crate::shell::{BackupDone, ImportOutcome, PageReport, Shell, SuggestionAnswer};
 use crate::update::{AppPage, UpdateCheck, Updater};
-use crate::view::{PanelView, PetView, PlanPage, ReviewPage, SettingsPage, SettingsView};
+use crate::view::{
+    CameraPage, PanelView, PetView, PlanPage, ReviewPage, SettingsPage, SettingsView,
+};
 
 type ShellState<'a> = State<'a, Arc<Shell>>;
 type UpdaterState<'a> = State<'a, Arc<Updater>>;
@@ -548,4 +551,69 @@ pub fn update_install(app: tauri::AppHandle, updater: UpdaterState<'_>) -> Resul
 pub fn set_autostart(updater: UpdaterState<'_>, enabled: bool) -> Result<AppPage, String> {
     crate::update::set_autostart(updater.dirs(), enabled)?;
     Ok(updater.page())
+}
+
+// ------------------------------------------------------------------ posture check (V2-1)
+
+/// "Posture check" from the pet menu, the panel or Settings: the camera page.
+#[tauri::command]
+pub fn camera_open(shell: ShellState<'_>) {
+    shell.camera_open();
+}
+
+/// "Turn camera off" from anywhere: capture ends within two seconds.
+#[tauri::command]
+pub fn camera_off(shell: ShellState<'_>) -> CameraPage {
+    shell.camera_off()
+}
+
+/// "Turn camera on" in Settings (the consent page opens if none is recorded).
+#[tauri::command]
+pub fn camera_on(shell: ShellState<'_>) -> CameraPage {
+    shell.camera_on()
+}
+
+/// The camera page's view (also the settings' Posture check tab).
+#[tauri::command]
+pub fn camera_page(shell: ShellState<'_>) -> CameraPage {
+    shell.camera_page()
+}
+
+/// "Turn on camera" (`accept`) or "Not now" on the consent text (wireframe W16).
+///
+/// # Errors
+/// The refusal in words.
+#[tauri::command]
+pub fn camera_consent(shell: ShellState<'_>, accept: bool) -> Result<CameraPage, String> {
+    shell.camera_consent(accept)
+}
+
+/// "Try again" after the camera was blocked, busy, missing or stopped.
+#[tauri::command]
+pub fn camera_try_again(shell: ShellState<'_>) -> CameraPage {
+    shell.camera_try_again()
+}
+
+/// "Withdraw consent" in Settings: off, and the consent text is shown next time.
+#[tauri::command]
+pub fn camera_withdraw(shell: ShellState<'_>) -> CameraPage {
+    shell.camera_withdraw()
+}
+
+/// The camera page's report (started, error, stopped).
+///
+/// # Errors
+/// A malformed report.
+#[tauri::command]
+pub fn camera_report(shell: ShellState<'_>, report: PageReport) -> Result<(), String> {
+    shell.camera_report(report)
+}
+
+/// One frame's derived result (never the image or the landmarks).
+///
+/// # Errors
+/// A report that breaks its rules.
+#[tauri::command]
+pub fn camera_frame(shell: ShellState<'_>, report: FrameReport) -> Result<(), String> {
+    shell.camera_frame(report)
 }

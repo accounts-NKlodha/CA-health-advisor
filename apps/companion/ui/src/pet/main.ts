@@ -32,6 +32,12 @@ const art = el('div', 'art', pet);
 const hit = el('div', 'hit', pet);
 const badge = el('span', 'badge', pet);
 const tag = el('span', 'tag', pet);
+// The camera indicator (V2): "CAM" plus a dot at the top left, exactly while the camera
+// may be capturing. The dot is filled while frames give a reading.
+const cam = el('span', 'cam', pet);
+cam.append(document.createTextNode('CAM'));
+el('span', 'cam-dot', cam);
+cam.hidden = true;
 const live = el('div', 'sr-only', root);
 live.setAttribute('aria-live', 'polite');
 badge.hidden = true;
@@ -78,9 +84,17 @@ function drawPet(v: PetView): void {
   pet.style.setProperty('--hy-scale', String(v.pet_px / VIEW_BOX));
 
   renderBadge(badge, v.look.badge);
-  tag.hidden = !v.look.tag;
-  tag.textContent = v.look.tag ?? '';
-  root.setAttribute('aria-label', v.accessible_name);
+  // The engine's tag first; otherwise "Cam: no reading" while the camera reads nothing.
+  const tagText = v.look.tag ?? (v.camera && !v.camera.reading ? v.camera.words : null);
+  tag.hidden = !tagText;
+  tag.textContent = tagText ?? '';
+  cam.hidden = !v.camera;
+  cam.classList.toggle('reading', v.camera?.reading ?? false);
+  cam.title = v.camera?.words ?? '';
+  root.setAttribute(
+    'aria-label',
+    v.camera ? `${v.accessible_name}. ${v.camera.words}` : v.accessible_name,
+  );
 }
 
 // ------------------------------------------------------------------ bubble drawing
@@ -161,6 +175,7 @@ function openContent(open: OpenView): HTMLElement | null {
           hide: () => void call('hide_pet').catch(report),
           review: () => void call('open_review').catch(report),
           settings: () => void call('open_settings').catch(report),
+          camera: (on) => void call(on ? 'camera_off' : 'camera_open').catch(report),
         },
         'menu-title',
       );

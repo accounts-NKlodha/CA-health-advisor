@@ -9,14 +9,15 @@
   "app": {
     "withGlobalTauri": false,
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src blob:; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
       "capabilities": [
         "pet",
         "panel",
         "screens",
         "review",
         "plan",
-        "setup"
+        "setup",
+        "camera"
       ]
     },
     "windows": []

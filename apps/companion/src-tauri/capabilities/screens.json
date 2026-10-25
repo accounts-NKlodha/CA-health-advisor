@@ -35,6 +35,12 @@
     "allow-app-page",
     "allow-update-choose",
     "allow-update-install",
-    "allow-set-autostart"
+    "allow-set-autostart",
+    "allow-camera-open",
+    "allow-camera-off",
+    "allow-camera-on",
+    "allow-camera-page",
+    "allow-camera-try-again",
+    "allow-camera-withdraw"
   ]
 }

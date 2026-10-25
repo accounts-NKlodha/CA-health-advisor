@@ -29,6 +29,10 @@
 //! presentation and full-screen state) and routes the user's answers from the bubble, pet
 //! menu, tray and keyboard panel back to it; `hy_pet::link` holds the rules. On exit the
 //! engine's state is saved.
+//!
+//! The V2 posture check (slice V2-1) runs in its own camera page while the user has it
+//! on: `hy_core::camera` holds its rules, `shell::camera` carries them out, and only the
+//! camera page may use the camera (see [`windows`]).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -51,6 +55,7 @@ use std::time::Duration;
 use hy_core::clock::{Clock, ManualClock, SystemClock};
 use hy_core::store::Store;
 use hy_pet::pack::Library;
+use tauri::webview::{PermissionKind, PermissionResponse};
 use tauri::{Manager, RunEvent};
 
 use crate::coach::{CoachRunner, SHUTDOWN_WAIT};
@@ -182,6 +187,15 @@ fn setup(
         server_link::start_periodic_sync(&shell);
     }
 
+    // The posture check (V2-1): back on if the user left it on (after the engine has had
+    // its first chance to report holds), and its clock (watchdog, stop deadline,
+    // retries). The self-test drives the camera itself.
+    if selftest.is_none() {
+        let s = Arc::clone(&shell);
+        shell.post(move |_| s.camera_resume());
+    }
+    shell::start_camera_clock(&shell);
+
     // A new store opens the setup wizard (W1). The self-test opens it itself.
     if selftest.is_none() && shell.setup_needed() {
         shell.open_setup();
@@ -276,7 +290,31 @@ fn main() {
             commands::update_choose,
             commands::update_install,
             commands::set_autostart,
+            commands::camera_open,
+            commands::camera_off,
+            commands::camera_on,
+            commands::camera_page,
+            commands::camera_consent,
+            commands::camera_try_again,
+            commands::camera_withdraw,
+            commands::camera_report,
+            commands::camera_frame,
         ])
+        // The camera permission (architecture 4.5): only the camera page, only while the
+        // posture check wants capture; everything else is refused. On Windows the guard in
+        // `windows` also makes sure no answer is saved in the WebView2 profile.
+        .on_permission_request(|webview, kind| {
+            let camera = matches!(kind, PermissionKind::Camera);
+            let allowed = camera
+                && webview
+                    .try_state::<Arc<Shell>>()
+                    .is_some_and(|s| s.camera_permission(webview.label()));
+            if allowed {
+                PermissionResponse::Allow
+            } else {
+                PermissionResponse::Deny
+            }
+        })
         .setup(move |app| setup(app, version))
         .build(context);
     match app {
@@ -397,10 +435,13 @@ mod tests {
         assert_eq!(json["packs"][4]["art_status"], "pending_review");
         assert_eq!(json["packs"][4]["selectable"], false);
         assert_eq!(json["edge"], "right");
-        let m = view::menu_view(&profile, &[], None);
+        let cam = view::CameraMenu::of(hy_core::camera::Status::Off, false);
+        let m = view::menu_view(&profile, &[], None, cam);
         let json = serde_json::to_value(&m).unwrap();
         assert_eq!(json["greeting"], "Hi, I'm Shelly.");
         assert_eq!(json["presets"][3]["short"], "XL");
+        assert_eq!(json["camera"]["label"], "Posture check");
+        assert_eq!(json["camera"]["on"], false);
     }
 
     #[test]
@@ -562,6 +603,7 @@ mod tests {
             include_str!("../capabilities/review.json"),
             include_str!("../capabilities/setup.json"),
             include_str!("../capabilities/plan.json"),
+            include_str!("../capabilities/camera.json"),
         ];
         let build_rs = include_str!("../build.rs");
         for cap in caps {

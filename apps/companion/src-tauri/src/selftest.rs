@@ -30,7 +30,12 @@
 //! finishes; and an encrypted backup (W9) is exported and opened again with its password.
 //!
 //! With `HY_SELFTEST_SOAK_S` set it then runs the accelerated soak ([`soak`], slice V1-7)
-//! before it reports.
+//! before the camera check below.
+//!
+//! Last, the posture check's camera (slice V2-1) runs end to end on Chromium's synthetic
+//! camera, in [`camera`]: consent, start, frames, the network refused, a hidden window,
+//! the camera budget, the watchdog, a presentation hold, Off within two seconds, and a
+//! refused camera with the pet still running.
 //!
 //! A CI runner is not an office PC: focus checks that depend on an interactive desktop
 //! are recorded as informational, and real Windows acceptance of focus and DPI remains a
@@ -55,6 +60,7 @@ use serde::Serialize;
 use crate::coach::CoachRunner;
 use crate::shell::{Shell, current_monitors};
 
+mod camera;
 pub mod soak;
 
 /// Where the simulated clock starts: Monday 26 Oct 2026, 10:00 in Kolkata, inside the
@@ -194,6 +200,7 @@ pub fn spawn(
                 let summary = soak::run(&mut report, &shell, runner, clock, plan);
                 report.soak = Some(summary);
             }
+            camera::camera_end_to_end(&mut report, &shell);
             report.ok = report.checks.iter().all(|c| c.ok || !c.required);
             std::thread::sleep(idle_after);
             let code = i32::from(!report.ok);

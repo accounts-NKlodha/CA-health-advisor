@@ -775,3 +775,184 @@ pub fn dpi_awareness() -> i32 {
     // SAFETY: no arguments beyond the context the first call returns.
     unsafe { GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()) }
 }
+
+// ------------------------------------------------------------------ camera (slice V2-1)
+
+/// The process tree's use: this process and every process it started (the WebView2
+/// processes), summed.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TreeUsage {
+    /// Processes counted.
+    pub processes: u32,
+    /// Working set, bytes.
+    pub working_set: u64,
+    /// Private bytes (commit charge).
+    pub private_bytes: u64,
+    /// Kernel plus user CPU time since each process started.
+    pub cpu: Duration,
+}
+
+/// The process tree's memory and CPU time (architecture 4.5's camera budget is checked
+/// from two samples). Processes that cannot be opened are skipped.
+pub fn process_tree_usage() -> TreeUsage {
+    use windows_sys::Win32::Foundation::{FILETIME, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let mut pairs: Vec<(u32, u32)> = Vec::new();
+    // SAFETY: the snapshot handle is checked and closed once; the entry's size field is
+    // set before the first call as the API requires.
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE || snap.is_null() {
+            return TreeUsage::default();
+        }
+        let mut e: PROCESSENTRY32W = std::mem::zeroed();
+        e.dwSize = u32::try_from(std::mem::size_of::<PROCESSENTRY32W>()).unwrap_or(0);
+        if Process32FirstW(snap, &raw mut e) != 0 {
+            loop {
+                pairs.push((e.th32ProcessID, e.th32ParentProcessID));
+                if Process32NextW(snap, &raw mut e) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snap);
+    }
+    // SAFETY: no arguments.
+    let me = unsafe { GetCurrentProcessId() };
+    let tree = tree_of(me, &pairs);
+    let mut usage = TreeUsage::default();
+    let ft = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
+    for pid in tree {
+        // SAFETY: OpenProcess has no pointer arguments; the counters and times are written
+        // into live locals of the stated sizes; the handle is closed once.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                continue;
+            }
+            let mut m: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
+            let cb = u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>()).unwrap_or(0);
+            if GetProcessMemoryInfo(h, (&raw mut m).cast::<PROCESS_MEMORY_COUNTERS>(), cb) != 0 {
+                usage.working_set += m.WorkingSetSize as u64;
+                usage.private_bytes += m.PrivateUsage as u64;
+            }
+            let zero = FILETIME {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            };
+            let (mut c, mut x, mut k, mut u) = (zero, zero, zero, zero);
+            if GetProcessTimes(h, &raw mut c, &raw mut x, &raw mut k, &raw mut u) != 0 {
+                // FILETIME counts 100 ns units.
+                usage.cpu += Duration::from_nanos((ft(k) + ft(u)).saturating_mul(100));
+            }
+            usage.processes += 1;
+            CloseHandle(h);
+        }
+    }
+    usage
+}
+
+/// `root` and its descendants, from (process, parent) pairs. A recycled parent id can
+/// make a stale entry look like a child; the walk only follows ids it has not seen.
+fn tree_of(root: u32, pairs: &[(u32, u32)]) -> Vec<u32> {
+    let mut ids = vec![root];
+    let mut i = 0;
+    while i < ids.len() {
+        let parent = ids[i];
+        for &(pid, ppid) in pairs {
+            if ppid == parent && pid != parent && !ids.contains(&pid) {
+                ids.push(pid);
+            }
+        }
+        i += 1;
+    }
+    ids
+}
+
+/// A permission decision for one request: whether the kind asked for is the camera, and
+/// the answer (true allows).
+pub type PermissionRule = Box<dyn Fn(bool) -> bool>;
+
+/// Install the permission guard on a webview (architecture 4.5): every permission request
+/// is answered by `rule` and the answer is never saved in the WebView2 profile, so an
+/// allowed camera on the camera page never carries over to another page of the same
+/// origin, and a refusal never outlives the moment. Returns false if the guard could not
+/// be installed (the caller must then not start capture).
+pub fn guard_permissions(
+    controller: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller,
+    rule: PermissionRule,
+) -> bool {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_CAMERA,
+        COREWEBVIEW2_PERMISSION_STATE_ALLOW, COREWEBVIEW2_PERMISSION_STATE_DENY,
+        ICoreWebView2PermissionRequestedEventArgs3,
+    };
+    use webview2_com::PermissionRequestedEventHandler;
+    use windows_core::Interface;
+
+    let handler = PermissionRequestedEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else { return Ok(()) };
+        let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
+        // SAFETY: COM calls on the live event arguments, on the UI thread that raised the
+        // event; `kind` is a live local.
+        unsafe {
+            args.PermissionKind(&raw mut kind)?;
+            // A runtime that cannot be told not to save the answer gets a refusal (which
+            // it then saves; that only ever errs towards no camera).
+            let saves_off = args
+                .cast::<ICoreWebView2PermissionRequestedEventArgs3>()
+                .and_then(|a3| a3.SetSavesInProfile(false))
+                .is_ok();
+            let allow = saves_off && rule(kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA);
+            args.SetState(if allow {
+                COREWEBVIEW2_PERMISSION_STATE_ALLOW
+            } else {
+                COREWEBVIEW2_PERMISSION_STATE_DENY
+            })?;
+        }
+        Ok(())
+    }));
+    let mut token = 0i64;
+    // SAFETY: COM calls on the webview's own controller, on the UI thread (`with_webview`
+    // runs there); the handler lives as long as the webview holds it.
+    unsafe {
+        let Ok(core) = controller.CoreWebView2() else {
+            return false;
+        };
+        core.add_PermissionRequested(&handler, &raw mut token)
+            .is_ok()
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::tree_of;
+
+    #[test]
+    fn the_tree_holds_the_root_and_its_descendants_only() {
+        let pairs = [
+            (1, 0),
+            (10, 1),
+            (11, 10),
+            (12, 11),
+            (20, 2),
+            (21, 20),
+            (13, 1),
+        ];
+        let mut t = tree_of(1, &pairs);
+        t.sort_unstable();
+        assert_eq!(t, vec![1, 10, 11, 12, 13]);
+        // A process listing itself as its parent does not loop.
+        assert_eq!(tree_of(5, &[(5, 5)]), vec![5]);
+    }
+}

@@ -145,6 +145,15 @@ function draw(v: PanelView, keepFocus: boolean): void {
           .then(() => close(false))
           .catch(report);
       },
+      camera: (on) => {
+        if (on) {
+          call('camera_off').catch(report);
+        } else {
+          call('camera_open')
+            .then(() => close(false))
+            .catch(report);
+        }
+      },
     },
     'panel-title',
   );

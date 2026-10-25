@@ -1,6 +1,7 @@
 // The pet menu (wireframe B1), shared by the pet's bubble and the keyboard panel (K1).
 // It lists the engine's actions, then the shell's own: size S/M/L/XL, Bring pet above
-// clock, Hide pet, Weekly review and Settings.
+// clock, Hide pet, Weekly review and Settings, and the posture check's entry (V2:
+// "Posture check" while off, "Turn camera off" while on).
 import { icon } from './icons';
 import type { MenuView } from './types';
 
@@ -11,6 +12,8 @@ export interface MenuHandlers {
   hide(): void;
   review(): void;
   settings(): void;
+  /** The posture check's entry; `on` is whether the camera is on now. */
+  camera(on: boolean): void;
 }
 
 function button(label: string, onClick: () => void, cls = 'btn'): HTMLButtonElement {
@@ -71,6 +74,10 @@ export function renderMenu(menu: MenuView, h: MenuHandlers, headingId: string): 
     button('Weekly review', h.review, 'btn'),
     button('Settings', h.settings, 'btn'),
   );
+  const cam = button(menu.camera.label, () => h.camera(menu.camera.on), 'btn');
+  cam.title = menu.camera.status;
+  cam.setAttribute('aria-description', menu.camera.status);
+  links.append(cam);
   root.append(links);
 
   const hint = document.createElement('p');

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "panel",
-  "description": "The keyboard pet panel (Ctrl+Alt+H): the open bubble's answers and the pet menu's actions, Escape hands focus back.",
+  "description": "The keyboard pet panel (Ctrl+Alt+H): the open bubble's answers and the pet menu's actions, Escape hands focus back, and the posture check's menu entry.",
   "windows": ["panel"],
   "permissions": [
     "core:event:allow-listen",
@@ -15,6 +15,8 @@
     "allow-bring-pet",
     "allow-hide-pet",
     "allow-open-settings",
-    "allow-open-review"
+    "allow-open-review",
+    "allow-camera-open",
+    "allow-camera-off"
   ]
 }

@@ -149,7 +149,41 @@ body {
   pointer-events: none;
 }
 
+/* The camera indicator (V2): "CAM" and a dot, top left, while the camera may capture. */
+.cam {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  height: 18px;
+  padding: 0 5px;
+  box-sizing: border-box;
+  border-radius: 9px;
+  background: var(--tag);
+  color: var(--tag-text);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 2px solid var(--surface);
+  pointer-events: none;
+}
+
+.cam-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  box-sizing: border-box;
+}
+
+.cam.reading .cam-dot {
+  background: currentColor;
+}
+
 .badge[hidden],
+.cam[hidden],
 .tag[hidden] {
   display: none;
 }
@@ -675,6 +709,7 @@ body {
   }
   .bubble,
   .badge,
+  .cam,
   .tag,
   .btn,
   .seg,

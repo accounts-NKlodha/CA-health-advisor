@@ -17,6 +17,7 @@ import { newer } from './changes';
 import { FocusTab, MovementTab, RemindersTab } from './Coaching';
 import { BackupTab, SharingTab } from './Data';
 import { PetSettings } from './PetSettings';
+import { PostureTab } from './PostureTab';
 import { WaterTab } from './Water';
 
 type Tab =
@@ -27,6 +28,7 @@ type Tab =
   | 'focus'
   | 'sharing'
   | 'backup'
+  | 'posture'
   | 'a11y'
   | 'app';
 
@@ -38,6 +40,7 @@ const TABS: [Tab, string][] = [
   ['focus', 'Focus & Pomodoro'],
   ['sharing', 'Sharing & server'],
   ['backup', 'Backup'],
+  ['posture', 'Posture check'],
   ['a11y', 'Accessibility'],
   ['app', 'App & updates'],
 ];
@@ -88,6 +91,7 @@ function App() {
   const body = () => {
     if (tab === 'pet') return <PetSettings />;
     if (tab === 'app') return <AppTab />;
+    if (tab === 'posture') return <PostureTab />;
     if (error) {
       return (
         <main class="pane">
@@ -159,7 +163,7 @@ function App() {
         </nav>
         <div>
           {body()}
-          {tab === 'pet' || tab === 'backup' || tab === 'app' ? null : (
+          {tab === 'pet' || tab === 'backup' || tab === 'app' || tab === 'posture' ? null : (
             <p class="status" role="status">
               {status}
             </p>
