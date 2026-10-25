@@ -29,6 +29,11 @@
 //! The setup wizard (W1) opens and loads, shows its sample reminder beside the pet and
 //! finishes; and an encrypted backup (W9) is exported and opened again with its password.
 //!
+//! Last, the posture check's camera (slice V2-1) runs end to end on Chromium's synthetic
+//! camera, in [`camera`]: consent, start, frames, the network refused, a hidden window,
+//! the camera budget, the watchdog, a presentation hold, Off within two seconds, and a
+//! refused camera with the pet still running.
+//!
 //! A CI runner is not an office PC: focus checks that depend on an interactive desktop
 //! are recorded as informational, and real Windows acceptance of focus and DPI remains a
 //! UAT item (architecture 11; A6, A8).
@@ -51,6 +56,8 @@ use serde::Serialize;
 
 use crate::coach::CoachRunner;
 use crate::shell::{Shell, current_monitors};
+
+mod camera;
 
 /// Where the simulated clock starts: Monday 26 Oct 2026, 10:00 in Kolkata, inside the
 /// default work hours.
@@ -181,6 +188,7 @@ pub fn spawn(
                 Some((runner, clock)) => coach_end_to_end(&mut report, &shell, runner, clock),
                 None => report.check("coach_started", false, "the coaching engine did not start"),
             }
+            camera::camera_end_to_end(&mut report, &shell);
             report.ok = report.checks.iter().all(|c| c.ok || !c.required);
             std::thread::sleep(idle_after);
             let code = i32::from(!report.ok);

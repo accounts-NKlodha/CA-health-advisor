@@ -7,6 +7,10 @@ import type {
   Accessibility,
   AppPage,
   BackupDone,
+  CameraPage,
+  FrameReport,
+  PageCommand,
+  PageReport,
   CoachChange,
   ImportFinished,
   ImportOutcome,
@@ -89,6 +93,16 @@ interface Commands {
   update_choose: { args: undefined; result: UpdateCheck | null };
   update_install: { args: undefined; result: void };
   set_autostart: { args: { enabled: boolean }; result: AppPage };
+  // The posture check (V2-1).
+  camera_open: { args: undefined; result: void };
+  camera_off: { args: undefined; result: CameraPage };
+  camera_on: { args: undefined; result: CameraPage };
+  camera_page: { args: undefined; result: CameraPage };
+  camera_consent: { args: { accept: boolean }; result: CameraPage };
+  camera_try_again: { args: undefined; result: CameraPage };
+  camera_withdraw: { args: undefined; result: CameraPage };
+  camera_report: { args: { report: PageReport }; result: void };
+  camera_frame: { args: { report: FrameReport }; result: void };
 }
 
 type Name = keyof Commands;
@@ -116,6 +130,12 @@ interface Events {
   'hy://review-target': string;
   /** An import finished (also one the page stopped waiting for). */
   'hy://backup-import': ImportFinished;
+  /** The posture check's view, for the camera page. */
+  'camera://view': CameraPage;
+  /** A command for the camera page. */
+  'camera://command': PageCommand;
+  /** The posture check's view, for the settings' Posture check tab. */
+  'hy://camera': CameraPage;
 }
 
 /** Listen for a view the shell pushes to this window. */

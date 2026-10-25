@@ -191,7 +191,7 @@ jobs:
         timeout-minutes: 10
         run: ./scripts/windows/Test-CompanionLifecycle.ps1 -Phase Install -Installers (Join-Path $env:RUNNER_TEMP 'hy-installers') -Work (Join-Path $env:RUNNER_TEMP 'hy-lifecycle')
 
-      - name: Pet shell self-test of the installed app (idle memory sampled, informational)
+      - name: Pet shell self-test of the installed app (idle memory sampled, informational; camera on a synthetic device)
         run: |
           $report = Join-Path $env:RUNNER_TEMP 'hy-selftest.json'
           $env:HY_SELFTEST = $report
@@ -215,7 +215,7 @@ jobs:
           }
           $installDir = Join-Path $env:LOCALAPPDATA 'HealthierYou\webview2-fixed\'
           $bundledSeen = $false; $otherSeen = $false
-          $deadline = (Get-Date).AddMinutes(5)
+          $deadline = (Get-Date).AddMinutes(9)
           $samples = @()
           while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
             Start-Sleep -Seconds 2
@@ -231,12 +231,23 @@ jobs:
           }
           if (-not $p.HasExited) {
             Stop-Process -Id $p.Id -Force
-            throw 'The self-test did not finish within 5 minutes'
+            '::error title=Self-test::The self-test did not finish within 9 minutes'
+            throw 'The self-test did not finish within 9 minutes'
           }
           $p.WaitForExit()
           "Process tree memory (A7 target: idle at most 150 MB; informational on a CI runner):"
           $samples | Format-Table -AutoSize | Out-String -Width 200
-          if (Test-Path $report) { Get-Content $report } else { 'No self-test report was written' }
+          if (Test-Path $report) {
+            Get-Content $report
+            # Annotations are readable from the checks API when the job log is not: each
+            # failed required check as an error, and the camera's measurements as notices.
+            $json = Get-Content $report -Raw | ConvertFrom-Json
+            foreach ($c in $json.checks) {
+              $line = "$($c.name): $($c.detail)" -replace '[\r\n]+', ' '
+              if ($c.required -and -not $c.ok) { "::error title=Self-test check failed::$line" }
+              elseif ($c.name -like 'camera_*') { "::notice title=Self-test camera::$(if ($c.ok) { 'ok' } else { 'NOT OK (informational)' }) $line" }
+            }
+          } else { 'No self-test report was written' }
           "WebView2 processes from the bundled runtime: $bundledSeen; from elsewhere: $otherSeen"
           "self-test exit code: $($p.ExitCode)"
           if ($p.ExitCode -ne 0) { throw "Pet shell self-test failed (exit code $($p.ExitCode))" }

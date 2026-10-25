@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- The camera page's own policy, on top of the app's: scripts, the bundled
+         WebAssembly runtime and the model come from the app only; the pose worker is an
+         inline blob that inherits this policy; nothing may be fetched from the network. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src blob:; connect-src 'self' ipc: http://ipc.localhost; style-src 'self'; img-src 'self'; media-src 'self' blob:; base-uri 'none'; form-action 'none'"
+    />
+    <title>HealthierYou - Posture check</title>
+    <link rel="stylesheet" href="./src/camera/camera.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./src/camera/main.tsx"></script>
+  </body>
+</html>

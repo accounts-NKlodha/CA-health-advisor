@@ -73,6 +73,8 @@ export interface MenuView {
   presets: SizePreset[];
   hint: string;
   hotkey: string | null;
+  /** The posture check's entry (V2). */
+  camera: CameraMenu;
 }
 
 export interface BubbleChip {
@@ -163,6 +165,8 @@ export interface PetView {
   pet_px: number;
   open: OpenView;
   layout: LayoutView;
+  /** The "CAM" badge while the camera may be capturing (V2), else null. */
+  camera: CameraBadge | null;
 }
 
 export interface PanelView {
@@ -561,3 +565,83 @@ export interface AppPage {
   last: UpdateOutcome | null;
   autostart: { enabled: boolean; switched_off_in_windows: boolean } | null;
 }
+
+// ------------------------------------------------------------------ posture check (V2-1)
+
+export type CameraHold = 'away' | 'paused' | 'off_hours' | 'presentation' | 'meeting';
+export type Unavailable = 'denied' | 'busy' | 'no_camera' | 'model_failed' | 'stalled' | 'failed';
+export type FrameIssue = 'absent' | 'low_confidence' | 'out_of_frame';
+export type NoReading = 'starting' | 'stalled' | { frame: FrameIssue };
+
+export type CameraStatus =
+  | { kind: 'off' }
+  | { kind: 'starting' }
+  | { kind: 'reading' }
+  | { kind: 'no_reading'; detail: NoReading }
+  | { kind: 'held'; detail: CameraHold }
+  | { kind: 'unavailable'; detail: Unavailable };
+
+export interface CameraBadge {
+  /** "Camera on", "Cam: no reading" or "Camera starting". */
+  words: string;
+  /** Usable frames now (the dot is filled). */
+  reading: boolean;
+}
+
+export interface CameraMenu {
+  on: boolean;
+  /** "Posture check" while off, "Turn camera off" while on. */
+  label: string;
+  status: string;
+}
+
+export interface CameraStats {
+  frames: number;
+  valid_frames: number;
+  stalls: number;
+  worker_restarts: number;
+  last_stop_ms: number | null;
+  last_stop_forced: boolean;
+  model_ms: number | null;
+  inference_ms: number | null;
+  fps: number;
+}
+
+export interface CameraPage {
+  status: CameraStatus;
+  words: string;
+  on: boolean;
+  consented: boolean;
+  notice_version: number;
+  /** The page should be capturing now. */
+  capture: boolean;
+  fps: number;
+  stats: CameraStats;
+  selftest: boolean;
+  a11y: Accessibility;
+}
+
+/** One frame's derived result (never the image or the landmarks). */
+export interface FrameReport {
+  valid: boolean;
+  issue: FrameIssue | null;
+  inference_ms: number;
+  visibility: number;
+}
+
+export type CapturePath = 'processor' | 'video';
+
+export type PageReport =
+  | { kind: 'started'; width: number; height: number; cores: number; model_ms: number; path: CapturePath }
+  | { kind: 'error'; name: string; model: boolean }
+  | { kind: 'stopped' }
+  | { kind: 'probe'; blocked: boolean; detail: string };
+
+export type PageCommand =
+  | { kind: 'start' }
+  | { kind: 'stop' }
+  | { kind: 'restart_worker' }
+  | { kind: 'fps'; fps: number }
+  | { kind: 'freeze' }
+  | { kind: 'probe' }
+  | { kind: 'hang' };

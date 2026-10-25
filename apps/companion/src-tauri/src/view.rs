@@ -2,6 +2,7 @@
 //! redraw from the latest one.
 
 use chrono::NaiveDate;
+use hy_core::camera::{CameraStats, Status as CameraStatus};
 use hy_core::coach::{CoachConfig, RecoveryPlan, Servings};
 use hy_core::prefs::Accessibility;
 use hy_core::store::PetProfile;
@@ -158,6 +159,82 @@ pub struct PetView {
     pub open: OpenView,
     /// Where things go in the window, CSS pixels.
     pub layout: LayoutView,
+    /// The "CAM" badge while the camera may be capturing (slice V2-1; wireframe state
+    /// table: "CAM" plus a dot at the top left, with its words).
+    pub camera: Option<CameraBadge>,
+}
+
+/// The pet's camera badge (V2): shown exactly while the camera may be capturing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CameraBadge {
+    /// "Camera on", "Cam: no reading" or "Camera starting".
+    pub words: &'static str,
+    /// Usable frames now (the dot is filled); otherwise "no reading".
+    pub reading: bool,
+}
+
+impl CameraBadge {
+    /// The badge for `status`, if the camera may be capturing.
+    #[must_use]
+    pub fn of(status: CameraStatus) -> Option<Self> {
+        status.capturing().then(|| Self {
+            words: status.words(),
+            reading: status == CameraStatus::Reading,
+        })
+    }
+}
+
+/// The pet menu's and tray's camera entry (V2): "Posture check" while off, "Turn camera
+/// off" while on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CameraMenu {
+    /// The user has the posture check on (capturing, held or unavailable).
+    pub on: bool,
+    /// The entry's label.
+    pub label: &'static str,
+    /// The status in words, for the menu's hint.
+    pub status: &'static str,
+}
+
+impl CameraMenu {
+    /// The entry for `status` and the user's choice `on`.
+    #[must_use]
+    pub const fn of(status: CameraStatus, on: bool) -> Self {
+        Self {
+            on,
+            label: if on {
+                "Turn camera off"
+            } else {
+                "Posture check"
+            },
+            status: status.words(),
+        }
+    }
+}
+
+/// The camera page (wireframe W16) and the settings' Posture check tab (W10).
+#[derive(Debug, Clone, Serialize)]
+pub struct CameraPage {
+    /// The status.
+    pub status: CameraStatus,
+    /// The status in words.
+    pub words: &'static str,
+    /// The user has the posture check on.
+    pub on: bool,
+    /// A current consent is recorded; without it the page shows the consent text.
+    pub consented: bool,
+    /// The consent text's version.
+    pub notice_version: u32,
+    /// The page should be capturing now.
+    pub capture: bool,
+    /// The frame rate to run.
+    pub fps: u8,
+    /// Measurements (frames, stalls, stop time, model load, inference time).
+    pub stats: CameraStats,
+    /// The self-test drives this page (it may ask for test-only actions).
+    pub selftest: bool,
+    /// Display preferences.
+    pub a11y: Accessibility,
 }
 
 /// The open bubble or menu.
@@ -204,6 +281,8 @@ pub struct MenuView {
     pub hint: String,
     /// The panel hotkey label, if one is registered.
     pub hotkey: Option<String>,
+    /// The posture check's entry (V2).
+    pub camera: CameraMenu,
 }
 
 /// The keyboard panel's view.
@@ -244,7 +323,12 @@ pub struct LayoutView {
 }
 
 /// Build the menu view.
-pub fn menu_view(profile: &PetProfile, actions: &[MenuAction], hotkey: Option<String>) -> MenuView {
+pub fn menu_view(
+    profile: &PetProfile,
+    actions: &[MenuAction],
+    hotkey: Option<String>,
+    camera: CameraMenu,
+) -> MenuView {
     MenuView {
         greeting: message(MessageId::Greeting, profile.tone, &profile.display_name),
         actions: actions.to_vec(),
@@ -252,6 +336,7 @@ pub fn menu_view(profile: &PetProfile, actions: &[MenuAction], hotkey: Option<St
         presets: SIZE_PRESETS,
         hint: message(MessageId::MenuHint, profile.tone, &profile.display_name),
         hotkey,
+        camera,
     }
 }
 

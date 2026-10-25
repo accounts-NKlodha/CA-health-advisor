@@ -5102,3 +5102,57 @@ fn starting_a_pomodoro_from_the_menu_stops_a_running_meditation_pause() {
     h.wait(mins(10));
     assert_eq!(h.meditation_sessions().len(), 1);
 }
+
+#[test]
+fn the_view_reports_each_hold_for_the_camera() {
+    use hy_core::camera::{CameraHold, HoldSources};
+    let mut h = H::new();
+    assert_eq!(h.view().holds, HoldSources::default());
+    assert_eq!(h.view().holds.camera_hold(), None);
+    // A presentation is reported even when the pet is kept on screen.
+    let mut shown = H::at(
+        ist(20, 10, 0),
+        CoachConfig {
+            hide_during_presentation: false,
+            ..CoachConfig::default()
+        },
+        WaterSnapshot::default(),
+    );
+    shown.input(Input::PresentationChanged(true));
+    assert!(shown.view().visible);
+    assert!(shown.view().holds.presenting);
+    assert_eq!(
+        shown.view().holds.camera_hold(),
+        Some(CameraHold::Presentation)
+    );
+    h.input(Input::SetMeeting(true));
+    assert_eq!(h.view().holds.camera_hold(), Some(CameraHold::Meeting));
+    h.input(Input::SetMeeting(false));
+    h.input(Input::StartFocus {
+        minutes: 30,
+        replace_pomodoro: false,
+    });
+    assert!(h.view().holds.focus);
+    assert_eq!(h.view().holds.camera_hold(), None, "focus keeps capture");
+    h.input(Input::EndFocus);
+    h.input(Input::Pause(PauseLength::Minutes(30)));
+    assert_eq!(h.view().holds.camera_hold(), Some(CameraHold::Paused));
+    h.input(Input::ResumeCoaching);
+    h.input(Input::Lock);
+    assert_eq!(h.view().holds.camera_hold(), Some(CameraHold::Away));
+    h.input(Input::Unlock);
+    assert_eq!(h.view().holds.camera_hold(), None);
+    // Off-hours: 19:00 on a workday.
+    let mut late = H::at(
+        ist(20, 19, 0),
+        CoachConfig::default(),
+        WaterSnapshot::default(),
+    );
+    late.input(Input::Refresh);
+    assert_eq!(late.view().holds.camera_hold(), Some(CameraHold::OffHours));
+    // Views saved before V2-1 still load.
+    let mut v = serde_json::to_value(h.view()).unwrap();
+    v.as_object_mut().unwrap().remove("holds");
+    let back: CoachView = serde_json::from_value(v).unwrap();
+    assert_eq!(back.holds, HoldSources::default());
+}

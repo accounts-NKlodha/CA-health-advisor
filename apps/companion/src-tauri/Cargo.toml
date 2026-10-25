@@ -24,13 +24,19 @@ tauri = { version = "=2.12.4", features = ["tray-icon"] }
 uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# The WebView2 COM bindings Tauri's runtime uses (same versions, already in the lockfile),
+# for the camera's permission guard (slice V2-1). Used only by src/win32.rs.
+webview2-com = "=0.39.1"
+windows-core = "=0.62.2"
 # Already in the lockfile through Tauri. Used only by src/win32.rs.
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_Security_Cryptography",
   "Win32_System_Com",
+  "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_Power",
+  "Win32_System_ProcessStatus",
   "Win32_System_Registry",
   "Win32_System_RemoteDesktop",
   "Win32_System_SystemInformation",
@@ -46,7 +52,8 @@ windows-sys = { version = "0.61.2", features = [
 # non-activating pet window, show without activation, display-change and hotkey messages,
 # handing focus back, the tracker's signals: input idle time, lock and unlock, sleep and
 # wake, presentation and full-screen state, user-scope DPAPI for the server token, and the
-# V1-6 update file dialog, installer launch and Run value). They live in src/win32.rs only, each with
+# V1-6 update file dialog, installer launch and Run value, the V2-1 camera permission
+# guard and process-tree usage). They live in src/win32.rs only, each with
 # a SAFETY note, so here unsafe code is denied (not forbidden) and that one module allows
 # it.
 [lints.rust]

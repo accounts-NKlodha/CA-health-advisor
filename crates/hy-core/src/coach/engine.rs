@@ -72,6 +72,7 @@ use super::types::{
     ReminderReason, Response,
 };
 use super::water::{Servings, WaterEntry, WaterPace, WaterSnapshot, pace};
+use crate::camera::HoldSources;
 use crate::schema::{
     Activity, EventPayload, MAX_WATER_ENTRY_ML, MeasurementStatus, NewEvent, ReminderOutcome,
     RoutineOutcome, SessionState,
@@ -2097,6 +2098,14 @@ impl Engine {
             recovery: self.recovery_view(ctx),
             water_entries: ctx.water_entries.clone(),
             servings: ctx.servings.clone(),
+            holds: HoldSources {
+                away: self.s.away.is_some(),
+                paused: self.s.pause.is_some(),
+                off_hours: self.off_hours(ctx),
+                focus: self.s.focus_until.is_some(),
+                presenting: self.s.presenting,
+                meeting: self.meeting_on(ctx),
+            },
         }
     }
 

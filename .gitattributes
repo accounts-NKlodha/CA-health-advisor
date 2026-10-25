@@ -2,3 +2,5 @@
 *.png binary
 *.ico binary
 *.icns binary
+# The posture check model (V2-1) is binary.
+*.task binary
