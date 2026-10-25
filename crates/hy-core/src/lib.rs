@@ -28,6 +28,9 @@
 //! built-in keys), what may be installed, the update record, keeping and restoring the
 //! previous program files, and restoring the pre-migration copy of the database.
 //!
+//! Slice V1-7 adds [`soak`]: what an unattended soak run left in the local store (sizes,
+//! event counts by type, reminder timing), read without changing it.
+//!
 //! Slice V2-1 adds [`camera`]: the posture check's camera session (consent, holds,
 //! conflicts, the worker watchdog, release on off, and the frame-rate budget). Frames and
 //! landmarks never reach it; the camera page sends one derived report per frame.
@@ -47,6 +50,7 @@ pub mod review;
 pub mod schema;
 pub mod secret;
 pub mod settings;
+pub mod soak;
 pub mod store;
 pub mod time;
 pub mod update;
