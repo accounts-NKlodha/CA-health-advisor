@@ -420,6 +420,7 @@ function Get-Tree([int[]]$Roots) {
 $script:CpuSeen = @{}
 $script:LastWall = $null
 $script:SampleErrors = 0
+$script:InternetSeen = New-Object System.Collections.Generic.List[string]
 $Cores = [Environment]::ProcessorCount
 
 function Get-TcpCounts([int[]]$Ids) {
@@ -428,7 +429,14 @@ function Get-TcpCounts([int[]]$Ids) {
   $n = @{ internet = 0; lan = 0; loopback = 0; unspecified = 0 }
   foreach ($x in $c) {
     if ([string]$x.State -eq 'Listen' -or [string]$x.State -eq 'Bound') { continue }
-    $n[(Get-AddressClass ([string]$x.RemoteAddress))]++
+    $class = Get-AddressClass ([string]$x.RemoteAddress)
+    $n[$class]++
+    # On a CI runner only (no person's data there), name what connected, for diagnosis.
+    if ($class -eq 'internet' -and $CiSelfTest) {
+      $name = (Get-Process -Id ([int]$x.OwningProcess) -ErrorAction SilentlyContinue).ProcessName
+      $key = "$name -> $($x.RemoteAddress):$($x.RemotePort) ($($x.State))"
+      if (-not $script:InternetSeen.Contains($key)) { [void]$script:InternetSeen.Add($key) }
+    }
   }
   return [pscustomobject]@{ Ok = $true; Internet = $n.internet; Lan = $n.lan; Loopback = $n.loopback }
 }
@@ -555,6 +563,7 @@ function Invoke-CiReport($samples, $app, [int]$ExitCode, [bool]$timedOut, [objec
     # Annotations are readable from the checks API when the job log is not.
     if ($app) { foreach ($c in @($app.checks | Where-Object { $_.name -like 'camera_soak_*' })) { Write-Host ("::notice title=Camera soak (app)::{0} {1}: {2}" -f $(if ($c.ok) { 'ok' } else { 'FAILED' }), $c.name, ($c.detail -replace '[\r\n]+', ' ')) } }
     Write-Host ("::notice title=Camera soak (script)::" + ($Lines[$Lines.Count - 1] -replace '[\r\n]+', ' '))
+    if ($script:InternetSeen.Count) { Write-Host ("::warning title=Camera soak internet connections (runner)::" + (@($script:InternetSeen | Select-Object -First 20) -join '; ')) }
     foreach ($c in @($AllChecks | Where-Object { $_.Required -and $_.Verdict -ne 'PASS' })) { Write-Host ("::error title=Camera soak {0}::{1}: {2}" -f $c.Verdict, $c.Name, ($c.Detail -replace '[\r\n]+', ' ')) }
   }
   return [pscustomobject]@{ Facts = $r.Facts; Log = $log.Lines; Soak = $soak }
