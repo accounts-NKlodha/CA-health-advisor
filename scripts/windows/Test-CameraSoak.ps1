@@ -87,6 +87,11 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
+# On a CI runner the job log may be unreadable from outside: name the error in an annotation.
+trap {
+  if ($env:GITHUB_ACTIONS) { Write-Host ("::error title=Camera soak script error::{0} (line {1}: {2})" -f ($_.Exception.Message -replace '[\r\n]+', ' '), $_.InvocationInfo.ScriptLineNumber, ($_.InvocationInfo.Line.Trim() -replace '[\r\n]+', ' ')) }
+  break
+}
 
 # Budgets and bounds (PRD "Performance": V2 combined working set at most 350 MB during
 # check-ins, at most 10% CPU averaged during capture; architecture 4.5: off within 2 s,
@@ -414,6 +419,7 @@ function Get-Tree([int[]]$Roots) {
 
 $script:CpuSeen = @{}
 $script:LastWall = $null
+$script:SampleErrors = 0
 $Cores = [Environment]::ProcessorCount
 
 function Get-TcpCounts([int[]]$Ids) {
@@ -498,6 +504,7 @@ function Write-Environment([string]$Mode) {
 function Save-Report($Extra) {
   $overall = Get-OverallVerdict $AllChecks
   Add-Line ''
+  if ($script:SampleErrors) { Add-Line "$($script:SampleErrors) process samples failed (a process ended while Windows listed them) and were skipped." }
   Add-Line "Overall: $overall"
   Add-Line 'The report names no user, PC, path, address or device id and holds no frame or posture number. Check it before sharing.'
   if ($Report) {
@@ -512,6 +519,43 @@ function Save-Report($Extra) {
 }
 function Exit-With([string]$Verdict) {
   switch ($Verdict) { 'PASS' { exit 0 } 'FAIL' { exit 1 } default { exit 2 } }
+}
+
+# The CI run's report, from the samples, the app's report and its camera log (a function so
+# the self-test can run it on data shaped as the app writes it).
+function Invoke-CiReport($samples, $app, [int]$ExitCode, [bool]$timedOut, [object[]]$LogRaw, [datetime]$origin) {
+  $appChecks = New-Object System.Collections.Generic.List[object]
+  $appOk = (-not $timedOut) -and $ExitCode -eq 0 -and $app -and $app.ok
+  $appChecks.Add((New-Check 'the app''s self-test and camera soak checks' $(if ($appOk) { 'PASS' } else { 'FAIL' }) "exit code $($ExitCode)$(if ($timedOut) { "; still running after $([int]($Minutes * 2 + 15)) minutes" })"))
+  $soak = if ($app) { Get-Field $app 'camera_soak' } else { $null }
+  if (-not $soak) { $appChecks.Add((New-Check 'the app ran its camera soak' 'FAIL' 'no camera soak summary in the app report')) }
+  Add-Checks $appChecks
+  if ($app) {
+    foreach ($c in @($app.checks | Where-Object { $_.name -like 'camera_soak_*' })) { Add-Line ("       app check {0}: {1} - {2}" -f $c.name, $(if ($c.ok) { 'ok' } else { 'FAILED' }), $c.detail) }
+    foreach ($c in @($app.checks | Where-Object { -not $_.ok -and $_.required -and $_.name -notlike 'camera_soak_*' })) { Add-Line ("       failed app check {0}: {1}" -f $c.name, $c.detail) }
+  }
+  $log = ConvertFrom-CameraLog $LogRaw $origin
+  $L = @($log.Lines); $S = @($samples)
+  if ($soak) {
+    $from = ((ConvertTo-UtcTime $soak.started_utc) - $origin).TotalSeconds
+    $to = ((ConvertTo-UtcTime $soak.ended_utc) - $origin).TotalSeconds
+    $L = @($L | Where-Object { $_.t -ge $from -and $_.t -le $to })
+    $S = @($S | Where-Object { $_.t -ge $from -and $_.t -le $to })
+    Add-Line ("Camera soak phase: {0:N1} min; {1} of {2} log lines and {3} of {4} process samples in it; {5} unreadable log lines" -f (($to - $from) / 60), $L.Count, $log.Lines.Count, $S.Count, $samples.Count, $log.Bad)
+  }
+  # The app holds the camera released for about a quarter of each cycle: half the soak's
+  # time must be camera time. No stall is allowed on a synthetic camera.
+  $opt = @{ NeedCaptureS = $Minutes * 60 * 0.5; StallsAllowed = 0; BudgetsRequired = $false; NeedHold = $true; WarmupFraction = 0.2 }
+  $r = Invoke-CameraAnalysis $L $S $opt
+  Add-Checks $r.Checks
+  Add-Line ("Numbers: " + (($r.Facts.Keys | ForEach-Object { $v = $r.Facts[$_]; if ($v -is [hashtable]) { $v = (@($v.Keys | Sort-Object | ForEach-Object { "$_ $($v[$_])" }) -join ' ') }; "$_ $v" }) -join '; '))
+  if ($env:GITHUB_ACTIONS) {
+    # Annotations are readable from the checks API when the job log is not.
+    if ($app) { foreach ($c in @($app.checks | Where-Object { $_.name -like 'camera_soak_*' })) { Write-Host ("::notice title=Camera soak (app)::{0} {1}: {2}" -f $(if ($c.ok) { 'ok' } else { 'FAILED' }), $c.name, ($c.detail -replace '[\r\n]+', ' ')) } }
+    Write-Host ("::notice title=Camera soak (script)::" + ($Lines[$Lines.Count - 1] -replace '[\r\n]+', ' '))
+    foreach ($c in @($AllChecks | Where-Object { $_.Required -and $_.Verdict -ne 'PASS' })) { Write-Host ("::error title=Camera soak {0}::{1}: {2}" -f $c.Verdict, $c.Name, ($c.Detail -replace '[\r\n]+', ' ')) }
+  }
+  return [pscustomobject]@{ Facts = $r.Facts; Log = $log.Lines; Soak = $soak }
 }
 
 # --------------------------------------------------------------------- self-test
@@ -649,6 +693,38 @@ function Invoke-SelfTest {
   Expect 'a DateTime (PowerShell 7 JSON) is taken as is' ((ConvertTo-UtcTime $origin) -eq $origin) $true
   Expect 'any FAIL makes the run FAIL' (Get-OverallVerdict @((New-Check 'a' 'PASS' ''), (New-Check 'b' 'INCONCLUSIVE' ''), (New-Check 'c' 'FAIL' ''))) 'FAIL'
   Expect 'an informational miss does not' (Get-OverallVerdict @((New-Check 'a' 'PASS' ''), (New-Check 'b' 'INFO' '' $false))) 'PASS'
+  # The CI report on data shaped exactly as the app writes it (its JSON report and its
+  # camera log lines, read back as text), over a 10-minute soak with a release every 33 s.
+  $kinds = @(@('held', 'away'), @('held', 'presentation'), @('held', 'away'), @('held', 'meeting'), @('off', $null))
+  $raw = New-Object System.Collections.Generic.List[string]
+  $frames = 0; $stops = 0; $k = 0; $prevKind = ''
+  $soakFrom = $origin.AddSeconds(130); $soakTo = $origin.AddSeconds(730)
+  for ($t = 0; $t -le 760; $t += 2) {
+    $in = $t - 130; $phase = if ($in -lt 0) { -1 } else { $in % 33 }
+    $kind = 'no_reading'; $detail = 'absent'; $page = $true
+    if ($phase -ge 22 -and $phase -lt 26) { $kind = $kinds[$k % 5][0]; $detail = $kinds[$k % 5][1]; $page = $false }
+    elseif ($phase -ge 26 -and $phase -lt 28) { $kind = 'starting'; $detail = $null }
+    if ($phase -ge 32) { $k = [int][Math]::Floor($in / 33) + 1 }
+    if (($kind -eq 'held' -or $kind -eq 'off') -and $prevKind -eq 'no_reading') { $stops++ }
+    $prevKind = $kind
+    if ($kind -eq 'no_reading') { $frames += 6 }
+    $line = [ordered]@{ t_s = $t; utc = $origin.AddSeconds($t).ToString('yyyy-MM-ddTHH:mm:ss.fffZ'); kind = $kind; detail = $detail; on = ($kind -ne 'off'); capture = ($Capturing -contains $kind); page_open = $page
+      fps = 3; frames = $frames; valid_frames = 0; stalls = 2; worker_restarts = 1; stops = $stops + 3; forced_stops = 1; max_stop_ms = 1000; last_stop_ms = 350; inference_ms = 41.2 }
+    $raw.Add(($line | ConvertTo-Json -Compress))
+  }
+  $appJson = '{"ok":true,"checks":[{"name":"camera_soak_completed","ok":true,"required":true,"detail":"17 cycles"},{"name":"camera_soak_frame_rate","ok":true,"required":true,"detail":"rates [2.95]"}],"monitors":[],"webview2":"1.0","soak":null,"camera_soak":{"started_utc":"' + $soakFrom.ToString('yyyy-MM-ddTHH:mm:ss.fffZ') + '","ended_utc":"' + $soakTo.ToString('yyyy-MM-ddTHH:mm:ss.fffZ') + '","real_s":600,"cycles":17,"releases":[],"windows":[],"windows_rate_changed":0,"frames":3000,"stalls":0,"worker_restarts":0,"stops":17,"forced_stops":0,"max_stop_ms":420}}'
+  $ciSamples = New-Object System.Collections.Generic.List[object]
+  foreach ($x in (New-SynthSamples 760)) { $ciSamples.Add($x) }
+  for ($t = 0; $t -le 760; $t += 5) { $ciSamples.Add([ordered]@{ t = [double]$t; alive = $true; working_set_mb = 300.0; private_bytes_mb = 200.0; handles = 2000; threads = 150; cpu_pct = 6.0; tcp_ok = $true; tcp_internet = 0; tcp_lan = 0; tcp_loopback = 2 }) }
+  $ciSamples = @($ciSamples | Where-Object { $_.t % 5 -eq 0 } | Sort-Object { $_.t } | Group-Object { $_.t } | ForEach-Object { $_.Group[-1] })
+  $before = $AllChecks.Count; $linesBefore = $Lines.Count
+  $ci = Invoke-CiReport $ciSamples ($appJson | ConvertFrom-Json) 0 $false @($raw) $origin
+  $new = @($AllChecks | Select-Object -Skip $before)
+  foreach ($c in @($new | Where-Object { $_.Required -and $_.Verdict -ne 'PASS' })) { Write-Host "  (CI report: $($c.Verdict) $($c.Name) - $($c.Detail))" }
+  Expect 'the CI report on app-shaped data passes' (Get-OverallVerdict $new) 'PASS'
+  Expect '... counting only the soak window''s releases (counters from before ignored)' $ci.Facts.releases 18
+  while ($AllChecks.Count -gt $before) { $AllChecks.RemoveAt($AllChecks.Count - 1) }
+  while ($Lines.Count -gt $linesBefore) { $Lines.RemoveAt($Lines.Count - 1) }
   if ($script:selfBad) { throw "Camera soak analysis self-test: $($script:selfBad) case(s) wrong" }
   Write-Host 'Camera soak analysis self-test: all cases right.'
 }
@@ -680,7 +756,8 @@ if ($CiSelfTest) {
   while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
     Start-Sleep -Seconds $SampleSeconds
     if ($p.HasExited) { break }
-    $samples.Add((Get-ProcessSample $p.Id $origin))
+    # A process ending while Windows lists them can fail one sample: skip it, count it.
+    try { $samples.Add((Get-ProcessSample $p.Id $origin)) } catch { $script:SampleErrors++ }
   }
   $timedOut = -not $p.HasExited
   if ($timedOut) { Stop-Process -Id $p.Id -Force }
@@ -688,39 +765,10 @@ if ($CiSelfTest) {
   # A sample taken while the app was exiting by itself is not a crash.
   while ($samples.Count -and -not $samples[$samples.Count - 1].alive) { $samples.RemoveAt($samples.Count - 1) }
   $app = if (Test-Path $selfReport) { Get-Content -Raw $selfReport | ConvertFrom-Json } else { $null }
-  $appChecks = New-Object System.Collections.Generic.List[object]
-  $appOk = (-not $timedOut) -and $p.ExitCode -eq 0 -and $app -and $app.ok
-  $appChecks.Add((New-Check 'the app''s self-test and camera soak checks' $(if ($appOk) { 'PASS' } else { 'FAIL' }) "exit code $($p.ExitCode)$(if ($timedOut) { "; still running after $([int]($Minutes * 2 + 15)) minutes" })"))
-  $soak = if ($app) { Get-Field $app 'camera_soak' } else { $null }
-  if (-not $soak) { $appChecks.Add((New-Check 'the app ran its camera soak' 'FAIL' 'no camera soak summary in the app report')) }
-  Add-Checks $appChecks
-  if ($app) {
-    foreach ($c in @($app.checks | Where-Object { $_.name -like 'camera_soak_*' })) { Add-Line ("       app check {0}: {1} - {2}" -f $c.name, $(if ($c.ok) { 'ok' } else { 'FAILED' }), $c.detail) }
-    foreach ($c in @($app.checks | Where-Object { -not $_.ok -and $_.required -and $_.name -notlike 'camera_soak_*' })) { Add-Line ("       failed app check {0}: {1}" -f $c.name, $c.detail) }
-  }
-  $log = Read-CameraLog $logFile $origin
+  $raw = @(); if (Test-Path -LiteralPath $logFile) { $raw = @(Get-Content -LiteralPath $logFile) }
   Remove-Item $logFile, $selfReport -ErrorAction SilentlyContinue
-  $L = @($log.Lines); $S = @($samples)
-  if ($soak) {
-    $from = ((ConvertTo-UtcTime $soak.started_utc) - $origin).TotalSeconds
-    $to = ((ConvertTo-UtcTime $soak.ended_utc) - $origin).TotalSeconds
-    $L = @($L | Where-Object { $_.t -ge $from -and $_.t -le $to })
-    $S = @($S | Where-Object { $_.t -ge $from -and $_.t -le $to })
-    Add-Line ("Camera soak phase: {0:N1} min; {1} of {2} log lines and {3} of {4} process samples in it; {5} unreadable log lines" -f (($to - $from) / 60), $L.Count, $log.Lines.Count, $S.Count, $samples.Count, $log.Bad)
-  }
-  # The app holds the camera released for about a quarter of each cycle: half the soak's
-  # time must be camera time. No stall is allowed on a synthetic camera.
-  $opt = @{ NeedCaptureS = $Minutes * 60 * 0.5; StallsAllowed = 0; BudgetsRequired = $false; NeedHold = $true; WarmupFraction = 0.2 }
-  $r = Invoke-CameraAnalysis $L $S $opt
-  Add-Checks $r.Checks
-  Add-Line ("Numbers: " + (($r.Facts.Keys | ForEach-Object { $v = $r.Facts[$_]; if ($v -is [hashtable]) { $v = (@($v.Keys | Sort-Object | ForEach-Object { "$_ $($v[$_])" }) -join ' ') }; "$_ $v" }) -join '; '))
-  if ($env:GITHUB_ACTIONS) {
-    # Annotations are readable from the checks API when the job log is not.
-    if ($app) { foreach ($c in @($app.checks | Where-Object { $_.name -like 'camera_soak_*' })) { Write-Host ("::notice title=Camera soak (app)::{0} {1}: {2}" -f $(if ($c.ok) { 'ok' } else { 'FAILED' }), $c.name, ($c.detail -replace '[\r\n]+', ' ')) } }
-    Write-Host ("::notice title=Camera soak (script)::" + ($Lines[$Lines.Count - 1] -replace '[\r\n]+', ' '))
-    foreach ($c in @($AllChecks | Where-Object { $_.Required -and $_.Verdict -ne 'PASS' })) { Write-Host ("::error title=Camera soak {0}::{1}: {2}" -f $c.Verdict, $c.Name, ($c.Detail -replace '[\r\n]+', ' ')) }
-  }
-  $verdict = Save-Report @{ facts = $r.Facts; samples = $samples; camera_log = $log.Lines; app_camera_soak = $soak }
+  $ci = Invoke-CiReport $samples $app $p.ExitCode $timedOut $raw $origin
+  $verdict = Save-Report @{ facts = $ci.Facts; samples = $samples; camera_log = $ci.Log; app_camera_soak = $ci.Soak }
   Exit-With $verdict
 }
 
@@ -780,7 +828,7 @@ $capS = $needS * 2 + 1800
 $start = Get-Date
 $lastLog = $null
 while ($true) {
-  $x = Get-ProcessSample $mainId $origin
+  try { $x = Get-ProcessSample $mainId $origin } catch { $script:SampleErrors++; Start-Sleep -Seconds $SampleSeconds; continue }
   $samples.Add($x)
   if (-not $x.alive) { Add-Line "HealthierYou stopped at $([Math]::Round($x.t / 60, 1)) min."; break }
   if (((Get-Date) - $start).TotalMinutes -ge 1 -and $samples.Count % 4 -eq 0) {
