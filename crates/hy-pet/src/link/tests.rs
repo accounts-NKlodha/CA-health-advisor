@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
+use hy_core::camera::HoldSources;
 use hy_core::clock::ManualClock;
 use hy_core::coach::movement::PROVISIONAL_NOTICE;
 use hy_core::coach::water::WaterPace;
@@ -74,6 +75,7 @@ fn view(pet: PetMode) -> CoachView {
             recovery_day: false,
             can_open: true,
         },
+        holds: HoldSources::default(),
     }
 }
 
@@ -1011,6 +1013,8 @@ struct FakeShell {
     sink: Mutex<Option<Arc<dyn ShellEventSink>>>,
     /// Every bubble id shown, in order.
     shown: Mutex<Vec<String>>,
+    /// Every change of the holds in force, in order.
+    holds: Mutex<Vec<HoldSources>>,
 }
 
 impl std::fmt::Debug for FakeShell {
@@ -1140,6 +1144,10 @@ impl PetShell for FakeShell {
 
     fn set_event_sink(&self, sink: Arc<dyn ShellEventSink>) {
         *lock(&self.sink) = Some(sink);
+    }
+
+    fn set_holds(&self, holds: HoldSources) {
+        lock(&self.holds).push(holds);
     }
 }
 
@@ -3100,4 +3108,38 @@ fn field_changes_from_two_windows_both_reach_the_engine() {
     assert_eq!(after.movement_version, seated.movement_version);
     assert!(!after.categories.eye_rest);
     h.pump();
+}
+
+#[test]
+fn the_shell_hears_each_change_of_the_holds_once() {
+    use hy_core::camera::CameraHold;
+    let mut h = H::new();
+    let first = lock(&h.shell.holds).clone();
+    assert_eq!(first, vec![HoldSources::default()], "the first view");
+    // Ticks that change nothing say nothing.
+    h.input(Input::Tick {
+        idle: Duration::from_secs(1),
+    });
+    h.input(Input::Refresh);
+    assert_eq!(lock(&h.shell.holds).len(), 1);
+    h.menu(action::MEETING_ON);
+    h.pump();
+    h.input(Input::PresentationChanged(true));
+    h.input(Input::PresentationChanged(false));
+    h.menu(action::MEETING_OFF);
+    h.pump();
+    let seen: Vec<_> = lock(&h.shell.holds)
+        .iter()
+        .map(HoldSources::camera_hold)
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            None,
+            Some(CameraHold::Meeting),
+            Some(CameraHold::Presentation),
+            Some(CameraHold::Meeting),
+            None
+        ]
+    );
 }

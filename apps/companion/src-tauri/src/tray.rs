@@ -40,6 +40,14 @@ fn build_menu(app: &AppHandle, shell: &Shell) -> tauri::Result<Menu<Wry>> {
         true,
         None::<&str>,
     )?)?;
+    // The posture check (V2): "Posture check" while off, "Turn camera off" while on.
+    menu.append(&MenuItem::with_id(
+        app,
+        "camera",
+        shell.camera_menu().label,
+        true,
+        None::<&str>,
+    )?)?;
     for a in &view.actions {
         let id = format!("{ENGINE_PREFIX}{}", a.id);
         menu.append(&MenuItem::with_id(app, id, &a.label, true, None::<&str>)?)?;
@@ -81,6 +89,13 @@ fn on_menu(app: &AppHandle, id: &str) {
         "panel" => shell.open_panel(),
         "review" => shell.open_review(),
         "settings" => shell.open_settings(),
+        "camera" => {
+            if shell.camera_menu().on {
+                shell.camera_off();
+            } else {
+                shell.camera_open();
+            }
+        }
         "quit" => app.exit(0),
         other => {
             if let Some(action) = other.strip_prefix(ENGINE_PREFIX) {
