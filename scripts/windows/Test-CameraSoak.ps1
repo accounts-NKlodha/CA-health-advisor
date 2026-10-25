@@ -535,7 +535,9 @@ function Invoke-CiReport($samples, $app, [int]$ExitCode, [bool]$timedOut, [objec
     foreach ($c in @($app.checks | Where-Object { -not $_.ok -and $_.required -and $_.name -notlike 'camera_soak_*' })) { Add-Line ("       failed app check {0}: {1}" -f $c.name, $c.detail) }
   }
   $log = ConvertFrom-CameraLog $LogRaw $origin
-  $L = @($log.Lines); $S = @($samples)
+  # Ordered dictionaries in a generic list: copied one by one (@() on such a list fails
+  # with "Argument types do not match").
+  $L = @($log.Lines); $S = @(foreach ($x in $samples) { $x })
   if ($soak) {
     $from = ((ConvertTo-UtcTime $soak.started_utc) - $origin).TotalSeconds
     $to = ((ConvertTo-UtcTime $soak.ended_utc) - $origin).TotalSeconds
@@ -716,7 +718,10 @@ function Invoke-SelfTest {
   $ciSamples = New-Object System.Collections.Generic.List[object]
   foreach ($x in (New-SynthSamples 760)) { $ciSamples.Add($x) }
   for ($t = 0; $t -le 760; $t += 5) { $ciSamples.Add([ordered]@{ t = [double]$t; alive = $true; working_set_mb = 300.0; private_bytes_mb = 200.0; handles = 2000; threads = 150; cpu_pct = 6.0; tcp_ok = $true; tcp_internet = 0; tcp_lan = 0; tcp_loopback = 2 }) }
-  $ciSamples = @($ciSamples | Where-Object { $_.t % 5 -eq 0 } | Sort-Object { $_.t } | Group-Object { $_.t } | ForEach-Object { $_.Group[-1] })
+  $picked = @($ciSamples | Where-Object { $_.t % 5 -eq 0 } | Sort-Object { $_.t } | Group-Object { $_.t } | ForEach-Object { $_.Group[-1] })
+  # As the sampling loop collects them: ordered dictionaries in a generic list.
+  $ciSamples = New-Object System.Collections.Generic.List[object]
+  foreach ($x in $picked) { $ciSamples.Add($x) }
   $before = $AllChecks.Count; $linesBefore = $Lines.Count
   $ci = Invoke-CiReport $ciSamples ($appJson | ConvertFrom-Json) 0 $false @($raw) $origin
   $new = @($AllChecks | Select-Object -Skip $before)
