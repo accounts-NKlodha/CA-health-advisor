@@ -794,7 +794,10 @@ function Invoke-SelfTest {
   $ciSamples = New-Object System.Collections.Generic.List[object]
   foreach ($x in $picked) { $ciSamples.Add($x) }
   $before = $AllChecks.Count; $linesBefore = $Lines.Count
-  $ci = Invoke-CiReport $ciSamples ($appJson | ConvertFrom-Json) 0 $false @($raw) $origin
+  # Synthetic numbers must not reach the runner's annotations.
+  $gha = $env:GITHUB_ACTIONS; $env:GITHUB_ACTIONS = $null
+  try { $ci = Invoke-CiReport $ciSamples ($appJson | ConvertFrom-Json) 0 $false @($raw) $origin }
+  finally { $env:GITHUB_ACTIONS = $gha }
   $new = @($AllChecks | Select-Object -Skip $before)
   foreach ($c in @($new | Where-Object { $_.Required -and $_.Verdict -ne 'PASS' })) { Write-Host "  (CI report: $($c.Verdict) $($c.Name) - $($c.Detail))" }
   Expect 'the CI report on app-shaped data passes' (Get-OverallVerdict $new) 'PASS'
