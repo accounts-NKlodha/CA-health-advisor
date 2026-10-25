@@ -17,8 +17,11 @@ use crate::shell::{CAMERA, PANEL, PET, PLAN, REVIEW, SCREENS, SETUP, Shell, set_
 
 /// The same WebView2 arguments for every window: windows sharing one WebView2
 /// environment must use identical options. These switch off Edge features that would
-/// otherwise contact the internet (batch 1; architecture 9).
-pub const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
+/// otherwise contact the internet (batch 1; architecture 9). V2-5: the camera soak found
+/// a WebView2 process of the app holding a TLS connection to a Microsoft address on the
+/// CI runner (architecture 10: no internet traffic; A12), so Chromium's background
+/// networking (variations, component updates, pings) is switched off too.
+pub const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-background-networking --disable-component-update --no-pings";
 
 /// The self-test's extra argument: Chromium's synthetic camera (a generated test pattern,
 /// no image of anyone), so the camera page runs end to end on a CI runner without a

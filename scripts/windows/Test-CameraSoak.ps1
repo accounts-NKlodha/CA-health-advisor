@@ -34,7 +34,11 @@
   At the end it checks:
 
     - the same companion process throughout (no crash or restart);
-    - at least -Hours of camera time (else INCONCLUSIVE: the run could not prove it);
+    - at least -Hours of camera time: the camera reading (reading or no reading), not
+      starting or stalled (else INCONCLUSIVE: the run could not prove it);
+    - process samples covering the camera time (at least 80% of those expected, and one
+      in every 15 minutes of use); without them the budget and trend checks are
+      INCONCLUSIVE, never PASS;
     - the posture check was never stopped as "not responding" (two stalls);
     - the frame-rate budget held: each 5 s interval delivered the rate the governor set
       (median at least 80%, the 5th percentile at least 50%) and never above 3 a second;
@@ -43,7 +47,8 @@
       2 s, none forced; at least one release seen (else INCONCLUSIVE);
     - every hold (lock, sleep, meeting, presentation, off hours) closed the camera page;
       at least one hold seen (else INCONCLUSIVE);
-    - PRD budgets while capturing: process-tree working set median at most 350 MB and CPU
+    - PRD budgets while capturing: process-tree working set at most 350 MB at every
+      sample (the highest counts; the median is reported) and CPU
       at most 10% of the machine on average;
     - no growth trend in working set, private bytes, handles or threads while capturing
       (the last third against the first, and the fitted slope, as Test-Soak.ps1);
@@ -112,7 +117,13 @@ $Trend = @{
   Handles  = @{ Abs = 200; Rel = 0.15 }
   Threads  = @{ Abs = 15; Rel = 0.20 }
 }
+# The camera page is in use (memory and CPU are sampled then) ...
 $Capturing = @('starting', 'reading', 'no_reading')
+# ... and the camera is actually reading: only this counts as camera time (a start or a
+# stalled worker does not).
+function Test-Reading($Line) {
+  return (@('reading', 'no_reading') -contains $Line.kind) -and $Line.detail -ne 'starting' -and $Line.detail -ne 'stalled'
+}
 
 # ------------------------------------------------------------------- analysis
 
@@ -237,7 +248,7 @@ function Get-OverallVerdict($Checks) {
 #   $Samples  process samples: t (seconds, same origin), alive, working_set_mb,
 #             private_bytes_mb, handles, threads, cpu_pct, tcp_ok, tcp_internet, tcp_lan.
 #   $Opt      NeedCaptureS; StallsPerHour (or StallsAllowed); BudgetsRequired; NeedHold;
-#             WarmupFraction.
+#             WarmupFraction; SampleSeconds (the sampler's interval); FailedSamples.
 function Invoke-CameraAnalysis($Lines, $Samples, [hashtable]$Opt) {
   $checks = New-Object System.Collections.Generic.List[object]
   $L = @(foreach ($x in $Lines) { $x })
@@ -262,14 +273,19 @@ function Invoke-CameraAnalysis($Lines, $Samples, [hashtable]$Opt) {
   $dts = @(for ($i = 1; $i -lt $L.Count; $i++) { $L[$i].t - $L[$i - 1].t })
   $every = if ($dts.Count) { Get-Median ([double[]]$dts) } else { 5.0 }
   $gapLimit = [Math]::Max(3 * $every, $every + 10)
-  $captureS = 0.0; $gaps = 0
+  $captureS = 0.0; $gaps = 0; $inUseS = 0.0; $binUse = @{}
   $rates = New-Object System.Collections.Generic.List[double]
   $ratios = New-Object System.Collections.Generic.List[double]
   $lowRateS = 0.0
   for ($i = 1; $i -lt $L.Count; $i++) {
     $a = $L[$i - 1]; $b = $L[$i]; $dt = $b.t - $a.t
     if ($dt -gt $gapLimit) { $gaps++; continue }
-    if ($Capturing -contains $a.kind -and $Capturing -contains $b.kind) { $captureS += $dt }
+    if ((Test-Reading $a) -and (Test-Reading $b)) { $captureS += $dt }
+    if ($Capturing -contains $a.kind -and $Capturing -contains $b.kind) {
+      $inUseS += $dt
+      $bin = [int][Math]::Floor($a.t / 900)
+      $binUse[$bin] = $dt + [double]$binUse[$bin]
+    }
     $steady = @('reading', 'no_reading')
     if ($steady -contains $a.kind -and $steady -contains $b.kind -and $a.detail -ne 'stalled' -and $b.detail -ne 'stalled' -and $a.detail -ne 'starting' -and $a.fps -eq $b.fps -and $a.fps -gt 0 -and $dt -gt 0) {
       $r = ($b.frames - $a.frames) / $dt
@@ -280,7 +296,7 @@ function Invoke-CameraAnalysis($Lines, $Samples, [hashtable]$Opt) {
   $facts['capture_h'] = [Math]::Round($captureS / 3600, 3)
   $facts['log_gaps'] = $gaps
   $need = [double]$Opt.NeedCaptureS
-  $checks.Add((New-Check 'camera time covered' $(if ($captureS -ge $need -and $need -gt 0) { 'PASS' } else { 'INCONCLUSIVE' }) ('{0:N2} h capturing of {1:N2} h asked; {2} sleep or suspend gaps in the log' -f ($captureS / 3600), ($need / 3600), $gaps)))
+  $checks.Add((New-Check 'camera time covered' $(if ($captureS -ge $need -and $need -gt 0) { 'PASS' } else { 'INCONCLUSIVE' }) ('{0:N2} h reading of {1:N2} h asked (starts and stalls not counted; {2:N2} h with the camera page in use); {3} sleep or suspend gaps in the log' -f ($captureS / 3600), ($need / 3600), ($inUseS / 3600), $gaps)))
 
   # Never stopped for "not responding"; other conflicts are reported.
   $stopped = @($L | Where-Object { $_.kind -eq 'unavailable' -and $_.detail -eq 'stalled' })
@@ -359,6 +375,24 @@ function Invoke-CameraAnalysis($Lines, $Samples, [hashtable]$Opt) {
   }
   $facts['capture_samples'] = $cap.Count
   $req = [bool]$Opt.BudgetsRequired
+
+  # Process evidence must cover the camera time: enough samples for the time the camera page
+  # was in use (at the sampler's own pace), and one in every 15 minutes with 5 or more
+  # minutes of use. Without it, the budget and trend checks below are not proven.
+  $alive = @($S | Where-Object { $_.alive })
+  $sdts = @(for ($i = 1; $i -lt $alive.Count; $i++) { $alive[$i].t - $alive[$i - 1].t })
+  $pace = [Math]::Max([double]$Opt.SampleSeconds, $(if ($sdts.Count) { Get-Median ([double[]]$sdts) } else { 0 }))
+  $expected = if ($pace -gt 0) { $inUseS / $pace } else { 0 }
+  $binsHit = @{}
+  foreach ($x in $cap) { $binsHit[[int][Math]::Floor($x.t / 900)] = $true }
+  $uncovered = @($binUse.Keys | Where-Object { $binUse[$_] -ge 300 -and -not $binsHit.ContainsKey($_) })
+  $coverage = if ($expected -gt 0) { $cap.Count / $expected } else { 0 }
+  $covered = $expected -gt 0 -and $coverage -ge 0.8 -and $uncovered.Count -eq 0
+  $failedSamples = if ($Opt.Contains('FailedSamples')) { [int]$Opt.FailedSamples } else { 0 }
+  $checks.Add((New-Check 'process samples cover the camera time' $(if ($covered) { 'PASS' } else { 'INCONCLUSIVE' }) ('{0} samples while the camera page was in use, {1:N0}% of the {2:N0} expected at one every {3:N1} s; 15-minute stretches with 5 or more minutes of use and no sample: {4}; failed samples skipped: {5}' -f $cap.Count, (100 * $coverage), $expected, $pace, $uncovered.Count, $failedSamples)))
+  $facts['sample_coverage_pct'] = [Math]::Round(100 * $coverage, 1)
+  # A check that would PASS on samples that do not cover the run is not proven.
+  function Get-Covered([string]$v) { if ($v -eq 'PASS' -and -not $covered) { 'INCONCLUSIVE' } else { $v } }
   if ($cap.Count -lt 3) {
     $checks.Add((New-Check 'PRD budget: memory while capturing' $(if ($req) { 'INCONCLUSIVE' } else { 'INFO' }) "$($cap.Count) samples while capturing" $req))
     $checks.Add((New-Check 'PRD budget: CPU while capturing' $(if ($req) { 'INCONCLUSIVE' } else { 'INFO' }) "$($cap.Count) samples while capturing" $req))
@@ -366,13 +400,15 @@ function Invoke-CameraAnalysis($Lines, $Samples, [hashtable]$Opt) {
   else {
     $ws = [double[]]@($cap | ForEach-Object { $_.working_set_mb })
     $wsMed = Get-Median $ws; $wsMax = ($ws | Measure-Object -Maximum).Maximum
-    $mv = if ($wsMed -le $Budget.MemoryMB) { 'PASS' } elseif ($req) { 'FAIL' } else { 'INFO' }
-    $checks.Add((New-Check 'PRD budget: memory while capturing' $mv ('process tree working set median {0:N1} MB, highest {1:N1} MB (budget {2} MB, companion and inference together){3}' -f $wsMed, $wsMax, $Budget.MemoryMB, $(if (-not $req) { '; informational: a runner is not an office PC' })) $req))
+    # The PRD cap: combined working set at most 350 MB during check-ins, so the highest
+    # sample counts (the median is reported).
+    $mv = if ($wsMax -gt $Budget.MemoryMB) { if ($req) { 'FAIL' } else { 'INFO' } } elseif ($req) { Get-Covered 'PASS' } else { 'INFO' }
+    $checks.Add((New-Check 'PRD budget: memory while capturing' $mv ('process tree working set highest {1:N1} MB (cap {2} MB, companion and inference together), median {0:N1} MB{3}' -f $wsMed, $wsMax, $Budget.MemoryMB, $(if (-not $req) { '; informational: a runner is not an office PC' })) $req))
     $cpuS = [double[]]@($cap | Where-Object { $null -ne $_.cpu_pct } | ForEach-Object { $_.cpu_pct })
     if ($cpuS.Count -lt 3) { $checks.Add((New-Check 'PRD budget: CPU while capturing' $(if ($req) { 'INCONCLUSIVE' } else { 'INFO' }) 'no CPU samples' $req)) }
     else {
       $cpuAvg = ($cpuS | Measure-Object -Average).Average; $cpuMax = ($cpuS | Measure-Object -Maximum).Maximum
-      $cv = if ($cpuAvg -le $Budget.CpuPct) { 'PASS' } elseif ($req) { 'FAIL' } else { 'INFO' }
+      $cv = if (-not $req) { 'INFO' } elseif ($cpuAvg -le $Budget.CpuPct) { Get-Covered 'PASS' } else { 'FAIL' }
       $checks.Add((New-Check 'PRD budget: CPU while capturing' $cv ('process tree average {0:N2}% of the machine, highest sample {1:N2}% (budget {2}% averaged){3}' -f $cpuAvg, $cpuMax, $Budget.CpuPct, $(if (-not $req) { '; informational: a runner is not an office PC' })) $req))
       $facts['cpu_avg_pct'] = [Math]::Round($cpuAvg, 2)
     }
@@ -387,7 +423,7 @@ function Invoke-CameraAnalysis($Lines, $Samples, [hashtable]$Opt) {
   foreach ($m in @(@('working set (MB)', 'working_set_mb', 'MemoryMB'), @('private bytes (MB)', 'private_bytes_mb', 'MemoryMB'), @('handles', 'handles', 'Handles'), @('threads', 'threads', 'Threads'))) {
     $vals = [double[]]@($w | ForEach-Object { $_.($m[1]) })
     $t = Test-Trend $m[0] $h $vals $Trend[$m[2]].Abs $Trend[$m[2]].Rel
-    $checks.Add((New-Check "no growth trend while capturing: $($t.Name)" (Get-Verdict $t.Pass) $t.Detail))
+    $checks.Add((New-Check "no growth trend while capturing: $($t.Name)" (Get-Covered (Get-Verdict $t.Pass)) $t.Detail))
   }
 
   # Network: counts of TCP connections by class, at every sample.
@@ -420,7 +456,8 @@ function Get-Tree([int[]]$Roots) {
 $script:CpuSeen = @{}
 $script:LastWall = $null
 $script:SampleErrors = 0
-$script:InternetSeen = New-Object System.Collections.Generic.List[string]
+$script:InternetSeen = @{}
+$script:CiOrigin = (Get-Date).ToUniversalTime()
 $Cores = [Environment]::ProcessorCount
 
 function Get-TcpCounts([int[]]$Ids) {
@@ -433,9 +470,16 @@ function Get-TcpCounts([int[]]$Ids) {
     $n[$class]++
     # On a CI runner only (no person's data there), name what connected, for diagnosis.
     if ($class -eq 'internet' -and $CiSelfTest) {
-      $name = (Get-Process -Id ([int]$x.OwningProcess) -ErrorAction SilentlyContinue).ProcessName
-      $key = "$name -> $($x.RemoteAddress):$($x.RemotePort) ($($x.State))"
-      if (-not $script:InternetSeen.Contains($key)) { [void]$script:InternetSeen.Add($key) }
+      $key = "$($x.OwningProcess)|$($x.RemoteAddress):$($x.RemotePort)"
+      $at = [Math]::Round(((Get-Date).ToUniversalTime() - $script:CiOrigin).TotalSeconds)
+      if ($script:InternetSeen.Contains($key)) { $script:InternetSeen[$key].last = $at; $script:InternetSeen[$key].n++ }
+      else {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$x.OwningProcess)" -ErrorAction SilentlyContinue
+        $type = if ($proc -and $proc.CommandLine -match '--type=(\S+)') { $Matches[1] } else { 'browser' }
+        if ($proc -and $proc.CommandLine -match '--utility-sub-type=(\S+)') { $type += " $($Matches[1])" }
+        $ptr = try { (Resolve-DnsName -Name ([string]$x.RemoteAddress) -Type PTR -QuickTimeout -ErrorAction Stop | Select-Object -First 1).NameHost } catch { 'no PTR' }
+        $script:InternetSeen[$key] = @{ what = "$(if ($proc) { $proc.Name } else { '?' }) ($type) -> $($x.RemoteAddress):$($x.RemotePort) [$ptr] $($x.State)"; first = $at; last = $at; n = 1 }
+      }
     }
   }
   return [pscustomobject]@{ Ok = $true; Internet = $n.internet; Lan = $n.lan; Loopback = $n.loopback }
@@ -555,7 +599,7 @@ function Invoke-CiReport($samples, $app, [int]$ExitCode, [bool]$timedOut, [objec
   }
   # The app holds the camera released for about a quarter of each cycle: half the soak's
   # time must be camera time. No stall is allowed on a synthetic camera.
-  $opt = @{ NeedCaptureS = $Minutes * 60 * 0.5; StallsAllowed = 0; BudgetsRequired = $false; NeedHold = $true; WarmupFraction = 0.2 }
+  $opt = @{ NeedCaptureS = $Minutes * 60 * 0.5; StallsAllowed = 0; BudgetsRequired = $false; NeedHold = $true; WarmupFraction = 0.2; SampleSeconds = $SampleSeconds; FailedSamples = $script:SampleErrors }
   $r = Invoke-CameraAnalysis $L $S $opt
   Add-Checks $r.Checks
   Add-Line ("Numbers: " + (($r.Facts.Keys | ForEach-Object { $v = $r.Facts[$_]; if ($v -is [hashtable]) { $v = (@($v.Keys | Sort-Object | ForEach-Object { "$_ $($v[$_])" }) -join ' ') }; "$_ $v" }) -join '; '))
@@ -563,7 +607,11 @@ function Invoke-CiReport($samples, $app, [int]$ExitCode, [bool]$timedOut, [objec
     # Annotations are readable from the checks API when the job log is not.
     if ($app) { foreach ($c in @($app.checks | Where-Object { $_.name -like 'camera_soak_*' })) { Write-Host ("::notice title=Camera soak (app)::{0} {1}: {2}" -f $(if ($c.ok) { 'ok' } else { 'FAILED' }), $c.name, ($c.detail -replace '[\r\n]+', ' ')) } }
     Write-Host ("::notice title=Camera soak (script)::" + ($Lines[$Lines.Count - 1] -replace '[\r\n]+', ' '))
-    if ($script:InternetSeen.Count) { Write-Host ("::warning title=Camera soak internet connections (runner)::" + (@($script:InternetSeen | Select-Object -First 20) -join '; ')) }
+    if ($script:InternetSeen.Count) {
+      $soakAt = if ($soak) { [Math]::Round(((ConvertTo-UtcTime $soak.started_utc) - $origin).TotalSeconds) } else { -1 }
+      $seen = @($script:InternetSeen.Values | Select-Object -First 15 | ForEach-Object { "$($_.what) seen at $($_.n) samples from $($_.first) s to $($_.last) s" }) -join '; '
+      Write-Host ("::warning title=Camera soak internet connections (runner)::camera soak from {0} s; {1}" -f $soakAt, $seen)
+    }
     foreach ($c in @($AllChecks | Where-Object { $_.Required -and $_.Verdict -ne 'PASS' })) { Write-Host ("::error title=Camera soak {0}::{1}: {2}" -f $c.Verdict, $c.Name, ($c.Detail -replace '[\r\n]+', ' ')) }
   }
   return [pscustomobject]@{ Facts = $r.Facts; Log = $log.Lines; Soak = $soak }
@@ -592,6 +640,7 @@ function New-SynthRun([datetime]$Origin, [hashtable]$Change = @{}) {
     $kind = 'no_reading'; $detail = 'absent'; $page = $true
     $inHold = (($min % 40) -ge 30) -and -not $Change["NoHolds"]
     if ($inHold) { $kind = 'held'; $detail = 'away'; $page = $false }
+    if ($Change["StartingMostly"] -and -not $inHold -and ($min % 40) -lt 25) { $kind = 'starting'; $detail = $null }
     if ($i -eq $n) { $kind = 'off'; $detail = $null; $page = $false }
     $prevHeld = $log.Count -and ($Capturing -contains $log[$log.Count - 1].kind) -and ($kind -eq 'held' -or $kind -eq 'off')
     if ($prevHeld) {
@@ -601,7 +650,7 @@ function New-SynthRun([datetime]$Origin, [hashtable]$Change = @{}) {
       $last = $ms; $max = if ($null -eq $max) { $ms } else { [Math]::Max($max, $ms) }
     }
     if ($Change["HoldPageOpen"] -and $inHold) { $page = $true }
-    if ($Capturing -contains $kind) {
+    if ($kind -eq 'no_reading') {
       $rate = if ($Change["SlowFrames"]) { 1.0 } else { 2.95 }
       $frames += $rate * $every
     }
@@ -619,6 +668,8 @@ function New-SynthSamples([double]$Seconds, [hashtable]$Change = @{}) {
     $h = $t / 3600
     $ws = 260 + $rand.NextDouble() * 15
     if ($Change["Leak"]) { $ws += 40 * $h }
+    if ($Change["Spike"] -and $t -eq 3000) { $ws = 420 }
+    if ($Change["Gap"] -and $t -gt 900 -and $t -lt 8400) { continue }
     $s.Add([ordered]@{
         t = $t; alive = (-not ($Change["DiesAt"] -and $t -ge $Change["DiesAt"])); working_set_mb = $ws; private_bytes_mb = $ws - 60; handles = 1800 + ($t % 7); threads = 120
         cpu_pct = $(if ($Change["Busy"]) { 14.0 } else { 3.5 + $rand.NextDouble() })
@@ -636,7 +687,7 @@ function Invoke-SelfTest {
     Write-Host ("[{0}] {1}{2}" -f $(if ($ok) { 'ok' } else { 'WRONG' }), $Name, $(if ($ok) { '' } else { " (got $Got, want $Want)" }))
   }
   $origin = [datetime]::SpecifyKind([datetime]'2026-11-20T04:30:00', [DateTimeKind]::Utc)
-  $opt = @{ NeedCaptureS = 7200; StallsPerHour = 1.0; BudgetsRequired = $true; NeedHold = $true; WarmupFraction = 0.1 }
+  $opt = @{ NeedCaptureS = 7200; StallsPerHour = 1.0; BudgetsRequired = $true; NeedHold = $true; WarmupFraction = 0.1; SampleSeconds = 60 }
   function Run([hashtable]$LogChange, [hashtable]$SampleChange, [hashtable]$OptChange = @{}) {
     $raw = @(New-SynthRun $origin $LogChange | ForEach-Object { $_ | ConvertTo-Json -Compress })
     $log = ConvertFrom-CameraLog $raw $origin
@@ -683,6 +734,17 @@ function Invoke-SelfTest {
   Expect 'the companion ending mid-run fails' (Verdict-Of $r 'no crash or restart') 'FAIL'
   $r = Run @{} @{} @{ NeedCaptureS = 4 * 3600 }
   Expect 'too little camera time is not proven' (Verdict-Of $r 'camera time covered') 'INCONCLUSIVE'
+  $r = Run @{ StartingMostly = $true } @{}
+  Expect 'long camera starts with a few healthy intervals do not count as camera time' (Verdict-Of $r 'camera time covered') 'INCONCLUSIVE'
+  Expect '... and the run is never PASS' ((Get-OverallVerdict $r.Checks) -ne 'PASS') $true
+  Expect '... while the few healthy intervals still pass the frame-rate check' (Verdict-Of $r 'frame-rate budget held') 'PASS'
+  $r = Run @{} @{ Gap = $true }
+  Expect 'two hours of camera log with process samples missing for two hours is not proven' (Verdict-Of $r 'process samples cover the camera time') 'INCONCLUSIVE'
+  Expect '... nor are the trends from the samples left' (Verdict-Of $r 'no growth trend while capturing: working set (MB)') 'INCONCLUSIVE'
+  Expect '... nor the memory budget' (Verdict-Of $r 'PRD budget: memory while capturing') 'INCONCLUSIVE'
+  Expect '... and the run is never PASS' ((Get-OverallVerdict $r.Checks) -ne 'PASS') $true
+  $r = Run @{} @{ Spike = $true }
+  Expect 'one sample over 350 MB fails the cap though the median is far below' (Verdict-Of $r 'PRD budget: memory while capturing') 'FAIL'
   $empty = Invoke-CameraAnalysis @() @() $opt
   Expect 'no log and no samples is never PASS' (Get-OverallVerdict $empty.Checks) 'INCONCLUSIVE'
   $old = ConvertFrom-CameraLog @(New-SynthRun $origin @{} | ForEach-Object { $_.PSObject.Properties.Remove('stops'); $_ | ConvertTo-Json -Compress }) $origin
@@ -762,6 +824,7 @@ if ($CiSelfTest) {
   $env:HY_CAMERA_SOAK_LOG = $logFile
   $env:HY_CAMERA_SOAK_EVERY_S = '2'
   $origin = (Get-Date).ToUniversalTime()
+  $script:CiOrigin = $origin
   $p = Start-Process -FilePath $exe -PassThru
   $null = $p.Handle
   foreach ($v in 'HY_SELFTEST', 'HY_SELFTEST_IDLE_S', 'HY_SELFTEST_CAMERA_SOAK_S', 'HY_CAMERA_SOAK_LOG', 'HY_CAMERA_SOAK_EVERY_S') { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
@@ -851,7 +914,7 @@ while ($true) {
     $L = @($log.Lines)
     for ($i = 1; $i -lt $L.Count; $i++) {
       $dt = $L[$i].t - $L[$i - 1].t
-      if ($dt -le 20 -and $Capturing -contains $L[$i].kind -and $Capturing -contains $L[$i - 1].kind) { $done += $dt }
+      if ($dt -le 20 -and (Test-Reading $L[$i]) -and (Test-Reading $L[$i - 1])) { $done += $dt }
     }
     if ($L.Count) { $lastLog = $L[$L.Count - 1] }
     Write-Host ("  {0:HH:mm} camera time {1:N2} h of {2} h; status {3}{4}" -f (Get-Date), ($done / 3600), $Hours, $(if ($lastLog) { $lastLog.kind } else { 'no log' }), $(if ($lastLog -and $lastLog.detail) { " ($($lastLog.detail))" }))
@@ -891,7 +954,7 @@ $log = Read-CameraLog $logFile $origin
 # Deleting the log file stops the app's camera log (it appends only to a file that exists).
 Remove-Item -LiteralPath $logFile -ErrorAction SilentlyContinue
 
-$opt = @{ NeedCaptureS = $needS; StallsPerHour = $Budget.StallsPerHour; BudgetsRequired = $true; NeedHold = $true; WarmupFraction = 0.1 }
+$opt = @{ NeedCaptureS = $needS; StallsPerHour = $Budget.StallsPerHour; BudgetsRequired = $true; NeedHold = $true; WarmupFraction = 0.1; SampleSeconds = $SampleSeconds; FailedSamples = $script:SampleErrors }
 $r = Invoke-CameraAnalysis $log.Lines $samples $opt
 Add-Checks $r.Checks
 Add-Checks $offChecks

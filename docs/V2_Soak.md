@@ -32,13 +32,14 @@ the run is PASS only when every required check is PASS (the convention of
 | --- | --- | --- |
 | Camera log read | At least 10 lines, else INCONCLUSIVE | Same |
 | No crash or restart | The same main process throughout | Same, inside the soak window |
-| Camera time covered | At least `-Hours` (2) of capturing time from the log. Holds, sleep and conflicts do not count. Otherwise INCONCLUSIVE | At least half the soak's minutes |
+| Camera time covered | At least `-Hours` (2) of reading time from the log: only intervals where the camera reads (reading or no reading). Starting, stalled, holds, sleep and conflicts do not count. Otherwise INCONCLUSIVE | At least half the soak's minutes |
+| Process samples cover the camera time | Samples while the camera page is in use: at least 80% of those expected at the sampler's pace, and at least one in every 15-minute stretch with 5 or more minutes of use. Failed samples are counted. Otherwise INCONCLUSIVE, and the budget and trend checks below cannot PASS | Same |
 | Never stopped as "not responding" | No log line with the camera stopped for two stalls | Same |
 | Frame-rate budget held | Over 5 s log intervals of steady capture: delivered/set median at least 0.8; 5th percentile at least 0.5; 95th-percentile rate at most 3.6 a second (3 fps cap with 20% margin). Time at the reduced rate (1 fps) is reported. At least 5 intervals, else INCONCLUSIVE | Same over 2 s intervals; the app also checks each 20 s window (median 0.8, worst 0.5) |
 | Watchdog stalls bounded | At most 1 stall per hour of camera time; a worker restart only after a stall | **No** stall or restart (the synthetic camera never stops sending) |
 | Every release within 2 s | Stop counter deltas: none forced; the longest at most 2000 ms; at least one release, else INCONCLUSIVE | Same; the app also checks each release, that the page closed, and that it stayed released through the hold |
 | Holds release the camera | From the second log line of each hold on, no camera page and no capture. At least one hold is needed, else INCONCLUSIVE ("lock the PC once") | Same; every kind is exercised |
-| PRD memory budget | Process-tree working set median at most 350 MB while capturing | Informational (a runner is not an office PC) |
+| PRD memory budget | The approved cap: process-tree working set at most 350 MB at **every** sample while the camera page is in use (the highest sample counts; the median is reported) | Informational (a runner is not an office PC) |
 | PRD CPU budget | Process-tree CPU at most 10% of the machine on average while capturing | Informational |
 | No growth trend | Working set, private bytes, handles and threads while capturing. Fails if the last third is past tolerance AND the fitted slope adds up to it (as `Test-Soak.ps1`). Too few samples gives INCONCLUSIVE | Same, after a 20% warm-up |
 | No internet connection | No TCP connection by the tree to an internet address at any sample. LAN (the office server) is allowed. Unreadable gives INCONCLUSIVE | Same |
@@ -79,8 +80,8 @@ The CI numbers for this PR's run are in the PR description.
    this slice is specific to them. The acceptance rows ask for the soak on the Windows 10
    PC and with a USB webcam. The V2-1 session phase still covers unplugging it.
 4. **Memory budget read as the combined process tree.** The PRD says "combined
-   companion/inference working set at most 350 MB". The office run checks the whole tree's
-   median while capturing. The V2-1 self-test reports the camera's share (on minus off) and
+   companion/inference working set at most 350 MB during check-ins". The office run checks
+   that the whole tree's highest sample while the camera page is in use is at most 350 MB. The V2-1 self-test reports the camera's share (on minus off) and
    the office run reports that share too.
 5. **Thresholds set here (D, owner to confirm):** at most 1 watchdog stall per hour of
    camera time on a real PC; frame-rate delivery median 0.8 and 5th percentile 0.5 of the
@@ -90,5 +91,13 @@ The CI numbers for this PR's run are in the PR description.
    seen. The camera page's content policy refusal (`camera_network_blocked`, V2-1) and the
    V1-7 network capture (`Test-NetworkCapture.ps1`, which attributes every connection to its
    program) are the strong checks.
-7. **No "fixes" were needed.** The slice includes fixes from the soak. Any found by the
-   office runs come in a follow-up slice with a test.
+7. **One fix from the soak (pending confirmation by CI and the office capture).** On the
+   CI runner the soak found a WebView2 process of the app (`msedgewebview2`) holding a TLS
+   connection to a Microsoft address (150.171.27.11:443) at 16 of about 120 samples. Nothing
+   the app sends is involved: the camera page's content policy refuses every request. It is
+   the WebView2 runtime's own background traffic, which architecture 10 ("no internet
+   traffic") and A12 rule out. All windows now also get `--disable-background-networking
+   --disable-component-update --no-pings` (`windows.rs`, `BROWSER_ARGS`). The V1-7 network
+   capture (S3, which attributes every connection to its program) remains the check on
+   office PCs. On the CI runner only, the script names the process type, endpoint and
+   reverse name of any such connection in a warning, for diagnosis.
