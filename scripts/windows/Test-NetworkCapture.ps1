@@ -46,7 +46,11 @@
   crates/hy-server/tests/capture.rs on the real client and server, and this script says
   so in its report. docs/V1_Acceptance.md lists what each side proves.
 
-  The audit policy is put back as it was at the end. The report (text and JSON) names
+  The connection audit policy is read (by its GUID and the numeric setting of auditpol
+  /backup, the same in every Windows language) before anything is changed; if it cannot be
+  read or is not recognised, the run stops INCONCLUSIVE and changes nothing. At the end it
+  is set back and read back; if it is not exactly as it was, the run is never PASS and the
+  report gives the command to restore it. The report (text and JSON) names
   addresses only by role (server, LAN, internet, this PC) and programs only by file name:
   no user name, PC name, path, IP address or device id. The .etl and .pcapng files stay in
   -Out and hold raw traffic of the whole PC: do not share them.
@@ -480,6 +484,110 @@ function Get-OverallVerdict([string[]]$Verdicts) {
   return 'PASS'
 }
 
+# The overall verdict of a physical run: the phases' verdict, except that a run which could
+# not put the connection audit policy back exactly as it was is never PASS (a FAIL finding
+# still stands; otherwise it is INCONCLUSIVE, with the manual fix in the report).
+function Get-RunVerdict([string[]]$Verdicts, [string]$RestoreError) {
+  $overall = Get-OverallVerdict $Verdicts
+  if ($RestoreError -and $overall -ne 'FAIL') { return 'INCONCLUSIVE' }
+  return $overall
+}
+
+# ------------------------------------------------------------- connection audit policy
+
+# The Filtering Platform Connection audit subcategory, by GUID (its name is localized).
+$AuditSubcategory = '{0CCE9226-69AE-11D9-BED3-505054503030}'
+
+# The subcategory's setting from the lines of an `auditpol /backup` file. That CSV holds,
+# per subcategory, its GUID (column 4) and its numeric "Setting Value" (column 7: 0 no
+# auditing, 1 success, 2 failure, 3 success and failure). Both are the same in every Windows
+# language; the header, the subcategory's name and the "Inclusion Setting" text are not, so
+# none of them is read. Returns Value (0..3) or Error: no line for the GUID, more than one,
+# or any other value is an Error, never a setting.
+function ConvertFrom-AuditBackup([string[]]$Lines, [string]$Guid) {
+  $lines = @($Lines | Where-Object { $_ -and $_.Trim() })
+  if (-not $lines.Count) { return [pscustomobject]@{ Value = $null; Error = 'the audit policy backup is empty' } }
+  $want = $Guid.Trim('{', '}', ' ')
+  $rows = @($lines | ConvertFrom-Csv -Header 'c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7', 'c8' |
+      Where-Object { $_.c4 -and $_.c4.Trim().Trim('{', '}') -eq $want })
+  if ($rows.Count -eq 0) { return [pscustomobject]@{ Value = $null; Error = "the audit policy backup has no line for subcategory $Guid" } }
+  if ($rows.Count -gt 1) { return [pscustomobject]@{ Value = $null; Error = "the audit policy backup has $($rows.Count) lines for subcategory $Guid (per-user policy?), so its system setting is ambiguous" } }
+  $raw = if ($null -eq $rows[0].c7) { '' } else { ([string]$rows[0].c7).Trim() }
+  if ($raw -notmatch '^[0-3]$' -or $rows[0].c8) { return [pscustomobject]@{ Value = $null; Error = "the audit policy backup has an unrecognised setting value '$raw' for subcategory $Guid" } }
+  return [pscustomobject]@{ Value = [int]$raw; Error = $null }
+}
+
+# The auditpol /set switches for a setting value; anything but 0..3 is refused, so no
+# unknown state can be turned into a policy.
+function Get-AuditFlags($Value) {
+  if ($null -eq $Value -or "$Value" -notmatch '^[0-3]$') { throw "Unrecognised audit setting value '$Value': refusing to set it." }
+  switch ([int]$Value) {
+    0 { return @('/success:disable', '/failure:disable') }
+    1 { return @('/success:enable', '/failure:disable') }
+    2 { return @('/success:disable', '/failure:enable') }
+    3 { return @('/success:enable', '/failure:enable') }
+  }
+}
+
+function Read-AuditPolicyState {
+  $file = Join-Path ([IO.Path]::GetTempPath()) ("hy-auditpol-{0}.csv" -f [guid]::NewGuid().ToString('N'))
+  try {
+    & auditpol.exe /backup "/file:$file" | Out-Null
+    if ($LASTEXITCODE -ne 0) { return [pscustomobject]@{ Value = $null; Error = "auditpol /backup failed (exit code $LASTEXITCODE)" } }
+    if (-not (Test-Path -LiteralPath $file)) { return [pscustomobject]@{ Value = $null; Error = 'auditpol /backup wrote no file' } }
+    return ConvertFrom-AuditBackup @(Get-Content -LiteralPath $file) $AuditSubcategory
+  }
+  catch { return [pscustomobject]@{ Value = $null; Error = "the audit policy could not be read ($($_.Exception.Message))" } }
+  finally { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
+}
+
+function Set-AuditPolicyState($Value) {
+  $flags = Get-AuditFlags $Value
+  & auditpol.exe /set "/subcategory:$AuditSubcategory" @flags | Out-Null
+  return ($LASTEXITCODE -eq 0)
+}
+
+# Runs $Body with the connection audit switched on, and puts the policy back exactly.
+#   $ReadState  returns Value (0..3) or Error; $SetState takes a value, returns success.
+# The original setting is read and validated before anything is changed: if it cannot be
+# read or is not recognised, nothing is changed and Aborted says why. After $Body (also when
+# it throws) the original value is set again and read back; RestoreError says what is wrong
+# if the read-back is not exactly the original. $Body gets whether the audit is on (set
+# and read back as 3).
+function Invoke-AuditGuarded([scriptblock]$ReadState, [scriptblock]$SetState, [scriptblock]$Body) {
+  $r = [pscustomobject]@{ Original = $null; Aborted = $null; Enabled = $false; Changed = $false; Restored = $false; RestoreError = $null }
+  $read = { try { $s = & $ReadState; if ($null -eq $s) { [pscustomobject]@{ Value = $null; Error = 'no audit policy state returned' } } else { $s } } catch { [pscustomobject]@{ Value = $null; Error = "the audit policy could not be read ($($_.Exception.Message))" } } }
+  $orig = & $read
+  if ($orig.Error -or $null -eq $orig.Value -or "$($orig.Value)" -notmatch '^[0-3]$') {
+    $r.Aborted = if ($orig.Error) { [string]$orig.Error } else { "unrecognised original audit setting '$($orig.Value)'" }
+    return $r
+  }
+  $r.Original = [int]$orig.Value
+  try {
+    $setOk = $true
+    if ($r.Original -ne 3) {
+      $r.Changed = $true
+      $setOk = $false; try { $setOk = [bool](& $SetState 3) } catch { $setOk = $false }
+    }
+    $now = & $read
+    $r.Enabled = $setOk -and -not $now.Error -and "$($now.Value)" -eq '3'
+    $null = & $Body $r.Enabled
+  }
+  finally {
+    if ($r.Changed) {
+      $restoreMsg = $null
+      try { if (-not (& $SetState $r.Original)) { $restoreMsg = 'auditpol /set reported a failure' } } catch { $restoreMsg = $_.Exception.Message }
+      $back = & $read
+      if ($back.Error) { $r.RestoreError = "the policy could not be read back after restoring it ($($back.Error))" }
+      elseif ("$($back.Value)" -ne "$($r.Original)") { $r.RestoreError = "after restoring, the policy reads setting value $($back.Value), not the original $($r.Original)$(if ($restoreMsg) { " ($restoreMsg)" })" }
+      else { $r.Restored = $true }
+      if ($r.RestoreError) { Write-Warning "The connection audit policy was NOT put back: $($r.RestoreError). Restore it by hand (elevated): auditpol /set /subcategory:$AuditSubcategory $((Get-AuditFlags $r.Original) -join ' ')" }
+    }
+    else { $r.Restored = $true }
+  }
+  return $r
+}
+
 # ----------------------------------------------------------------------- self-test
 
 function New-PcapNg($packets) {
@@ -661,6 +769,70 @@ function Invoke-SelfTest {
   $overallOk = ((Get-OverallVerdict @('PASS', 'INCONCLUSIVE', 'PASS')) -eq 'INCONCLUSIVE') -and ((Get-OverallVerdict @('INCONCLUSIVE', 'FAIL')) -eq 'FAIL') -and ((Get-OverallVerdict @()) -eq 'INCONCLUSIVE') -and ((Get-OverallVerdict @('PASS', 'PASS')) -eq 'PASS')
   if (-not $overallOk) { $failed++ }
   Write-Host ("[{0}] overall verdict: any FAIL fails, then any INCONCLUSIVE, no phases is INCONCLUSIVE" -f $(if ($overallOk) { 'ok' } else { 'WRONG' }))
+  # The connection audit policy: read by GUID and numeric value from an auditpol /backup
+  # file, refused when unreadable or unknown (never taken as "disabled"), put back and
+  # read back after the run.
+  $g = $AuditSubcategory
+  # Accented letters by code, so Windows PowerShell 5.1 reads this file the same as 7.
+  $ea = [char]0xE9; $eg = [char]0xE8; $Ec = [char]0xC9; $Uu = [char]0xDC
+  $hdr = 'Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting,Setting Value'
+  $other = 'PC1,System,Audit Logon,{0cce9215-69ae-11d9-bed3-505054503030},Success,,1'
+  $parse = @(
+    @{ Name = 'English, success and failure'; Lines = @($hdr, $other, "PC1,System,Filtering Platform Connection,$($g.ToLower()),Success and Failure,,3"); Value = 3 },
+    @{ Name = 'English, no auditing'; Lines = @($hdr, "PC1,System,Filtering Platform Connection,$g,No Auditing,,0"); Value = 0 },
+    @{ Name = 'German output, success only'; Lines = @('Computername,Richtlinienziel,Unterkategorie,Unterkategorie-GUID,Einschlusseinstellung,Ausschlusseinstellung,Einstellungswert', "PC1,System,Filterplattformverbindung,$g,Erfolg,,1"); Value = 1 },
+    @{ Name = 'French output, failure only'; Lines = @("Nom de l'ordinateur,Cible de la strat$($ea)gie,Sous-cat$($ea)gorie,GUID de sous-cat$($ea)gorie,Param$($eg)tre d'inclusion,Param$($eg)tre d'exclusion,Valeur du param$($eg)tre", "PC1,Syst$($eg)me,""Connexion de la plateforme de filtrage, test"",$g,$($Ec)chec,,2"); Value = 2 },
+    @{ Name = 'read failure (nothing read)'; Lines = @(); Value = $null },
+    @{ Name = 'subcategory missing'; Lines = @($hdr, $other); Value = $null },
+    @{ Name = 'unknown setting value'; Lines = @($hdr, "PC1,System,Filtering Platform Connection,$g,Success and Failure,,7"); Value = $null },
+    @{ Name = 'setting value missing (localized text only)'; Lines = @('Computername,Richtlinienziel,Unterkategorie,Unterkategorie-GUID,Einschlusseinstellung', "PC1,System,Filterplattformverbindung,$g,Erfolg und Fehler"); Value = $null },
+    @{ Name = 'text where the value should be'; Lines = @($hdr, "PC1,System,Filtering Platform Connection,$g,Keine $($Uu)berwachung,,Keine $($Uu)berwachung"); Value = $null },
+    @{ Name = 'two lines for the subcategory'; Lines = @($hdr, "PC1,System,Filtering Platform Connection,$g,Success,,1", "PC1,S-1-5-21-1,Filtering Platform Connection,$g,Include Success,,5"); Value = $null }
+  )
+  foreach ($c in $parse) {
+    $s = ConvertFrom-AuditBackup $c.Lines $g
+    $ok = if ($null -eq $c.Value) { $s.Error -and $null -eq $s.Value } else { -not $s.Error -and $s.Value -eq $c.Value }
+    if (-not $ok) { $failed++ }
+    Write-Host ("[{0}] audit policy read, {1}: {2}" -f $(if ($ok) { 'ok' } else { 'WRONG' }), $c.Name, $(if ($s.Error) { "refused: $($s.Error)" } else { "value $($s.Value)" }))
+  }
+  $flagsOk = (((Get-AuditFlags 0) -join ' ') -eq '/success:disable /failure:disable') -and (((Get-AuditFlags 3) -join ' ') -eq '/success:enable /failure:enable')
+  foreach ($bad in @($null, '', 4, 'x', -1)) { try { Get-AuditFlags $bad | Out-Null; $flagsOk = $false } catch { } }
+  if (-not $flagsOk) { $failed++ }
+  Write-Host ("[{0}] audit flags: 0..3 map to switches, anything else is refused (never 'disable')" -f $(if ($flagsOk) { 'ok' } else { 'WRONG' }))
+  # The guarded run against a fake policy: Reads are the states the reader returns in turn
+  # (the last repeats), Sets records every value set.
+  function FakeRun($reads, [bool]$setResult = $true, [bool]$bodyThrows = $false) {
+    $st = @{ Reads = @($reads); I = 0; Sets = New-Object System.Collections.Generic.List[object]; BodyRan = $false; BodyEnabled = $null }
+    $rd = { $x = $st.Reads[[Math]::Min($st.I, $st.Reads.Count - 1)]; $st.I++; if ($x -is [string]) { if ($x -eq 'THROW') { throw 'auditpol not found' }; return [pscustomobject]@{ Value = $null; Error = $x } }; return [pscustomobject]@{ Value = $x; Error = $null } }.GetNewClosure()
+    $wr = { param($v) $st.Sets.Add($v); return $setResult }.GetNewClosure()
+    $bd = { param($en) $st.BodyRan = $true; $st.BodyEnabled = $en; if ($bodyThrows) { throw 'pktmon could not start' } }.GetNewClosure()
+    $res = $null; $threw = $false
+    $wp = $WarningPreference; $WarningPreference = 'SilentlyContinue'
+    try { $res = Invoke-AuditGuarded $rd $wr $bd } catch { $threw = $true } finally { $WarningPreference = $wp }
+    return [pscustomobject]@{ R = $res; Sets = $st.Sets.ToArray(); BodyRan = $st.BodyRan; BodyEnabled = $st.BodyEnabled; Threw = $threw }
+  }
+  $guard = @(
+    @{ Name = 'read failure aborts, nothing set'; Run = (FakeRun @('auditpol /backup failed (exit code 5)')); Check = { param($x) $x.R.Aborted -and $x.Sets.Count -eq 0 -and -not $x.BodyRan } },
+    @{ Name = 'reader throws: aborts, nothing set'; Run = (FakeRun @('THROW')); Check = { param($x) $x.R.Aborted -and $x.Sets.Count -eq 0 -and -not $x.BodyRan } },
+    @{ Name = 'unknown value aborts, nothing set'; Run = (FakeRun @(7)); Check = { param($x) $x.R.Aborted -and $x.Sets.Count -eq 0 -and -not $x.BodyRan } },
+    @{ Name = 'off: switched on, restored to 0, verified'; Run = (FakeRun @(0, 3, 0)); Check = { param($x) -not $x.R.Aborted -and $x.BodyEnabled -and ($x.Sets -join ',') -eq '3,0' -and $x.R.Restored -and -not $x.R.RestoreError } },
+    @{ Name = 'success only: restored to 1, not to disabled'; Run = (FakeRun @(1, 3, 1)); Check = { param($x) ($x.Sets -join ',') -eq '3,1' -and $x.R.Restored } },
+    @{ Name = 'already on: left alone'; Run = (FakeRun @(3, 3)); Check = { param($x) $x.Sets.Count -eq 0 -and $x.BodyEnabled -and $x.R.Restored } },
+    @{ Name = 'switch-on not read back: audit off for the phases, still restored'; Run = (FakeRun @(2, 2, 2)); Check = { param($x) $x.BodyRan -and -not $x.BodyEnabled -and ($x.Sets -join ',') -eq '3,2' -and $x.R.Restored } },
+    @{ Name = 'restore read back differs: RestoreError'; Run = (FakeRun @(1, 3, 0)); Check = { param($x) $x.R.RestoreError -and -not $x.R.Restored -and (Get-RunVerdict @('PASS') $x.R.RestoreError) -eq 'INCONCLUSIVE' } },
+    @{ Name = 'restore read back fails: RestoreError'; Run = (FakeRun @(0, 3, 'access denied')); Check = { param($x) $x.R.RestoreError -and -not $x.R.Restored } },
+    @{ Name = 'restore set fails and policy stays on: RestoreError'; Run = (FakeRun @(0, 3, 3) $false); Check = { param($x) $x.R.RestoreError -and -not $x.R.Restored } },
+    @{ Name = 'phases throw: still restored'; Run = (FakeRun @(0, 3, 0) $true $true); Check = { param($x) $x.Threw -and ($x.Sets -join ',') -eq '3,0' } }
+  )
+  foreach ($c in $guard) {
+    $ok = [bool](& $c.Check $c.Run)
+    if (-not $ok) { $failed++ }
+    $x = $c.Run
+    Write-Host ("[{0}] audit policy guard, {1}: sets [{2}]{3}{4}" -f $(if ($ok) { 'ok' } else { 'WRONG' }), $c.Name, ($x.Sets -join ','), $(if ($x.R -and $x.R.Aborted) { "; aborted: $($x.R.Aborted)" }), $(if ($x.R -and $x.R.RestoreError) { "; restore error: $($x.R.RestoreError)" }))
+  }
+  $runOk = ((Get-RunVerdict @('PASS', 'PASS') $null) -eq 'PASS') -and ((Get-RunVerdict @('PASS', 'PASS') 'x') -eq 'INCONCLUSIVE') -and ((Get-RunVerdict @('FAIL') 'x') -eq 'FAIL')
+  if (-not $runOk) { $failed++ }
+  Write-Host ("[{0}] run verdict: a policy not put back is never PASS" -f $(if ($runOk) { 'ok' } else { 'WRONG' }))
   Remove-Item -Recurse -Force $dir
   if ($failed) { throw "Capture analyser self-test: $failed case(s) wrong" }
   Write-Host 'Capture analyser self-test: all cases right.'
@@ -714,12 +886,6 @@ Add-Line "Companion running: $([bool]$companion.Count)"
 if (-not $companion.Count) { Write-Warning 'The companion is not running: start it (every phase needs it running, or the phase is INCONCLUSIVE).' }
 Add-Line ''
 
-# The Filtering Platform connection audit, by GUID so it works in any Windows language.
-$sub = '{0CCE9226-69AE-11D9-BED3-505054503030}'
-function Get-AuditSetting {
-  try { return [string]((auditpol /get /subcategory:$sub /r | ConvertFrom-Csv | Select-Object -First 1).'Inclusion Setting') } catch { return '' }
-}
-$before = Get-AuditSetting
 $guidance = @{
   BeforePairing = 'Install the companion but do not pair it (Settings > Sharing shows "Not paired"). Leave it running.'
   Pending       = 'Pair now: Settings > Sharing > paste the slip, use the -Canary text as the PC name. Do NOT let the administrator confirm yet. Click "Check again" once.'
@@ -727,16 +893,15 @@ $guidance = @{
   CategoryOn    = 'Switch on Water sharing (Settings > Sharing). Log a glass of water from the pet menu. Click "Check again" twice.'
   AfterDisable  = 'Switch Water sharing off again. Log another glass of water. Click "Check again" twice.'
 }
-$results = @()
-try {
-  auditpol /set /subcategory:$sub /success:enable /failure:enable | Out-Null
-  $auditEnabled = ($LASTEXITCODE -eq 0) -and ((Get-AuditSetting) -match 'Success and Failure')
-  if (-not $auditEnabled) { Write-Warning 'The connection audit could not be switched on: every phase will be INCONCLUSIVE.' }
+$results = New-Object System.Collections.Generic.List[object]
+$runPhases = {
+  param([bool]$auditEnabled)
+  if (-not $auditEnabled) { Write-Warning 'The connection audit could not be switched on and read back: every phase will be INCONCLUSIVE.' }
   foreach ($ph in $Phases) {
     Write-Host ''
     Write-Host "Phase $ph" -ForegroundColor Cyan
     Write-Host $guidance[$ph]
-    Read-Host 'Press Enter to start the capture for this phase'
+    Read-Host 'Press Enter to start the capture for this phase' | Out-Null
     $etl = Join-Path $Out "phase-$ph.etl"
     $pcap = Join-Path $Out "phase-$ph.pcapng"
     Remove-Item -Force $etl, $pcap -ErrorAction SilentlyContinue
@@ -747,7 +912,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'pktmon could not start' }
     try {
       if ($Seconds -gt 0) { Write-Host "Capturing for $Seconds s: do the steps above now."; Start-Sleep -Seconds $Seconds }
-      else { Read-Host 'Capturing: do the steps above now, wait about 30 seconds after the last step, then press Enter' }
+      else { Read-Host 'Capturing: do the steps above now, wait about 30 seconds after the last step, then press Enter' | Out-Null }
     }
     finally { pktmon stop | Out-Null }
     $end = Get-Date
@@ -760,22 +925,39 @@ try {
     $audit = [pscustomobject]@{ Enabled = $auditEnabled; Error = $read.Error; Events = $read.Events }
     $v = Get-PhaseVerdict $cap $audit $running $ips $ServerPort
     $verdict = Write-PhaseResult $cap $v
-    $results += [pscustomobject]@{ Phase = $ph; Verdict = $verdict; Capture = $cap; Programs = $v.Programs; Missing = $v.Missing }
+    $results.Add([pscustomobject]@{ Phase = $ph; Verdict = $verdict; Capture = $cap; Programs = $v.Programs; Missing = $v.Missing })
   }
 }
-finally {
-  $flag = switch -Regex ($before) { 'Success and Failure' { '/success:enable /failure:enable' } '^Success' { '/success:enable /failure:disable' } '^Failure' { '/success:disable /failure:enable' } default { '/success:disable /failure:disable' } }
-  Invoke-Expression "auditpol /set /subcategory:$sub $flag" | Out-Null
-  pktmon filter remove 2>$null | Out-Null
+# The connection audit policy is read (by GUID and numeric value, the same in every Windows
+# language) and validated before anything is changed, and put back and read back at the end.
+try {
+  $guard = Invoke-AuditGuarded ${function:Read-AuditPolicyState} ${function:Set-AuditPolicyState} $runPhases
+}
+finally { pktmon filter remove 2>$null | Out-Null }
+$policy = [pscustomobject]@{ Original = $guard.Original; Changed = $guard.Changed; Restored = $guard.Restored; Error = $(if ($guard.Aborted) { $guard.Aborted } else { $guard.RestoreError }) }
+if ($guard.Aborted) {
+  Add-Line "MISSING EVIDENCE: the connection audit policy could not be read before the run ($($guard.Aborted)), so it could not be switched on and put back safely."
+  Add-Line 'Nothing was captured and the audit policy was not changed. Fix what it names (auditpol /backup must work in this elevated PowerShell) and run again.'
+  Add-Line 'Overall: INCONCLUSIVE'
+  $Lines | Set-Content -Encoding UTF8 $Report
+  [pscustomobject]@{ Overall = 'INCONCLUSIVE'; AuditPolicy = $policy; Phases = @() } | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 ($Report + '.json')
+  Write-Host "`nReport written."
+  exit 2
 }
 Add-Line ''
+if ($guard.RestoreError) {
+  Add-Line "ERROR: the connection audit policy was NOT put back as it was: $($guard.RestoreError)."
+  Add-Line "       Restore it by hand in an elevated PowerShell: auditpol /set /subcategory:$AuditSubcategory $((Get-AuditFlags $guard.Original) -join ' ')"
+}
+elseif ($guard.Changed) { Add-Line 'The connection audit policy was put back as it was and read back.' }
+else { Add-Line 'The connection audit policy was already on and was left as it was.' }
 Add-Line 'What this capture proves: the endpoints and port, TLS 1.3 only, nothing readable on the wire, and (from the program audit) no other connection by the companion or its WebView2.'
 Add-Line 'What it cannot see: which fields are inside TLS. T-S23''s content conditions are proven by the CI test crates/hy-server/tests/capture.rs on the real client and server.'
-$overall = Get-OverallVerdict @($results | ForEach-Object { $_.Verdict })
-Add-Line "Overall: $overall$(if ($overall -eq 'INCONCLUSIVE') { ' (evidence missing in a phase: fix what it names and run that phase again)' })"
+$overall = Get-RunVerdict @($results | ForEach-Object { $_.Verdict }) $guard.RestoreError
+Add-Line "Overall: $overall$(if ($overall -eq 'INCONCLUSIVE') { $(if ($guard.RestoreError) { ' (the audit policy was not put back: restore it as above)' } else { ' (evidence missing in a phase: fix what it names and run that phase again)' }) })"
 Add-Line 'The report names no user, PC, path, IP address or device id. The .etl and .pcapng files hold raw traffic of this PC: keep them, do not share them.'
 $Lines | Set-Content -Encoding UTF8 $Report
-$results | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 ($Report + '.json')
+[pscustomobject]@{ Overall = $overall; AuditPolicy = $policy; Phases = $results.ToArray() } | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 ($Report + '.json')
 Write-Host "`nReport written."
 if ($overall -eq 'FAIL') { exit 1 }
 if ($overall -ne 'PASS') { exit 2 }
