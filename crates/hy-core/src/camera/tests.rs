@@ -838,15 +838,24 @@ fn drift_asks_for_the_cue_and_a_hold_records_the_episode() {
     assert_eq!(fx.iter().filter(|a| **a == Action::Cue).count(), 1);
     m.cue_outcome(CueOutcome::Focus);
     let fx = m.set_hold(t, Some(CameraHold::Meeting));
-    let rec: Vec<_> = fx
+    let all: Vec<_> = fx
         .iter()
         .filter_map(|a| match a {
             Action::Record(o) => Some(*o),
             _ => None,
         })
         .collect();
+    // The camera-on time is recorded too (slice V2-3).
+    assert!(
+        all.iter()
+            .any(|o| o.kind == crate::posture::PostureKind::Capture && o.duration_s > 60),
+        "{fx:?}"
+    );
+    let rec: Vec<_> = all
+        .into_iter()
+        .filter(|o| o.kind == crate::posture::PostureKind::DriftEpisode)
+        .collect();
     assert_eq!(rec.len(), 1, "{fx:?}");
-    assert_eq!(rec[0].kind, crate::posture::PostureKind::DriftEpisode);
     assert_eq!(rec[0].cue, Some(CueOutcome::Focus));
     rec[0].payload().validate().unwrap();
     // The camera restarts after the hold: cues wait until the view matches again.
@@ -909,4 +918,128 @@ fn no_reading_intervals_reach_the_records() {
             Some(PostureReason::Absent)
         )]
     );
+}
+
+#[test]
+fn flickering_readings_count_against_coverage_in_the_day_and_session_reports() {
+    use crate::clock::ManualClock;
+    use crate::posture::PostureKind;
+    use crate::posture::quality::{self, Label, LabelKind, Logged, Source};
+    use crate::schema::{MeasurementStatus, NewEvent};
+    use crate::store::Store;
+    use chrono::TimeZone;
+
+    let ms_of = |d: Duration| i64::try_from(d.as_millis()).unwrap();
+    let low = FrameReport {
+        valid: false,
+        issue: Some(FrameIssue::LowConfidence),
+        inference_ms: 30.0,
+        visibility: 0.3,
+        features: None,
+    };
+    let mut m = capturing(s(0));
+    m.calibrate(s(0)).unwrap();
+    // Each record with when it was handed over.
+    let mut recs: Vec<(Duration, crate::posture::Observation)> = Vec::new();
+    let mut keep = |t: Duration, fx: Vec<Action>| {
+        for a in fx {
+            if let Action::Record(o) = a {
+                recs.push((t, o));
+            }
+        }
+    };
+    let mut t = s(0);
+    while t < s(20) {
+        keep(t, m.frame(t, sitting(0.55)).unwrap());
+        keep(t, m.tick(t));
+        t += ms(333);
+    }
+    assert_eq!(m.posture_state(), PostureState::Ready);
+    // Ten minutes of 3 s without a reading (away, then poorly visible, in turn) and 2 s
+    // with one: no spell lasts the 5 s an interval needs to be written on its own.
+    let begin = t;
+    let mut truth = Duration::ZERO;
+    while t < begin + s(600) {
+        let into = (t - begin).as_millis();
+        let f = match (into % 5000 < 3000, (into / 5000).is_multiple_of(2)) {
+            (true, true) => nobody(),
+            (true, false) => low,
+            (false, _) => sitting(0.55),
+        };
+        keep(t, m.frame(t, f).unwrap());
+        keep(t, m.tick(t));
+        if matches!(m.status(), Status::NoReading(_)) {
+            truth += ms(333);
+        }
+        t += ms(333);
+    }
+    let end = t;
+    keep(t, m.set_hold(t, Some(CameraHold::Meeting)));
+
+    let nr: Vec<_> = recs
+        .iter()
+        .filter(|(_, o)| o.kind == PostureKind::NoReading)
+        .collect();
+    // Added up about once a minute, not one event per flicker ...
+    assert!(nr.len() <= 13, "{}", nr.len());
+    assert!(nr.iter().filter_map(|(_, o)| o.spells).sum::<u32>() >= 100);
+    // ... and every flicker's time is there.
+    let total: u32 = nr.iter().map(|(_, o)| o.duration_s).sum();
+    let truth_s = u32::try_from(truth.as_secs()).unwrap();
+    assert!(truth_s >= 300, "{truth_s}");
+    assert!(total.abs_diff(truth_s) <= 10, "{total} vs {truth_s}");
+
+    // The session report: no planned minute had a usable reading half the time.
+    let logs: Vec<Logged> = recs
+        .iter()
+        .map(|(at, o)| Logged::from_observation(ms_of(*at), o))
+        .collect();
+    let labels = [
+        Label {
+            kind: LabelKind::Calibrate,
+            start_ms: 0,
+            end_ms: ms_of(begin),
+        },
+        Label {
+            kind: LabelKind::Reading,
+            start_ms: ms_of(begin),
+            end_ms: ms_of(end),
+        },
+    ];
+    let r = quality::session_report(
+        Source::Synthetic,
+        1,
+        1,
+        crate::posture::Thresholds::PROVISIONAL,
+        &labels,
+        &logs,
+    );
+    assert_eq!(r.check_intervals, 10);
+    assert!(r.usable_intervals <= 1, "{}", r.text());
+    assert!(r.no_reading_s.contains_key("absent") && r.no_reading_s.contains_key("low_confidence"));
+
+    // A day's coverage, from the records in a store.
+    let dir = tempfile::tempdir().unwrap();
+    let t0 = Utc.with_ymd_and_hms(2026, 11, 19, 9, 0, 0).unwrap();
+    let mut store = Store::open(
+        dir.path().join("hy.db"),
+        std::sync::Arc::new(ManualClock::new(t0 + chrono::TimeDelta::hours(1))),
+    )
+    .unwrap();
+    for (at, o) in &recs {
+        let ended = t0 + chrono::TimeDelta::from_std(*at - o.ago).unwrap();
+        store
+            .append_event(NewEvent::inferred(o.payload(), MeasurementStatus::NoReading).at(ended))
+            .unwrap();
+    }
+    let day = store.posture_day(t0.date_naive()).unwrap();
+    assert_eq!(
+        day.camera_on_s,
+        day.no_reading_s + day.unscored_s + day.usable_s
+    );
+    assert!(
+        day.no_reading_s.abs_diff(u64::from(truth_s)) <= 10,
+        "{day:?}"
+    );
+    assert!(day.usable_share.unwrap() < 0.5, "{day:?}");
 }

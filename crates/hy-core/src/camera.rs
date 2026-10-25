@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::posture::{
     Calibration, CueOutcome, Detector, Features, Observation, PostureAction, PostureReason,
-    PostureState, PostureStats,
+    PostureState, PostureStats, Thresholds,
 };
 
 /// Settings key under which [`CameraSettings`] is stored.
@@ -567,6 +567,12 @@ impl Machine {
     /// app start) or a user action.
     #[must_use]
     pub fn new(settings: CameraSettings) -> Self {
+        Self::with_thresholds(settings, Thresholds::PROVISIONAL)
+    }
+
+    /// [`Machine::new`] with other posture thresholds (the V2-3 harness's sweep).
+    #[must_use]
+    pub fn with_thresholds(settings: CameraSettings, thresholds: Thresholds) -> Self {
         Self {
             settings,
             phase: Phase::Off,
@@ -584,7 +590,7 @@ impl Machine {
                 ..CameraStats::default()
             },
             status: Status::Off,
-            detector: Detector::new(settings.calibration),
+            detector: Detector::with_thresholds(settings.calibration, thresholds),
             now: Duration::ZERO,
             wall_origin: DateTime::UNIX_EPOCH,
         }

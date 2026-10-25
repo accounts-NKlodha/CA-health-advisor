@@ -93,6 +93,7 @@ jobs:
             echo "the analyser did not FAIL on the ALPN name, which is in clear in every ClientHello (exit $rc)"; exit 1
           fi
           pwsh -NoProfile -File scripts/windows/Test-Soak.ps1 -SelfTest
+          pwsh -NoProfile -File scripts/windows/Test-HealthierYou-Camera.ps1 -SelfTest
           pwsh -NoProfile -File scripts/windows/Test-CameraSoak.ps1 -SelfTest
 
   ui:
@@ -299,6 +300,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Test-Soak.ps1 -SelfTest failed under Windows PowerShell 5.1' }
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Test-NetworkCapture.ps1 -SelfTest
           if ($LASTEXITCODE -ne 0) { throw 'Test-NetworkCapture.ps1 -SelfTest failed under Windows PowerShell 5.1' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Test-HealthierYou-Camera.ps1 -SelfTest
+          if ($LASTEXITCODE -ne 0) { throw 'Test-HealthierYou-Camera.ps1 -SelfTest failed under Windows PowerShell 5.1' }
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Test-CameraSoak.ps1 -SelfTest
           if ($LASTEXITCODE -ne 0) { throw 'Test-CameraSoak.ps1 -SelfTest failed under Windows PowerShell 5.1' }
 

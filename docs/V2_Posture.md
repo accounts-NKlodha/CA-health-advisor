@@ -3,7 +3,9 @@
 Status: built on top of V2-1 (the camera). Every threshold below is a D value. The V2-3
 desk sessions tune them and freeze them before scoring (PRD V2 gate). This page covers
 what V2-2 delivers, how it follows architecture 4.5, how it is tested, and what still
-needs a person at a real desk.
+needs a person at a real desk. Slice V2-3 (`docs/V2_Quality.md`) added the quality report,
+the desk-session harness, a day's coverage from the records, and a synthetic threshold
+sweep that moved the end threshold from 2.0 to 2.5 (still provisional).
 
 ## What the user sees
 
@@ -49,7 +51,7 @@ switch stays hidden.
 | Detector | `crates/hy-core/src/posture.rs` | Pure rules on synthetic times: calibration quality, floors, smoothing, episodes, the viewpoint check, restart revalidation and records. Features are kept in memory for at most 90 s. |
 | Machine | `crates/hy-core/src/camera.rs` | Owns the detector:<ul><li>feeds it frames, stream starts and ends, and reading changes</li><li>runs the page at 3 fps while calibrating</li><li>stores the calibration (numbers only) in the camera setting</li></ul> |
 | Cue | `coach/engine/posture.rs` (`Input::PostureCue`) | The engine decides whether the cue shows, as above. The shell asks on the engine thread and hears the answer back (`CueOutcome`). |
-| Records | `posture.observation` events (source inferred) | <ul><li>Drift episodes, with the cue outcome: shown, cooldown, focus, held, busy or no answer.</li><li>No-reading intervals (5 s or more), with the reason: absent, low confidence, out of frame or stalled.</li><li>Suspect intervals, with the reason: app restart, camera restart, camera moved or viewpoint changed.</li></ul>All local. |
+| Records | `posture.observation` events (source inferred) | <ul><li>Drift episodes, with the cue outcome: shown, cooldown, focus, held, busy or no answer, and when the cue was asked (V2-3).</li><li>No-reading intervals (5 s or more), with the reason: absent, low confidence, out of frame or stalled. Shorter spells are added up and written together about once a minute, with their count (V2-3), so coverage counts every moment without a reading.</li><li>Suspect intervals, with the reason: app restart, camera restart, camera moved or viewpoint changed.</li></ul>All local. |
 
 **Calibration quality (all required):**
 - 40 valid frames within 30 s, with at least 60% of frames valid.
@@ -65,9 +67,12 @@ switch stays hidden.
 **Episode:**
 - The features are averaged over 10 s.
 - Drift is the largest |z| at or above 3.0 (D).
-- An episode starts after 60 s of drift with at least 70% valid frames, and asks for the
-  cue at once (within the 30 s gate).
-- It ends after |z| stays below 2.0 for 10 s (D), or when capture stops.
+- An episode starts once the drift has lasted 60 s with at least 70% of frames valid
+  since it began, and asks for the cue at once. A stretch without a reading can hold the
+  cue back well past the minute; the episode's record holds when the cue was actually
+  asked (V2-3), so the quality report measures that delay instead of assuming 60 s.
+- It ends after |z| stays below 2.5 for 10 s (D; 2.0 in V2-2, changed by the V2-3
+  synthetic sweep), or when capture stops.
 - One episode is one event.
 
 **Baseline-suspect (cues paused at once):**
@@ -148,7 +153,8 @@ switch stays hidden.
 ## Needs physical testing
 
 Owner script: `scripts/windows/Test-HealthierYou-Camera.ps1 -Phase Calibration` (about
-15 minutes). The V2-3 desk sessions (5 setups × 2 sessions, raw counts) validate quality.
+15 minutes). The V2-3 desk sessions (5 setups × 2 sessions, raw counts) validate quality:
+`-Phase Desk` and `-Phase DeskReport` (see `docs/V2_Quality.md`).
 
 | Item | Slice |
 | --- | --- |
@@ -161,13 +167,16 @@ Owner script: `scripts/windows/Test-HealthierYou-Camera.ps1 -Phase Calibration` 
 
 ## Deviations and decisions to confirm
 
-1. **Thresholds are D values**, set from synthetic traces only: z 3.0 to start, 2.0 to
-   end, the end after 10 s, the band and match tolerances. V2-3 tunes them.
+1. **Thresholds are D values**, set from synthetic traces only: z 3.0 to start, 2.5 to
+   end (V2-3; was 2.0), the end after 10 s, the band and match tolerances. V2-3's sweep
+   checked them on synthetic desk sessions; the real desk sessions decide
+   (`docs/V2_Quality.md`).
 2. **A fast lean-in held for 20 s can look like a moved camera** (rule (b) uses shoulder
    scale). Cues then pause rather than coach, as the architecture prefers when unsure. If
    the desk sessions show this often, the scale threshold or hold changes.
-3. **Daily coverage is not stored separately.** It can be derived from the no-reading and
-   suspect intervals plus camera-on time. V2-3's report computes it.
+3. **Daily coverage is not stored separately.** It is derived from the no-reading and
+   suspect intervals plus camera-on time; V2-3 records camera-on time and the time with
+   no usable calibration, and computes it (`Store::posture_day`).
 4. **Calibration runs at 3 fps even when the governor chose 1 fps**, for at most 30 s,
    because 1 fps cannot give 40 frames in 30 s.
 5. **The cue is suppressed during the calm gap** after another card (no bursts), and

@@ -273,7 +273,17 @@ fn a_calibration_cut_short_by_the_camera_stopping_is_not_usable() {
     let mut r = calibrated();
     r.d.start_calibration(r.t);
     r.sit(3);
-    assert_eq!(r.d.cancel_calibration(), vec![PostureAction::Render]);
+    let fx = r.d.cancel_calibration();
+    assert_eq!(fx.last(), Some(&PostureAction::Render));
+    // The seconds spent calibrating were not scored (slice V2-3).
+    assert!(
+        fx.iter().all(|a| match a {
+            PostureAction::Record(o) =>
+                o.kind == PostureKind::BaselineSuspect
+                    && o.reason == Some(PostureReason::NoCalibration),
+            a => *a == PostureAction::Render,
+        })
+    );
     assert_eq!(r.d.state(), PostureState::Ready);
 }
 
@@ -731,13 +741,37 @@ fn no_reading_intervals_are_recorded_with_their_reason() {
             _ => None,
         })
         .collect();
+    let of = |k: PostureKind| rec.iter().filter(|r| r.0 == k).copied().collect::<Vec<_>>();
     assert_eq!(
-        rec,
+        of(PostureKind::NoReading),
         vec![
             (PostureKind::NoReading, 30, Some(PostureReason::Absent)),
-            // 2 s out of frame is too short to record.
+            // 2 s out of frame is too short for its own record: it is added up with any
+            // other short spells and written before the next long one (V2-3).
+            (PostureKind::NoReading, 2, Some(PostureReason::OutOfFrame)),
             (PostureKind::NoReading, 8, Some(PostureReason::Stalled)),
         ]
+    );
+    let spells: Vec<_> = out
+        .iter()
+        .filter_map(|a| match a {
+            PostureAction::Record(o) if o.kind == PostureKind::NoReading => Some(o.spells),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(spells, vec![None, Some(1), None]);
+    // V2-3: the camera-on time, and (with no calibration) the time not scored.
+    assert_eq!(
+        of(PostureKind::Capture),
+        vec![(PostureKind::Capture, 58, None)]
+    );
+    assert_eq!(
+        of(PostureKind::BaselineSuspect),
+        vec![(
+            PostureKind::BaselineSuspect,
+            58,
+            Some(PostureReason::NoCalibration)
+        )]
     );
 }
 
@@ -809,4 +843,289 @@ fn the_engines_answers_map_to_cue_outcomes() {
         cue_outcome_of(&InputOutcome::Ignored("something else")),
         CueOutcome::NoAnswer
     );
+}
+
+// ------------------------------------------------------------------ slice V2-3
+
+#[test]
+fn an_episode_that_ends_in_calm_is_handed_over_with_when_it_ended() {
+    let mut r = calibrated();
+    r.sit(20);
+    r.feed(90, slumped);
+    assert_eq!(r.cues(), 1);
+    r.sit(40);
+    let eps = r.records(PostureKind::DriftEpisode);
+    assert_eq!(eps.len(), 1);
+    // Written END_AFTER after the calm began, so it ended that long before.
+    let ago = eps[0].ago.as_secs_f64();
+    assert!((10.0..=12.0).contains(&ago), "{ago}");
+    // Its length runs from when the drift began (give or take smoothing) to the calm, so
+    // its start is its end less its length.
+    let d = eps[0].duration_s;
+    assert!((85..=100).contains(&d), "{d}");
+}
+
+#[test]
+fn open_intervals_are_written_every_segment_and_start_again() {
+    let mut d = Detector::new(None);
+    let mut out = d.capture_started(s(0));
+    out.extend(d.reading_changed(s(10), Some(PostureReason::Absent)));
+    for t in [300, 600, 899, 900, 901, 1000] {
+        out.extend(d.tick(s(t), wall()));
+    }
+    let rec = |out: &[PostureAction]| -> Vec<(PostureKind, u32, Option<PostureReason>)> {
+        out.iter()
+            .filter_map(|a| match a {
+                PostureAction::Record(o) => Some((o.kind, o.duration_s, o.reason)),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        rec(&out),
+        vec![
+            (PostureKind::Capture, 900, None),
+            (
+                PostureKind::BaselineSuspect,
+                900,
+                Some(PostureReason::NoCalibration)
+            ),
+            (PostureKind::NoReading, 890, Some(PostureReason::Absent)),
+        ]
+    );
+    let out = d.capture_ended(s(1200));
+    assert_eq!(
+        rec(&out),
+        vec![
+            (PostureKind::Capture, 300, None),
+            (
+                PostureKind::BaselineSuspect,
+                300,
+                Some(PostureReason::NoCalibration)
+            ),
+            (PostureKind::NoReading, 300, Some(PostureReason::Absent)),
+        ]
+    );
+    for a in &out {
+        if let PostureAction::Record(o) = a {
+            o.payload().validate().unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_suspect_baseline_is_written_every_segment_too() {
+    let mut r = calibrated();
+    r.take();
+    // A camera restart with nobody matching: suspect until it is invalid (2 minutes of
+    // reading), so feed absent frames for 20 minutes (no reading time accumulates).
+    let fx = r.d.capture_ended(r.t);
+    r.out.extend(fx);
+    let fx = r.d.capture_started(r.t);
+    r.out.extend(fx);
+    r.feed(16 * 60, |_| None);
+    let sus: Vec<_> = r
+        .records(PostureKind::BaselineSuspect)
+        .into_iter()
+        .filter(|o| o.reason == Some(PostureReason::CameraRestart))
+        .collect();
+    assert_eq!(sus.len(), 1, "{sus:?}");
+    assert!((899..=901).contains(&sus[0].duration_s));
+    assert_eq!(
+        r.d.state(),
+        PostureState::Suspect(PostureReason::CameraRestart)
+    );
+}
+
+#[test]
+fn time_without_a_usable_calibration_is_recorded_until_recalibration() {
+    let mut r = calibrated();
+    r.sit(30);
+    r.feed(160, moved_camera);
+    assert_eq!(r.d.state(), PostureState::Recalibrate);
+    r.take();
+    r.feed(60, moved_camera);
+    r.d.start_calibration(r.t);
+    r.feed(20, moved_camera);
+    assert_eq!(r.d.state(), PostureState::Ready);
+    let none: Vec<_> = r
+        .records(PostureKind::BaselineSuspect)
+        .into_iter()
+        .filter(|o| o.reason == Some(PostureReason::NoCalibration))
+        .collect();
+    assert_eq!(none.len(), 1, "{none:?}");
+    // From the invalidation (about 20 s before the end of the 160 s), through the 60 s,
+    // to the end of the calibration (about 13 s).
+    assert!((85..=100).contains(&none[0].duration_s), "{none:?}");
+}
+
+#[test]
+fn thresholds_are_checked_and_bad_ones_fall_back_to_the_shipped_values() {
+    let p = Thresholds::PROVISIONAL;
+    assert!(p.validate().is_ok());
+    assert_eq!(Thresholds::default(), p);
+    assert_eq!((p.z_drift, p.z_end, p.end_after_s), (3.0, 2.5, 10));
+    for bad in [
+        Thresholds { z_end: 3.0, ..p },
+        Thresholds {
+            z_drift: f64::NAN,
+            ..p
+        },
+        Thresholds {
+            end_after_s: 0,
+            ..p
+        },
+        Thresholds {
+            match_shift: STEP_SHIFT,
+            ..p
+        },
+        Thresholds {
+            match_scale: -0.1,
+            ..p
+        },
+        Thresholds {
+            turn_tolerance: 0.0,
+            ..p
+        },
+    ] {
+        assert!(bad.validate().is_err(), "{bad:?}");
+        assert_eq!(Detector::with_thresholds(None, bad).thresholds(), p);
+    }
+    let other = Thresholds { z_drift: 3.5, ..p };
+    assert_eq!(Detector::with_thresholds(None, other).thresholds(), other);
+    // A higher start threshold ignores a drift the shipped one cues.
+    let mut d = Run {
+        d: Detector::with_thresholds(
+            None,
+            Thresholds {
+                z_drift: 9.0,
+                z_end: 2.5,
+                ..p
+            },
+        ),
+        t: Duration::ZERO,
+        out: Vec::new(),
+    };
+    let fx = d.d.capture_started(Duration::ZERO);
+    d.out.extend(fx);
+    d.calibrate();
+    d.feed(120, slumped);
+    assert_eq!(d.cues(), 0);
+}
+
+// ------------------------------------------------------------------ V2-3 review fixes
+
+#[test]
+fn a_cue_held_back_by_frames_without_a_reading_records_when_it_was_asked() {
+    use crate::posture::quality::{self, Label, LabelKind, Logged, Source};
+    let ms = |d: Duration| i64::try_from(d.as_millis()).unwrap();
+    let mut r = calibrated();
+    r.sit(30);
+    let start = r.t;
+    // Two clear seconds slumped, then fifty without a reading, then clear and slumped:
+    // the drift began near the start, but the 70%-valid rule holds the cue back.
+    r.feed(2, slumped);
+    r.feed(50, |_| None);
+    let (mut cue_at, mut handed) = (None, None);
+    let mut episode = None;
+    while episode.is_none() {
+        assert!(r.t < start + s(400), "no episode record");
+        let in_drift = r.t < start + s(160);
+        let f = if in_drift {
+            slumped(r.t)
+        } else {
+            Some(jitter(r.t, base()))
+        };
+        let fx = r.d.frame(r.t, wall(), 0.9, f);
+        if fx.contains(&PostureAction::Cue) {
+            cue_at = Some(r.t);
+            r.d.cue_outcome(CueOutcome::Shown);
+        }
+        for a in &fx {
+            if let PostureAction::Record(o) = a
+                && o.kind == PostureKind::DriftEpisode
+            {
+                episode = Some(*o);
+                handed = Some(r.t);
+            }
+        }
+        r.t += Duration::from_millis(333);
+    }
+    let (cue_at, o) = (cue_at.unwrap(), episode.unwrap());
+    // The detector asked well over a minute and a half after the drift began.
+    assert!(cue_at >= start + s(100), "{:?}", cue_at - start);
+    o.payload().validate().unwrap();
+    let l = Logged::from_observation(ms(handed.unwrap()), &o);
+    // The record says when the cue was actually asked (to within half a second) ...
+    assert!(
+        (l.cue_at_ms() - ms(cue_at)).abs() <= 600,
+        "{l:?} vs {cue_at:?}"
+    );
+    // ... where its start plus 60 s would have been far too early.
+    assert!(ms(cue_at) - (l.start_ms + 60_000) >= 30_000, "{l:?}");
+    // So the report counts it late, not detected within 30 s.
+    let labels = [
+        Label {
+            kind: LabelKind::Reading,
+            start_ms: 0,
+            end_ms: ms(start),
+        },
+        Label {
+            kind: LabelKind::DriftForward,
+            start_ms: ms(start),
+            end_ms: ms(start + s(160)),
+        },
+    ];
+    let rep = quality::session_report(
+        Source::Synthetic,
+        1,
+        1,
+        Thresholds::PROVISIONAL,
+        &labels,
+        &[l],
+    );
+    assert_eq!(
+        (rep.detected, rep.detected_late, rep.true_episodes),
+        (0, 1, 1)
+    );
+    let late = rep.latency_s[0];
+    assert!(
+        late > 30 && late == (ms(cue_at - start) - 60_000).div_euclid(1000),
+        "{late}"
+    );
+}
+
+#[test]
+fn short_no_reading_spells_are_added_up_and_written_together() {
+    let mut d = Detector::new(None);
+    let mut out = d.capture_started(s(0));
+    // Twenty-four 3 s spells, alternating reasons, 2 s apart: 2 minutes in all.
+    for i in 0..24_u64 {
+        let reason = if i % 2 == 0 {
+            PostureReason::Absent
+        } else {
+            PostureReason::LowConfidence
+        };
+        out.extend(d.reading_changed(s(5 * i), Some(reason)));
+        out.extend(d.reading_changed(s(5 * i + 3), None));
+    }
+    out.extend(d.capture_ended(s(125)));
+    let nr: Vec<Observation> = out
+        .iter()
+        .filter_map(|a| match a {
+            PostureAction::Record(o) if o.kind == PostureKind::NoReading => Some(*o),
+            _ => None,
+        })
+        .collect();
+    // Written about once a minute, never one event a spell; every second is counted.
+    assert!((2..=3).contains(&nr.len()), "{nr:?}");
+    assert_eq!(nr.iter().map(|o| o.duration_s).sum::<u32>(), 72);
+    assert_eq!(nr.iter().filter_map(|o| o.spells).sum::<u32>(), 24);
+    for o in &nr {
+        o.payload().validate().unwrap();
+    }
+    // Each ends when its last spell ended, and spans no more than BRIEF_EVERY.
+    let first = nr[0];
+    assert_eq!(first.spells, Some(12));
+    assert_eq!(first.duration_s, 36);
 }

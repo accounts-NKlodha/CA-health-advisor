@@ -107,6 +107,16 @@ fn soak_stats(args: &[std::ffi::OsString]) -> Option<i32> {
     }
 }
 
+/// `hy-companion.exe --hy-posture-report session|gate ...` (slice V2-3): a desk session's
+/// posture quality report from the operator's labels and the local store's records, or the
+/// sessions added up against the PRD V2 gate ([`hy_core::posture::quality::command`]), for
+/// `scripts/windows/Test-HealthierYou-Camera.ps1 -Phase Desk`. Read-only on the store;
+/// counts and times only. The database defaults to the signed-in user's.
+fn posture_report(args: &[std::ffi::OsString]) -> Option<i32> {
+    let db = std::env::var_os("LOCALAPPDATA").map(|d| store_path(PathBuf::from(d)));
+    hy_core::posture::quality::command(args, db.as_deref())
+}
+
 fn setup(
     app: &mut tauri::App,
     version: hy_core::update::Version,
@@ -233,6 +243,9 @@ fn main() {
     // without any window.
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     if let Some(code) = soak_stats(&args) {
+        std::process::exit(code);
+    }
+    if let Some(code) = posture_report(&args) {
         std::process::exit(code);
     }
     if let Some(code) = update::command_line(version) {
@@ -365,6 +378,23 @@ mod tests {
         );
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_posture_report_command_is_routed_and_refuses_bad_arguments() {
+        use std::ffi::OsString;
+        let args = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(posture_report(&args(&["--hy-soak-stats", "0"])), None);
+        assert_eq!(posture_report(&args(&["--hy-posture-report"])), Some(4));
+        assert_eq!(
+            posture_report(&args(&[
+                "--hy-posture-report",
+                "session",
+                "--report",
+                "x.json"
+            ])),
+            Some(4)
+        );
     }
 
     #[test]

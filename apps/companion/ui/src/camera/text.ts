@@ -1,6 +1,6 @@
 // The camera page's words (wireframes W10 and W16), kept apart from the component so they
 // can be tested with node --test.
-import type { CameraPage, CameraStatus, PostureView } from '../shared/types';
+import type { CameraPage, CameraStatus, PostureCoverage, PostureView } from '../shared/types';
 
 /** The consent text (W16): what the posture check does and does not do. */
 export const CONSENT_LINES: readonly string[] = [
@@ -82,6 +82,24 @@ export function statsLine(p: CameraPage): string {
 /** What calibration is (slice V2-2), shown before the first one. */
 export const CALIBRATION_HELP =
   'Calibrate once: sit as you normally do, facing the screen, and keep still for about 15 seconds. Posture cues compare later readings with this, never with an ideal posture.';
+
+function minutes(s: number): string {
+  const m = Math.round(s / 60);
+  return m === 1 ? '1 minute' : `${m} minutes`;
+}
+
+/**
+ * Today's coverage in words (slice V2-3): how long the camera was on and how much of it
+ * gave a reading the check could compare with the calibration. Counts only; never a score.
+ */
+export function coverageText(c: PostureCoverage | null): string {
+  if (!c || c.camera_on_s < 60 || c.usable_share === null) {
+    return 'Today: the camera has not been on long enough to say anything.';
+  }
+  const pct = Math.round(c.usable_share * 100);
+  const cues = c.cues_shown === 1 ? '1 cue' : `${c.cues_shown} cues`;
+  return `Today: camera on ${minutes(c.camera_on_s)}; a usable reading for ${pct}% of it (no reading ${minutes(c.no_reading_s)}, paused or not calibrated ${minutes(c.unscored_s)}); ${cues} shown.`;
+}
 
 /** The longer explanation of the calibration and baseline state (slice V2-2). */
 export function postureDetail(p: PostureView): string {

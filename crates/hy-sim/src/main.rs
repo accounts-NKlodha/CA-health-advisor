@@ -15,6 +15,9 @@
 //!
 //! `hy-sim soak` ([`soak`], slice V1-7) runs the same server and PCs under a steady
 //! office load for many simulated days, for the soak's CI variant.
+//!
+//! `hy-sim posture` ([`posture`], slice V2-3) plays the posture check's synthetic desk
+//! sessions and prints their quality report (and, with `--sweep`, a threshold sweep).
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -39,6 +42,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+mod posture;
 mod soak;
 
 const USERS: usize = 5;
@@ -544,6 +548,11 @@ fn main() -> std::process::ExitCode {
     {
         return soak_cmd(&args[1..]);
     }
+    if let Some(cmd) = args.first()
+        && cmd == "posture"
+    {
+        return posture::cmd(&args[1..]);
+    }
     let seed = match args.as_slice() {
         [] => None,
         // `hy-sim seed <data dir> <mirror file>`: a populated server data folder with
@@ -556,7 +565,7 @@ fn main() -> std::process::ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: hy-sim [seed <data dir> <mirror file> [<stale mirror copy>] | count <data dir> | soak <real seconds> <simulated days> [<report.json>]]"
+                "usage: hy-sim [seed <data dir> <mirror file> [<stale mirror copy>] | count <data dir> | soak <real seconds> <simulated days> [<report.json>] | posture [--sweep] [<report.json>]]"
             );
             return std::process::ExitCode::FAILURE;
         }
