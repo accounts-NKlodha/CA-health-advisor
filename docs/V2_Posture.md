@@ -51,7 +51,7 @@ switch stays hidden.
 | Detector | `crates/hy-core/src/posture.rs` | Pure rules on synthetic times: calibration quality, floors, smoothing, episodes, the viewpoint check, restart revalidation and records. Features are kept in memory for at most 90 s. |
 | Machine | `crates/hy-core/src/camera.rs` | Owns the detector:<ul><li>feeds it frames, stream starts and ends, and reading changes</li><li>runs the page at 3 fps while calibrating</li><li>stores the calibration (numbers only) in the camera setting</li></ul> |
 | Cue | `coach/engine/posture.rs` (`Input::PostureCue`) | The engine decides whether the cue shows, as above. The shell asks on the engine thread and hears the answer back (`CueOutcome`). |
-| Records | `posture.observation` events (source inferred) | <ul><li>Drift episodes, with the cue outcome: shown, cooldown, focus, held, busy or no answer.</li><li>No-reading intervals (5 s or more), with the reason: absent, low confidence, out of frame or stalled.</li><li>Suspect intervals, with the reason: app restart, camera restart, camera moved or viewpoint changed.</li></ul>All local. |
+| Records | `posture.observation` events (source inferred) | <ul><li>Drift episodes, with the cue outcome: shown, cooldown, focus, held, busy or no answer, and when the cue was asked (V2-3).</li><li>No-reading intervals (5 s or more), with the reason: absent, low confidence, out of frame or stalled. Shorter spells are added up and written together about once a minute, with their count (V2-3), so coverage counts every moment without a reading.</li><li>Suspect intervals, with the reason: app restart, camera restart, camera moved or viewpoint changed.</li></ul>All local. |
 
 **Calibration quality (all required):**
 - 40 valid frames within 30 s, with at least 60% of frames valid.
@@ -67,8 +67,10 @@ switch stays hidden.
 **Episode:**
 - The features are averaged over 10 s.
 - Drift is the largest |z| at or above 3.0 (D).
-- An episode starts after 60 s of drift with at least 70% valid frames, and asks for the
-  cue at once (within the 30 s gate).
+- An episode starts once the drift has lasted 60 s with at least 70% of frames valid
+  since it began, and asks for the cue at once. A stretch without a reading can hold the
+  cue back well past the minute; the episode's record holds when the cue was actually
+  asked (V2-3), so the quality report measures that delay instead of assuming 60 s.
 - It ends after |z| stays below 2.5 for 10 s (D; 2.0 in V2-2, changed by the V2-3
   synthetic sweep), or when capture stops.
 - One episode is one event.

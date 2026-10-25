@@ -356,6 +356,8 @@ fn every_payload_kind_round_trips_through_the_store() {
                 duration_s: 120,
                 reason: Some(crate::schema::PostureReason::CameraMoved),
                 cue: None,
+                cue_after_s: None,
+                spells: None,
             },
             MeasurementStatus::NoReading,
         ),
@@ -1599,6 +1601,8 @@ fn a_days_posture_coverage_is_derived_from_its_records() {
         duration_s,
         reason,
         cue,
+        cue_after_s: None,
+        spells: None,
     };
     for (end, payload, status) in [
         (

@@ -24,8 +24,12 @@
 //! sessions and checks the PRD V2 gate per setup.
 //!
 //! A drift episode's record holds its length and is written when it ends, so its start is
-//! the record's time less its length; the cue is asked [`EPISODE_AFTER`] after the drift
-//! began, on the first frame past it (at most one frame later, 1 s at 1 fps).
+//! the record's time less its length. It also holds when the cue was actually asked
+//! (`cue_after_s`): at least [`EPISODE_AFTER`] after the drift began, but later when frames
+//! without a reading held back the 70%-valid rule. Matching, latency and where a cue fell
+//! use that time; only records from before slice V2-3 fall back to the start plus 60 s.
+//! Short no-reading spells reach the log added up ([`super::BRIEF_EVERY`]), so coverage
+//! counts every moment without a reading.
 //!
 //! Nothing here reads, keeps or writes a frame, a landmark or a feature: only the records'
 //! kinds, reasons, outcomes and times. The report holds no name, path or device id.
@@ -56,8 +60,12 @@ pub const EPISODE_AFTER_MS: i64 = duration_ms(EPISODE_AFTER);
 pub const CUE_WITHIN_MS: i64 = 30_000;
 /// An episode belongs to a staged drift when its cue was asked during the drift or up to
 /// this long after it (D: a cue more than [`CUE_WITHIN_MS`] after the threshold counts as
-/// late, not missed).
+/// late, not missed) ...
 pub const MATCH_GRACE_MS: i64 = 30_000;
+/// ... and it began no earlier than this before the operator's mark (D: the mark can
+/// trail the movement by a few seconds). An episode already running before the drift
+/// began is not a detection of it: it is a false episode, and the drift is missed.
+pub const ONSET_BEFORE_MS: i64 = 10_000;
 /// A moved camera counts as suspended in time when cues paused within this of the
 /// operator's mark (D: architecture 4.5 holds a step for 20 s, after a step of up to 2 s
 /// and the 1 s window that sees it; the T-C4 "within 20 s" is read from the step's end).
@@ -252,6 +260,9 @@ pub struct Logged {
     pub reason: Option<PostureReason>,
     /// What became of the cue (drift episodes).
     pub cue: Option<CueOutcome>,
+    /// When the cue was asked (drift episodes recorded since slice V2-3), same origin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cue_ms: Option<i64>,
 }
 
 impl Logged {
@@ -263,13 +274,16 @@ impl Logged {
         duration_s: u32,
         reason: Option<PostureReason>,
         cue: Option<CueOutcome>,
+        cue_after_s: Option<u32>,
     ) -> Self {
+        let start_ms = end_ms - i64::from(duration_s) * 1000;
         Self {
             kind,
-            start_ms: end_ms - i64::from(duration_s) * 1000,
+            start_ms,
             end_ms,
             reason,
             cue,
+            cue_ms: cue_after_s.map(|c| start_ms + i64::from(c) * 1000),
         }
     }
 
@@ -277,13 +291,21 @@ impl Logged {
     #[must_use]
     pub fn from_observation(now_ms: i64, o: &Observation) -> Self {
         let ago = i64::try_from(o.ago.as_millis()).unwrap_or(0);
-        Self::from_record(now_ms - ago, o.kind, o.duration_s, o.reason, o.cue)
+        Self::from_record(
+            now_ms - ago,
+            o.kind,
+            o.duration_s,
+            o.reason,
+            o.cue,
+            o.cue_after_s,
+        )
     }
 
-    /// When the cue was asked (drift episodes): [`EPISODE_AFTER`] after the drift began.
+    /// When the cue was asked (drift episodes): the recorded time, or for a record written
+    /// before slice V2-3 (which has none) [`EPISODE_AFTER`] after the drift began.
     #[must_use]
-    pub const fn cue_at_ms(&self) -> i64 {
-        self.start_ms + EPISODE_AFTER_MS
+    pub fn cue_at_ms(&self) -> i64 {
+        self.cue_ms.unwrap_or(self.start_ms + EPISODE_AFTER_MS)
     }
 
     const fn span(&self) -> Span {
@@ -419,7 +441,16 @@ pub fn logged_from_rows(rows: impl IntoIterator<Item = (i64, String, String)>) -
                     duration_s,
                     reason,
                     cue,
-                } => Some(Logged::from_record(at, kind, duration_s, reason, cue)),
+                    cue_after_s,
+                    ..
+                } => Some(Logged::from_record(
+                    at,
+                    kind,
+                    duration_s,
+                    reason,
+                    cue,
+                    cue_after_s,
+                )),
                 _ => None,
             }
         })
@@ -460,6 +491,7 @@ pub fn read_log(db: &Path, since_ms: i64, until_ms: i64) -> Result<Vec<Logged>> 
         .map(|l| Logged {
             start_ms: l.start_ms.max(since_ms) - since_ms,
             end_ms: l.end_ms - since_ms,
+            cue_ms: l.cue_ms.map(|c| c - since_ms),
             ..l
         })
         .collect())
@@ -524,7 +556,7 @@ pub struct SessionReport {
     pub true_episodes: u32,
     /// A second episode within the same staged drift.
     pub duplicate_episodes: u32,
-    /// Matched to none: where each one's cue was asked (a label, or `unlabelled`).
+    /// Matched to none: where each one began (a label, or `unlabelled`).
     pub false_episodes: BTreeMap<String, u32>,
     /// Cues the pet showed.
     pub cues_shown: u32,
@@ -645,9 +677,13 @@ pub fn session_report(
             _ => {}
         }
         // An episode belongs to a drift when its cue was asked after the drift began and
-        // before the grace after it ended: an episode already running when a drift began
-        // (it started from a comfortable stance) is not a detection of that drift.
-        let belongs = |d: &Label| (d.start_ms..d.end_ms + MATCH_GRACE_MS).contains(&e.cue_at_ms());
+        // before the grace after it ended, and it began with the drift: an episode
+        // already running when a drift began (it started from a comfortable stance) is
+        // not a detection of that drift, whenever its cue came.
+        let belongs = |d: &Label| {
+            (d.start_ms..d.end_ms + MATCH_GRACE_MS).contains(&e.cue_at_ms())
+                && e.start_ms >= d.start_ms - ONSET_BEFORE_MS
+        };
         // The first unmatched drift it belongs to, else the first (a duplicate).
         let hit = (0..drifts.len())
             .find(|&i| matched[i].is_none() && belongs(drifts[i]))
@@ -662,7 +698,7 @@ pub fn session_report(
                 false_cues += u32::from(shown);
             }
             None => {
-                let at = label_at(e.cue_at_ms()).map_or("unlabelled", LabelKind::as_str);
+                let at = label_at(e.start_ms).map_or("unlabelled", LabelKind::as_str);
                 *false_episodes.entry(at.to_owned()).or_default() += 1;
                 false_cues += u32::from(shown);
             }

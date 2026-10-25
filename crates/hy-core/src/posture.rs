@@ -33,9 +33,12 @@
 //!   the cue, no-reading intervals with their reason, and suspect intervals with theirs.
 //!   Slice V2-3 adds camera-on time ([`PostureKind::Capture`]) and the time with no
 //!   usable calibration ([`PostureReason::NoCalibration`]), so a day's coverage can be
-//!   derived from the records alone ([`quality::coverage`]). Open intervals are written
-//!   at least every [`SEGMENT_EVERY`], so a crash loses little and a day's records stay
-//!   close to its date. They stay on this PC.
+//!   derived from the records alone ([`quality::coverage`]). An episode's record holds when
+//!   its cue was actually asked (`cue_after_s`), which a stretch without a reading can
+//!   push well past a minute. No-reading spells shorter than [`NO_READING_MIN`] are added
+//!   up and written together ([`BRIEF_EVERY`]), so coverage misses none. Open intervals
+//!   are written at least every [`SEGMENT_EVERY`], so a crash loses little and a day's
+//!   records stay close to its date. They stay on this PC.
 //! - **Thresholds.** Every tunable D value is in [`Thresholds`]; the shipped ones are
 //!   [`Thresholds::PROVISIONAL`]. Slice V2-3's harness ([`desk`], [`quality`]) measures
 //!   them on synthetic desk sessions; they stay provisional until the owner's real desk
@@ -138,8 +141,13 @@ pub const MATCH_SCALE: f64 = 0.10;
 pub const HISTORY_FOR: Duration = Duration::from_secs(90);
 /// Frames further apart than this do not count as continuous reading (D).
 const READING_GAP: Duration = Duration::from_secs(2);
-/// No-reading intervals shorter than this are not recorded (D).
+/// No-reading intervals shorter than this are not recorded on their own (D) ...
 pub const NO_READING_MIN: Duration = Duration::from_secs(5);
+/// ... but added up and written together, as one no-reading record with a spell count,
+/// once the spells span this long (slice V2-3; D, one check interval), so coverage counts
+/// every moment without a reading while short flickers do not each become an event. They
+/// are also written when the camera stops, a segment ends or scoring starts or stops.
+pub const BRIEF_EVERY: Duration = Duration::from_secs(60);
 /// Open intervals (camera on, no reading, suspect, no calibration) are written at least
 /// this often while capture runs, and start again (D, slice V2-3): a crash loses at most
 /// this much, and a day's coverage is attributed to within this of its date.
@@ -527,6 +535,11 @@ pub struct Observation {
     pub reason: Option<PostureReason>,
     /// What became of the cue (drift episodes).
     pub cue: Option<CueOutcome>,
+    /// When the cue was asked, whole seconds after the episode's recorded start (its end
+    /// less `duration_s`; drift episodes, slice V2-3).
+    pub cue_after_s: Option<u32>,
+    /// How many short no-reading spells this record adds up ([`BRIEF_EVERY`]).
+    pub spells: Option<u32>,
     /// How long before it was handed over it ended (an episode ends when the calm began,
     /// [`Thresholds::end_after_s`] earlier). The record's time is its end, so its start is
     /// that time less `duration_s` (slice V2-3). Not stored.
@@ -543,6 +556,8 @@ impl Observation {
             duration_s: self.duration_s,
             reason: self.reason,
             cue: self.cue,
+            cue_after_s: self.cue_after_s,
+            spells: self.spells,
         }
     }
 }
@@ -624,8 +639,26 @@ enum Baseline {
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Episode {
     since: Duration,
+    /// When the cue was asked: the first frame with [`EPISODE_AFTER`] of drift and enough
+    /// valid frames, which can be much later than `since` + 60 s after a stretch without
+    /// a reading.
+    cue_at: Duration,
     cue: Option<CueOutcome>,
     calm_since: Option<Duration>,
+}
+
+/// Short no-reading spells added up until written ([`BRIEF_EVERY`]).
+#[derive(Debug, Clone, PartialEq)]
+struct Brief {
+    /// When the first spell began.
+    since: Duration,
+    /// When the latest spell ended.
+    last_end: Duration,
+    /// Their total time, by reason.
+    by_reason: Vec<(PostureReason, Duration)>,
+    spells: u32,
+    /// Whether drift was scored when the first spell began.
+    scoring: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -650,6 +683,8 @@ pub struct Detector {
     drift_since: Option<Duration>,
     episode: Option<Episode>,
     no_reading: Option<(Duration, PostureReason)>,
+    /// Short no-reading spells not yet written.
+    brief: Option<Brief>,
     step: Option<Step>,
     view_out_since: Option<Duration>,
     capturing: bool,
@@ -709,6 +744,7 @@ impl Detector {
             drift_since: None,
             episode: None,
             no_reading: None,
+            brief: None,
             step: None,
             view_out_since: None,
             capturing: false,
@@ -786,6 +822,7 @@ impl Detector {
         self.last_valid = None;
         if self.calibration.is_none() {
             self.track_unscored(now, &mut out);
+            self.settle_brief(now, &mut out);
             return out;
         }
         match self.baseline {
@@ -810,6 +847,7 @@ impl Detector {
             Baseline::None => {}
         }
         self.track_unscored(now, &mut out);
+        self.settle_brief(now, &mut out);
         out.push(PostureAction::Render);
         out
     }
@@ -833,6 +871,7 @@ impl Detector {
         self.track_unscored(now, &mut out);
         self.end_episode(now, now, &mut out);
         self.end_no_reading(now, &mut out);
+        self.flush_brief(now, &mut out);
         if let Baseline::Suspect { reason, since, .. } = &mut self.baseline
             && let Some(start) = since.take()
         {
@@ -868,6 +907,7 @@ impl Detector {
             (Some(_), None) => self.end_no_reading(now, &mut out),
             (None, None) => {}
         }
+        self.settle_brief(now, &mut out);
         out
     }
 
@@ -885,6 +925,7 @@ impl Detector {
         });
         self.stats.calibrations += 1;
         self.track_unscored(now, &mut out);
+        self.settle_brief(now, &mut out);
         out.push(PostureAction::Render);
         out
     }
@@ -894,6 +935,7 @@ impl Detector {
         if self.calibrating.take().is_some() {
             let mut out = Vec::new();
             self.track_unscored(self.last_now, &mut out);
+            self.settle_brief(self.last_now, &mut out);
             out.push(PostureAction::Render);
             out
         } else {
@@ -951,6 +993,18 @@ impl Detector {
     /// One frame (valid with features, or not). `wall` is when, for a calibration that
     /// finishes on it.
     pub fn frame(
+        &mut self,
+        now: Duration,
+        wall: DateTime<Utc>,
+        visibility: f64,
+        features: Option<Features>,
+    ) -> Vec<PostureAction> {
+        let mut out = self.frame_inner(now, wall, visibility, features);
+        self.settle_brief(now, &mut out);
+        out
+    }
+
+    fn frame_inner(
         &mut self,
         now: Duration,
         wall: DateTime<Utc>,
@@ -1030,6 +1084,7 @@ impl Detector {
         if self.capturing {
             self.segment(now, &mut out);
         }
+        self.settle_brief(now, &mut out);
         out
     }
 
@@ -1110,6 +1165,7 @@ impl Detector {
             {
                 self.episode = Some(Episode {
                     since,
+                    cue_at: now,
                     cue: None,
                     calm_since: None,
                 });
@@ -1333,12 +1389,22 @@ impl Detector {
     /// End the episode at `end` (seen at `now`).
     fn end_episode(&mut self, end: Duration, now: Duration, out: &mut Vec<PostureAction>) {
         if let Some(e) = self.episode.take() {
-            let d = end.saturating_sub(e.since);
+            let duration_s = secs(end.saturating_sub(e.since)).max(1);
+            // The cue's time from the start a reader derives (the end less the whole
+            // seconds), so the report finds it to within half a second.
+            let start = end.saturating_sub(Duration::from_secs(u64::from(duration_s)));
+            let cue_after = e
+                .cue_at
+                .saturating_sub(start)
+                .min(end.saturating_sub(start));
+            let cue_after_s = secs(cue_after + Duration::from_millis(500)).min(duration_s);
             out.push(PostureAction::Record(Observation {
                 kind: PostureKind::DriftEpisode,
-                duration_s: secs(d).max(1),
+                duration_s,
                 reason: None,
                 cue: Some(e.cue.unwrap_or(CueOutcome::NoAnswer)),
+                cue_after_s: Some(cue_after_s),
+                spells: None,
                 ago: now.saturating_sub(end),
             }));
         }
@@ -1377,6 +1443,7 @@ impl Detector {
         if now.saturating_sub(start) < SEGMENT_EVERY {
             return;
         }
+        self.flush_brief(now, out);
         Self::record_capture(out, now.saturating_sub(start));
         self.capture_since = Some(now);
         if let Some(since) = self.unscored_since {
@@ -1420,6 +1487,8 @@ impl Detector {
                 duration_s: secs(d),
                 reason: None,
                 cue: None,
+                cue_after_s: None,
+                spells: None,
                 ago: Duration::ZERO,
             }));
         }
@@ -1429,8 +1498,83 @@ impl Detector {
         if let Some((since, reason)) = self.no_reading.take() {
             let d = now.saturating_sub(since);
             if d >= NO_READING_MIN {
+                // Short spells before it are written first, so the two never overlap.
+                self.flush_brief(now, out);
                 Self::record_interval(out, PostureKind::NoReading, d, reason);
+            } else if !d.is_zero() {
+                self.add_brief(since, now, reason, out);
             }
+        }
+    }
+
+    /// Add a short no-reading spell; write the ones before it first if together they
+    /// would span more than [`BRIEF_EVERY`].
+    fn add_brief(
+        &mut self,
+        since: Duration,
+        end: Duration,
+        reason: PostureReason,
+        out: &mut Vec<PostureAction>,
+    ) {
+        if self
+            .brief
+            .as_ref()
+            .is_some_and(|b| end.saturating_sub(b.since) > BRIEF_EVERY)
+        {
+            self.flush_brief(end, out);
+        }
+        let scoring = self.scoring();
+        let b = self.brief.get_or_insert_with(|| Brief {
+            since,
+            last_end: end,
+            by_reason: Vec::new(),
+            spells: 0,
+            scoring,
+        });
+        b.last_end = end;
+        b.spells += 1;
+        let d = end.saturating_sub(since);
+        match b.by_reason.iter_mut().find(|(r, _)| *r == reason) {
+            Some((_, t)) => *t += d,
+            None => b.by_reason.push((reason, d)),
+        }
+    }
+
+    /// Write the short spells added up so far: one no-reading record of their total time,
+    /// ending when the last one ended, with the reason that took most of it.
+    fn flush_brief(&mut self, now: Duration, out: &mut Vec<PostureAction>) {
+        let Some(b) = self.brief.take() else {
+            return;
+        };
+        let total: Duration = b.by_reason.iter().map(|(_, d)| *d).sum();
+        let Some(&(reason, _)) = b.by_reason.iter().max_by_key(|(_, d)| *d) else {
+            return;
+        };
+        // Whole seconds, rounded: the total is what coverage counts.
+        let duration_s = secs(total + Duration::from_millis(500));
+        if duration_s == 0 {
+            return;
+        }
+        out.push(PostureAction::Record(Observation {
+            kind: PostureKind::NoReading,
+            duration_s,
+            reason: Some(reason),
+            cue: None,
+            cue_after_s: None,
+            spells: Some(b.spells),
+            ago: now.saturating_sub(b.last_end),
+        }));
+    }
+
+    /// Write the short spells once capture stops or scoring starts or stops, so their
+    /// record never spans a change of what the time counts as.
+    fn settle_brief(&mut self, now: Duration, out: &mut Vec<PostureAction>) {
+        if self
+            .brief
+            .as_ref()
+            .is_some_and(|b| !self.capturing || b.scoring != self.scoring())
+        {
+            self.flush_brief(now, out);
         }
     }
 
@@ -1446,6 +1590,8 @@ impl Detector {
                 duration_s: secs(d),
                 reason: Some(reason),
                 cue: None,
+                cue_after_s: None,
+                spells: None,
                 ago: Duration::ZERO,
             }));
         }

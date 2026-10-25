@@ -108,6 +108,17 @@ function Format-Label([long]$SinceMs, [long]$StartMs, [long]$EndMs, [string]$Lab
 
 function Get-NowMs { [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
 
+# The report's full path (relative to the current location), with its folder created if it
+# is not there yet (for example .\desk\hy-desk-1-1.txt), so every file beside it can be written.
+function Initialize-ReportPath([string]$Path) {
+  $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+  $parent = Split-Path -Parent $full
+  if ($parent -and -not (Test-Path -LiteralPath $parent -PathType Container)) {
+    $null = New-Item -ItemType Directory -Path $parent -Force
+  }
+  $full
+}
+
 function Invoke-DeskSelfTest {
   $fails = 0
   function Check([string]$Name, [bool]$Ok) { if ($Ok) { Write-Host "[PASS] $Name" } else { Write-Host "[FAIL] $Name"; $script:deskFails++ } }
@@ -125,12 +136,30 @@ function Invoke-DeskSelfTest {
   Check "a label line is seconds,seconds,word ($line)" ($line -eq '12.345,102.345,drift_forward')
   $text = (@(Get-DeskSteps 1) | ForEach-Object { $_[2] }) -join ' '
   foreach ($w in 'bad posture', 'poor', 'wrong', 'health') { Check "no judgement in the instructions: $w" (-not $text.ToLower().Contains($w)) }
+  # A report in a folder that does not exist yet: the folder is made, and files beside the
+  # report can be written.
+  $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("hy-camera-selftest-" + [guid]::NewGuid().ToString('N'))
+  try {
+    $full = Initialize-ReportPath (Join-Path (Join-Path $tmp 'desk') 'hy-desk-1-1.txt')
+    Check 'a missing report folder is created' (Test-Path -LiteralPath (Join-Path $tmp 'desk') -PathType Container)
+    $csvPath = [System.IO.Path]::ChangeExtension($full, '.csv')
+    'time,label' | Set-Content $csvPath
+    Check 'the measurements file beside the report can be written' (Test-Path -LiteralPath $csvPath)
+    Push-Location $tmp
+    try {
+      $rel = Initialize-ReportPath (Join-Path (Join-Path '.' 'desk2') 'r.txt')
+      Check 'a relative report path is made full, from the current location' ($rel -eq (Join-Path (Join-Path $tmp 'desk2') 'r.txt') -and (Test-Path -LiteralPath (Join-Path $tmp 'desk2') -PathType Container))
+    } finally { Pop-Location }
+  } finally {
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+  }
   if ($script:deskFails -gt 0) { throw "$script:deskFails self-test check(s) failed" }
   Write-Host 'Self-test passed.'
 }
 
 if ($SelfTest) { Invoke-DeskSelfTest; return }
 if (-not $Report) { throw 'Give -Report <file> (or -SelfTest).' }
+$Report = Initialize-ReportPath $Report
 if (-not $Exe) { $Exe = Join-Path $env:LOCALAPPDATA 'HealthierYou\hy-companion.exe' }
 
 $lines = [System.Collections.Generic.List[string]]::new()

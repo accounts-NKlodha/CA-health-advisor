@@ -89,21 +89,21 @@ fn a_session_follows_the_protocol_and_is_repeatable() {
 }
 
 #[test]
-fn the_cue_time_derived_from_a_record_is_within_a_frame_or_two_of_the_real_one() {
-    // The report finds each cue from its episode's record (start + 60 s); check that
+fn the_cue_time_in_a_record_is_when_the_machine_asked() {
+    // The report finds each cue from its episode's record (cue_after_s); check that
     // against when the machine actually asked, at 3 fps and at 1 fps.
     for setup in [&SETUPS[0], &SETUPS[3]] {
         let (_, logs, cues) = play(setup, 2, 0, Thresholds::PROVISIONAL);
-        let derived: Vec<i64> = logs
+        let recorded: Vec<i64> = logs
             .iter()
             .filter(|l| l.kind == PostureKind::DriftEpisode)
             .map(Logged::cue_at_ms)
             .collect();
-        assert_eq!(derived.len(), cues.len(), "setup {}", setup.id);
+        assert_eq!(recorded.len(), cues.len(), "setup {}", setup.id);
         assert!(!cues.is_empty());
-        for (d, c) in derived.iter().zip(&cues) {
-            // Whole seconds in the record, plus at most one frame.
-            assert!((c - d).abs() <= 2_000, "setup {}: {d} vs {c}", setup.id);
+        for (d, c) in recorded.iter().zip(&cues) {
+            // Whole seconds from the record's start, rounded.
+            assert!((c - d).abs() <= 600, "setup {}: {d} vs {c}", setup.id);
         }
     }
 }

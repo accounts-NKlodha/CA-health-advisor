@@ -18,6 +18,7 @@ fn log(kind: PostureKind, from_s: i64, to_s: i64) -> Logged {
         end_ms: to_s * 1000,
         reason: None,
         cue: None,
+        cue_ms: None,
     }
 }
 
@@ -136,6 +137,8 @@ fn records_from_the_store_become_intervals_ending_at_their_time() {
             duration_s,
             reason: None,
             cue: None,
+            cue_after_s: None,
+            spells: None,
         };
         let v = serde_json::to_value(&p).unwrap();
         v["data"].to_string()
@@ -168,11 +171,23 @@ fn an_observation_handed_over_late_ends_when_it_ended() {
         duration_s: 75,
         reason: None,
         cue: Some(CueOutcome::Shown),
+        cue_after_s: Some(64),
+        spells: None,
         ago: std::time::Duration::from_secs(10),
     };
     let l = Logged::from_observation(200_000, &o);
     assert_eq!((l.start_ms, l.end_ms), (115_000, 190_000));
-    assert_eq!(l.cue_at_ms(), 175_000);
+    // The cue's recorded time, 64 s after the start (not the 60 s the rule allows first).
+    assert_eq!(l.cue_at_ms(), 179_000);
+    // A record from before slice V2-3 has none: 60 s after its start.
+    let old = Logged::from_observation(
+        200_000,
+        &Observation {
+            cue_after_s: None,
+            ..o
+        },
+    );
+    assert_eq!(old.cue_at_ms(), 175_000);
 }
 
 #[test]
@@ -196,6 +211,8 @@ fn the_log_is_read_from_the_store_without_changing_it() {
                     duration_s,
                     reason: None,
                     cue,
+                    cue_after_s: None,
+                    spells: None,
                 },
                 MeasurementStatus::Estimated,
             )
@@ -372,6 +389,36 @@ fn a_missed_drift_says_why() {
     assert_eq!(r.false_suspect_s, 30);
 }
 
+#[test]
+fn an_episode_already_running_before_a_staged_drift_is_not_its_detection() {
+    let labels = vec![
+        label(LabelKind::Reading, 0, 100),
+        label(LabelKind::DriftForward, 100, 190),
+        label(LabelKind::Typing, 190, 400),
+        label(LabelKind::DriftLateral, 400, 490),
+        label(LabelKind::Typing, 490, 700),
+    ];
+    let with_cue = |from_s: i64, to_s: i64, cue_s: i64| Logged {
+        cue_ms: Some(cue_s * 1000),
+        ..episode(from_s, to_s, CueOutcome::Shown)
+    };
+    let logs = vec![
+        log(PostureKind::Capture, 0, 700),
+        // Began at 80 s during reading; its cue (140 s) fell inside the drift.
+        with_cue(80, 180, 140),
+        // Began 5 s before the second mark (the mark trails the movement): its detection.
+        with_cue(395, 480, 458),
+    ];
+    let r = session_report(Source::Desk, 1, 1, Thresholds::PROVISIONAL, &labels, &logs);
+    assert_eq!((r.detected, r.detected_late, r.missed_other), (1, 0, 1));
+    // No negative latency from the episode that was already running.
+    assert_eq!(r.latency_s, vec![-2]);
+    assert_eq!((r.true_episodes, r.duplicate_episodes), (1, 0));
+    // A false episode, placed where it began, and its cue a false cue.
+    assert_eq!(r.false_episodes.get("reading"), Some(&1));
+    assert_eq!(r.false_cues, 1);
+}
+
 // ------------------------------------------------------------------ the gate
 
 fn passing(setup: u32, session: u32) -> SessionReport {
@@ -521,6 +568,8 @@ fn the_command_writes_a_desk_sessions_report_then_the_gate() {
                     duration_s,
                     reason: None,
                     cue,
+                    cue_after_s: None,
+                    spells: None,
                 },
                 MeasurementStatus::Estimated,
             )

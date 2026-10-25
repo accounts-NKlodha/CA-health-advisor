@@ -25,9 +25,9 @@ success").
 
 | Part | Where | What |
 | --- | --- | --- |
-| Records | `crates/hy-core/src/posture.rs` | Two more `posture.observation` records, additive JSON (no migration): **camera-on time** (`kind: capture`) and **time with no usable calibration** (`kind: baseline_suspect`, `reason: no_calibration`: not calibrated, not usable, being taken, or invalid until the user recalibrates). Open intervals (camera on, no reading, suspect, no calibration) are written at least every 15 minutes (`SEGMENT_EVERY`) and start again, so a crash loses little and a day's records stay near their date. A record's time is when it ended (an episode ends when the calm began, 10 s before it is written), so its start is that time less its length. |
+| Records | `crates/hy-core/src/posture.rs` | Two more `posture.observation` records, additive JSON (no migration): **camera-on time** (`kind: capture`) and **time with no usable calibration** (`kind: baseline_suspect`, `reason: no_calibration`: not calibrated, not usable, being taken, or invalid until the user recalibrates). Two additive fields: a drift episode holds **when its cue was actually asked** (`cue_after_s`, whole seconds after the record's start), and **no-reading spells under 5 s** are added up into one no-reading record (`spells`: how many; `duration_s`: their total; the reason that took most of the time) written once the spells span a minute (`BRIEF_EVERY`), and also when the camera stops, a segment ends, scoring starts or stops, or a long no-reading interval follows. Open intervals (camera on, no reading, suspect, no calibration) are written at least every 15 minutes (`SEGMENT_EVERY`) and start again, so a crash loses little and a day's records stay near their date. A record's time is when it ended (an episode ends when the calm began, 10 s before it is written; added-up spells end when the last one ended), so its start is that time less its length. |
 | Thresholds | `posture.rs` `Thresholds` | Every tunable D value in one struct; `Thresholds::PROVISIONAL` is what ships. The architecture's own numbers (floors, 60 s, 70% valid, the step rule, 2 minutes, 20 s after a restart) are not in it: changing them is a design change. |
-| A day's coverage | `posture::quality::coverage`, `Store::posture_day` | From that date's records alone: camera on = no reading + not scored + usable, with overlaps counted once. |
+| A day's coverage | `posture::quality::coverage`, `Store::posture_day` | From that date's records alone: camera on = no reading + not scored + usable, with overlaps counted once. Short flickers count as no reading through the added-up records, so repeated 3 to 4 s dropouts can no longer show as near 100% usable. |
 | Quality report | `posture::quality` | Matches the operator's labels with the records and counts, as raw numbers (below). `gate` adds a setup's sessions and checks the PRD V2 gate per setup. |
 | Synthetic sessions | `posture::desk` | The desk protocol played through the real camera machine and detector with made-up numbers: 5 setups x 2 sessions, plus a second set of seeds the sweep never tuned on. |
 | Sweep | `hy-sim posture --sweep` | The drift and viewpoint grids on both seed sets, one line per setting. |
@@ -52,18 +52,21 @@ describe movement relative to calibration, never posture quality.
   has a usable reading when at least half of it had a reading against a calibration that
   holds. PRD: at least 70%.
 - **No-reading** time by reason, and **suspect or not calibrated** time by reason.
-- **Staged drifts**: detected (the cue asked within 30 s of the sustained threshold, which
-  is 60 s after the operator's mark), detected late, missed while suspect or not
+- **Staged drifts**: detected (the cue, at the time the record says it was asked, within
+  30 s of the sustained threshold, which is 60 s after the operator's mark), detected late, missed while suspect or not
   calibrated, missed with no reading, missed otherwise. PRD: at least 10 per setup and 80%
   detected.
 - **Threshold-to-cue latency** of each detection, in seconds.
-- **Detector episodes**: true (the cue was asked during a staged drift or up to 30 s after
-  it), duplicate (a second one for the same drift), false (where the cue was asked).
+- **Detector episodes**: true (it began no more than 10 s before the operator's mark, and
+  its cue was asked during the staged drift or up to 30 s after it), duplicate (a second
+  one for the same drift), false (where it began). An episode already running before the
+  drift began is false, and that drift is missed, whenever its cue came.
   Reported apart from cues, so the cooldown cannot hide a poor detector.
 - **Cues** shown and suppressed by why (cooldown, focus, held, busy, no answer), and
   **false cues** (shown for a false or duplicate episode). PRD: at most 1 per 30 minutes
   of comfortable work.
-- **Absence and occlusion** shown as no reading, and cues while unseen (must be 0).
+- **Absence and occlusion** shown as no reading, and cues while unseen (must be 0; judged
+  at the time the cue was actually asked, as are cues while moved).
 - **Moved camera** paused within 25 s of the mark (with each delay), cues while moved
   (must be 0), and camera-moved or viewpoint suspicion during comfortable work (false
   suspensions, architecture A17).
@@ -88,8 +91,15 @@ episodes; then most detections; then the smallest change from V2-2's values.
 | 3.5 / 2.5 / 10 s | 40/50, 0, 0, 4/5 | 39/50, 0, 0, 4/5 |
 | 4.0 / 2.5 / 10 s | 35/50, 0, 0, 2/5 | 35/50, 0, 0, 1/5 |
 
-Median latency was 6 to 7 s for the chosen setting. The calm before the end (5, 10 or
-20 s) made almost no difference, so it stays at 10 s.
+Median latency was 6 s for the chosen setting on both seed sets. The calm before the end
+(5, 10 or 20 s) made almost no difference, so it stays at 10 s.
+
+**Re-run after the review fixes** (recorded cue time, the episode-onset rule, short
+no-reading spells counted): every count in the table is unchanged on both seed sets, and
+3.0 / 2.5 (any calm) is still the only drift setting that passes both; only median
+latencies moved, by at most 1 s, because the report now uses when each cue was asked
+instead of the start plus 60 s. The shipped provisional thresholds still pass; nothing was
+changed.
 
 **Result: one change, the end threshold from 2.0 to 2.5.** Why: after a drift a person
 often settles about two floors from calibration; with 2.0 the episode outlasts the drift
@@ -112,10 +122,14 @@ V2-2 end threshold failing the check set.
 
 ## Tests
 
-- **`hy-core` `posture::quality::tests`** (13): labels read and refused; interval
+- **`hy-core` `posture::quality::tests`** (14): labels read and refused; interval
   arithmetic; a day's coverage adds up with overlaps counted once, and says nothing
   without camera-on time; stored rows become intervals (other types and unknown kinds are
-  skipped); an observation handed over late ends when it ended; the log read from a real
+  skipped); an observation handed over late ends when it ended and keeps its recorded cue
+  time (records from before it fall back to start + 60 s); **an episode already running
+  before a staged drift is a false episode and the drift missed, with no negative
+  latency**, while one that began a few seconds before the mark is its detection; the
+  log read from a real
   store file (window and clipping); a hand-made session counted (detected, late, missed
   with its cause, duplicate and false episodes, cues and false cues, absence, occlusion,
   moved camera, false suspension); the gate per setup (coverage, detection, false-cue
@@ -124,23 +138,32 @@ V2-2 end threshold failing the check set.
   arguments; a missing store).
 - **`hy-core` `posture::desk::tests`** (5): the shipped thresholds pass the synthetic gate
   on both seed sets; V2-2's end threshold fails the check set; a session follows the
-  protocol, repeats exactly, and its coverage adds up; **the cue time derived from a
-  record is within 2 s of the real one** at 3 fps and at 1 fps; the grids hold only valid
-  thresholds.
-- **`hy-core` `posture::tests`** (5 more): an episode that ends in calm is handed over
-  with when it ended; open intervals are written every 15 minutes and start again; a
+  protocol, repeats exactly, and its coverage adds up; **the cue time in a record is
+  within 0.6 s of when the machine asked** at 3 fps and at 1 fps; the grids hold only
+  valid thresholds.
+- **`hy-core` `posture::tests`** (7 more): **a cue held back by 50 s without a reading
+  (asked about 115 s after the drift began) is recorded at that time and counted late,
+  not as a 9 s detection**; **short no-reading spells with alternating reasons are added
+  up, written about once a minute, every second counted**; an episode that ends in calm
+  is handed over with when it ended; open intervals are written every 15 minutes and start again; a
   suspect baseline too; time without a usable calibration is recorded until
   recalibration; thresholds are checked, bad ones fall back, and a higher start threshold
   ignores a drift.
+- **`hy-core` `camera::tests`:** **ten minutes of 3 s dropouts (away and poorly visible
+  in turn) and 2 s readings through the real machine**: at most one added-up record a
+  minute, their total within 10 s of the time the machine showed no reading, no planned
+  minute usable in the session report, and under 50% usable in the day's coverage read
+  from a store.
 - **`hy-core` store and schema:** a day's coverage from the store; capture and
-  no-calibration records belong to their kinds. Camera and posture tests updated for the
-  new records.
+  no-calibration records belong to their kinds; the cue time and spell count belong to
+  their kinds. Camera and posture tests updated for the new records.
 - **Companion:** the `--hy-posture-report` command is routed and refuses bad arguments;
   the Windows self-test checks that the time before a usable calibration is recorded and
   that the page reads today's coverage (`posture_coverage_from_records`).
 - **UI `node --test`:** today's coverage in words (counts only, nothing without data).
 - **Script:** `Test-HealthierYou-Camera.ps1 -SelfTest` (the protocol, the label format, no
-  judgement in the instructions), on PowerShell 7 (Linux job) and Windows PowerShell 5.1.
+  judgement in the instructions, and a report in a folder that does not exist yet: the
+  folder is made and the files beside the report are written), on PowerShell 7 (Linux job) and Windows PowerShell 5.1.
 
 ## Needs physical testing
 
@@ -152,7 +175,7 @@ Owner script, one command per session (about 45 minutes with setup):
 .\Test-HealthierYou-Camera.ps1 -Phase DeskReport -Report .\desk\hy-desk-gate.txt
 ```
 
-It records only the times of the steps (seconds and a word) and the counts HealthierYou
+The script creates the report's folder (`.\desk` above) if it is not there. It records only the times of the steps (seconds and a word) and the counts HealthierYou
 derives from its own records: never a frame, a landmark or a posture number, and no name,
 path or device id. Read the files before sharing.
 
@@ -183,17 +206,23 @@ the values are frozen before the scoring sessions are run again.
    `no_calibration`.** Architecture 4.5 reports "baseline-suspect or invalid intervals";
    invalid (until recalibration), not calibrated and calibrating are counted there, so a
    day's coverage needs no new kind for them. Camera-on time is a new kind, `capture`.
-   Both are additive JSON in the existing event log (migrations 0001 to 0006 unchanged).
-   An older build ignores records it cannot read.
+   Both are additive JSON in the existing event log (migrations 0001 to 0006 unchanged),
+   as are the two optional fields `cue_after_s` (drift episodes) and `spells` (added-up
+   no-reading records). An older build ignores records it cannot read.
 4. **A day's coverage is attributed to the date a record ended.** Intervals are written
    at least every 15 minutes, so at most 15 minutes of an interval that crosses midnight
    land on the next day.
-5. **An episode belongs to a staged drift when its cue was asked during the drift or up
-   to 30 s after it.** An episode already running before a drift began (it started from a
-   comfortable stance) counts as a false episode where its cue was asked, and the drift it
-   ran into as missed.
-6. **The cue time in a real session is derived** from its episode record (start + 60 s);
-   the synthetic test shows it within 2 s of the real time at 3 fps and 1 fps.
+5. **An episode belongs to a staged drift when it began no more than 10 s before the
+   operator's mark and its cue was asked during the drift or up to 30 s after it.** The
+   10 s allows for a mark that trails the movement. An episode already running before a
+   drift began (it started from a comfortable stance) counts as a false episode where it
+   began, and the drift it ran into as missed.
+6. **Short no-reading spells (under 5 s) are written added up**, one record when they
+   span a minute (or earlier, when capture stops, a segment ends or scoring starts or
+   stops), placed so it ends when the last spell ended, with the reason that took most of
+   the time. Coverage counts their full time; within a minute their position is
+   approximate, so a check interval's share can be off by up to that minute's spells.
+   Each spell does not become its own event.
 7. **Check intervals are 60 s, usable at half or more**, and absence, occlusion, a moved
    camera, a lock and calibration are not planned check time (they test the no-reading,
    suspension and hold paths and are counted separately).
