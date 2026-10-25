@@ -111,6 +111,7 @@ $Budget = @{
   FpsCap         = 3
   MinIntervals   = 5
   MinLogLines    = 10
+  SampleDrift    = 1.25  # a sample's own time plus scheduler drift, on the configured interval
 }
 $Trend = @{
   MemoryMB = @{ Abs = 20; Rel = 0.10 }
@@ -377,19 +378,21 @@ function Invoke-CameraAnalysis($Lines, $Samples, [hashtable]$Opt) {
   $req = [bool]$Opt.BudgetsRequired
 
   # Process evidence must cover the camera time: enough samples for the time the camera page
-  # was in use (at the sampler's own pace), and one in every 15 minutes with 5 or more
-  # minutes of use. Without it, the budget and trend checks below are not proven.
+  # was in use at the CONFIGURED interval (allowing 25% for the time each sample takes and
+  # scheduler drift; never the surviving samples' own, possibly sparse, cadence), at least
+  # 80% of those, one in every 15 minutes with 5 or more minutes of use, and at most 20% of
+  # sampling attempts failed. Without it, the budget and trend checks below are not proven.
   $alive = @($S | Where-Object { $_.alive })
-  $sdts = @(for ($i = 1; $i -lt $alive.Count; $i++) { $alive[$i].t - $alive[$i - 1].t })
-  $pace = [Math]::Max([double]$Opt.SampleSeconds, $(if ($sdts.Count) { Get-Median ([double[]]$sdts) } else { 0 }))
+  $pace = [double]$Opt.SampleSeconds * $Budget.SampleDrift
   $expected = if ($pace -gt 0) { $inUseS / $pace } else { 0 }
   $binsHit = @{}
   foreach ($x in $cap) { $binsHit[[int][Math]::Floor($x.t / 900)] = $true }
   $uncovered = @($binUse.Keys | Where-Object { $binUse[$_] -ge 300 -and -not $binsHit.ContainsKey($_) })
   $coverage = if ($expected -gt 0) { $cap.Count / $expected } else { 0 }
-  $covered = $expected -gt 0 -and $coverage -ge 0.8 -and $uncovered.Count -eq 0
   $failedSamples = if ($Opt.Contains('FailedSamples')) { [int]$Opt.FailedSamples } else { 0 }
-  $checks.Add((New-Check 'process samples cover the camera time' $(if ($covered) { 'PASS' } else { 'INCONCLUSIVE' }) ('{0} samples while the camera page was in use, {1:N0}% of the {2:N0} expected at one every {3:N1} s; 15-minute stretches with 5 or more minutes of use and no sample: {4}; failed samples skipped: {5}' -f $cap.Count, (100 * $coverage), $expected, $pace, $uncovered.Count, $failedSamples)))
+  $failedShare = if (($failedSamples + $S.Count) -gt 0) { $failedSamples / ($failedSamples + $S.Count) } else { 0 }
+  $covered = $expected -gt 0 -and $coverage -ge 0.8 -and $uncovered.Count -eq 0 -and $failedShare -le 0.2
+  $checks.Add((New-Check 'process samples cover the camera time' $(if ($covered) { 'PASS' } else { 'INCONCLUSIVE' }) ('{0} samples while the camera page was in use, {1:N0}% of the {2:N0} expected at one every {3:N1} s (the configured {6} s plus 25% drift; at least 80% needed); 15-minute stretches with 5 or more minutes of use and no sample: {4}; failed sampling attempts: {5} ({7:N0}%, at most 20%)' -f $cap.Count, (100 * $coverage), $expected, $pace, $uncovered.Count, $failedSamples, $Opt.SampleSeconds, (100 * $failedShare))))
   $facts['sample_coverage_pct'] = [Math]::Round(100 * $coverage, 1)
   # A check that would PASS on samples that do not cover the run is not proven.
   function Get-Covered([string]$v) { if ($v -eq 'PASS' -and -not $covered) { 'INCONCLUSIVE' } else { $v } }
@@ -670,6 +673,7 @@ function New-SynthSamples([double]$Seconds, [hashtable]$Change = @{}) {
     if ($Change["Leak"]) { $ws += 40 * $h }
     if ($Change["Spike"] -and $t -eq 3000) { $ws = 420 }
     if ($Change["Gap"] -and $t -gt 900 -and $t -lt 8400) { continue }
+    if ($Change["Sparse"] -and ($t % 600) -ne 0) { continue }
     $s.Add([ordered]@{
         t = $t; alive = (-not ($Change["DiesAt"] -and $t -ge $Change["DiesAt"])); working_set_mb = $ws; private_bytes_mb = $ws - 60; handles = 1800 + ($t % 7); threads = 120
         cpu_pct = $(if ($Change["Busy"]) { 14.0 } else { 3.5 + $rand.NextDouble() })
@@ -743,6 +747,14 @@ function Invoke-SelfTest {
   Expect '... nor are the trends from the samples left' (Verdict-Of $r 'no growth trend while capturing: working set (MB)') 'INCONCLUSIVE'
   Expect '... nor the memory budget' (Verdict-Of $r 'PRD budget: memory while capturing') 'INCONCLUSIVE'
   Expect '... and the run is never PASS' ((Get-OverallVerdict $r.Checks) -ne 'PASS') $true
+  $r = Run @{} @{ Sparse = $true } @{ SampleSeconds = 30; FailedSamples = 0 }
+  Expect 'a 30 s sampler with one sample surviving every 10 minutes is not proven' (Verdict-Of $r 'process samples cover the camera time') 'INCONCLUSIVE'
+  Expect '... nor are its trends' (Verdict-Of $r 'no growth trend while capturing: handles') 'INCONCLUSIVE'
+  Expect '... and the run is never PASS' ((Get-OverallVerdict $r.Checks) -ne 'PASS') $true
+  $r = Run @{} @{} @{ FailedSamples = 120 }
+  Expect 'a sampler with 40% of its attempts failed is not proven' (Verdict-Of $r 'process samples cover the camera time') 'INCONCLUSIVE'
+  $r = Run @{} @{} @{ FailedSamples = 10 }
+  Expect 'a few failed attempts are tolerated' (Verdict-Of $r 'process samples cover the camera time') 'PASS'
   $r = Run @{} @{ Spike = $true }
   Expect 'one sample over 350 MB fails the cap though the median is far below' (Verdict-Of $r 'PRD budget: memory while capturing') 'FAIL'
   $empty = Invoke-CameraAnalysis @() @() $opt
