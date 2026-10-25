@@ -367,6 +367,7 @@ if ($Phase -eq 'Session') {
   Ask 'desk-cue-wording' 'Whenever a "Posture check" card appeared, was it neutral (no judgement, no health claim)?'
   Ask 'desk-no-cue-unseen' 'While you were away, covered, or the camera was moved, did NO posture card appear?'
 } else {
+  Write-Host 'For the V2-5 soak use Test-CameraSoak.ps1 (it adds the app''s camera log, holds, releases and verdicts); this phase is the V2-1 quick look.' -ForegroundColor Yellow
   Do-Step 'Turn the posture check ON (pet menu > Posture check). Then work normally; keep this window open.'
   $res = Measure-For 'soak' ($Minutes * 60)
   Add-Line "Soak ($Minutes min): working set peak $($res.ws_mb) MB, mean CPU $($res.cpu_pct)% of the PC"

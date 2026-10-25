@@ -173,7 +173,7 @@ or pictures).
 | Meeting and presentation holds with real Teams/Zoom and PowerPoint; lock and sleep | V2-1 | `-Phase Session` |
 | Webcam light off within 2 s of Off | V2-1 | `-Phase Session` |
 | A second (USB) webcam unplugged and plugged back | V2-1 | `-Phase Session` |
-| 2-hour soak: memory growth, no stop for "not responding", holds during normal work | V2-5 | `-Phase Soak -Minutes 120` |
+| 2-hour soak: memory growth, no stop for "not responding", holds during normal work | V2-5 | `scripts/windows/Test-CameraSoak.ps1` (see `docs/V2_Soak.md`; `-Phase Soak` here is the V2-1 quick look) |
 | Calibration quality, floors, drift and the viewpoint cue | V2-2 / V2-3 | `-Phase Calibration` (see `docs/V2_Posture.md`) |
 | Desk sessions: 5 setups x 2 sessions, raw-count quality report against the PRD V2 gate | V2-3 | `-Phase Desk`, then `-Phase DeskReport` (see `docs/V2_Quality.md`) |
 

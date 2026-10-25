@@ -602,6 +602,9 @@ export interface CameraStats {
   worker_restarts: number;
   last_stop_ms: number | null;
   last_stop_forced: boolean;
+  stops: number;
+  forced_stops: number;
+  max_stop_ms: number | null;
   model_ms: number | null;
   inference_ms: number | null;
   fps: number;

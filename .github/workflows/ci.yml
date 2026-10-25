@@ -94,6 +94,7 @@ jobs:
           fi
           pwsh -NoProfile -File scripts/windows/Test-Soak.ps1 -SelfTest
           pwsh -NoProfile -File scripts/windows/Test-HealthierYou-Camera.ps1 -SelfTest
+          pwsh -NoProfile -File scripts/windows/Test-CameraSoak.ps1 -SelfTest
 
   ui:
     name: Companion UI - type check and build
@@ -286,6 +287,13 @@ jobs:
         run: |
           ./scripts/windows/Test-Soak.ps1 -CiSelfTest -Minutes 12 -Report (Join-Path $env:RUNNER_TEMP 'hy-soak\soak-companion.txt')
 
+      # V2-5: the camera soak's CI variant on the installed app (synthetic camera; the
+      # real 2-hour soak with a real webcam is on the office PC, docs/V2_Soak.md).
+      - name: Accelerated camera soak of the installed app (synthetic camera, 10 minutes)
+        timeout-minutes: 40
+        run: |
+          ./scripts/windows/Test-CameraSoak.ps1 -CiSelfTest -Minutes 10 -Report (Join-Path $env:RUNNER_TEMP 'hy-soak\soak-camera.txt')
+
       - name: Soak and capture analysis self-tests under Windows PowerShell 5.1
         run: |
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Test-Soak.ps1 -SelfTest
@@ -294,6 +302,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Test-NetworkCapture.ps1 -SelfTest failed under Windows PowerShell 5.1' }
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Test-HealthierYou-Camera.ps1 -SelfTest
           if ($LASTEXITCODE -ne 0) { throw 'Test-HealthierYou-Camera.ps1 -SelfTest failed under Windows PowerShell 5.1' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Test-CameraSoak.ps1 -SelfTest
+          if ($LASTEXITCODE -ne 0) { throw 'Test-CameraSoak.ps1 -SelfTest failed under Windows PowerShell 5.1' }
 
       - name: Update, rollback, refusals and uninstall of the installed app
         timeout-minutes: 25

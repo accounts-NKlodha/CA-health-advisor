@@ -508,12 +508,29 @@ pub struct CameraStats {
     pub last_stop_ms: Option<u64>,
     /// Whether the last stop needed the page to be destroyed unconfirmed.
     pub last_stop_forced: bool,
+    /// Stops completed since the app started (confirmed or forced), for the soak (V2-5).
+    pub stops: u32,
+    /// Stops among them that needed the page destroyed unconfirmed.
+    pub forced_stops: u32,
+    /// The longest stop since the app started, ms.
+    pub max_stop_ms: Option<u64>,
     /// The last model load time the page reported, ms.
     pub model_ms: Option<f64>,
     /// Mean of the recent inference times, ms.
     pub inference_ms: Option<f64>,
     /// The frame rate in force.
     pub fps: u8,
+}
+
+impl CameraStats {
+    /// A stop completed after `ms`, confirmed by the page or (`forced`) not.
+    fn stopped(&mut self, ms: u64, forced: bool) {
+        self.last_stop_ms = Some(ms);
+        self.last_stop_forced = forced;
+        self.stops += 1;
+        self.forced_stops += u32::from(forced);
+        self.max_stop_ms = Some(self.max_stop_ms.map_or(ms, |m| m.max(ms)));
+    }
 }
 
 /// The camera session's state machine. Times are offsets from any fixed origin (the
@@ -890,8 +907,7 @@ impl Machine {
         self.now = self.now.max(now);
         let mut out = Vec::new();
         if let Some(asked) = self.stopping.take() {
-            self.stats.last_stop_ms = Some(millis(now.saturating_sub(asked)));
-            self.stats.last_stop_forced = false;
+            self.stats.stopped(millis(now.saturating_sub(asked)), false);
             if self.restart_pending {
                 // The old capture has ended; the new one starts on the same page.
                 self.restart_pending = false;
@@ -973,8 +989,7 @@ impl Machine {
             self.stopping = None;
             self.page_open = false;
             self.closing = true;
-            self.stats.last_stop_ms = Some(millis(now.saturating_sub(asked)));
-            self.stats.last_stop_forced = true;
+            self.stats.stopped(millis(now.saturating_sub(asked)), true);
             out.push(Action::DestroyPage);
         }
         match self.phase {
