@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MIN_VISIBILITY, frameDue, judgeFrame, nextTimestamp, postureFeatures } from '../src/camera/frame.ts';
-import { CALIBRATION_HELP, CONSENT_LINES, offersRetry, postureDetail, statsLine, statusDetail } from '../src/camera/text.ts';
+import { CALIBRATION_HELP, CONSENT_LINES, coverageText, offersRetry, postureDetail, statsLine, statusDetail } from '../src/camera/text.ts';
 
 /** 33 synthetic landmarks: a centred, upright figure, every point seen. */
 function figure(over = {}) {
@@ -146,7 +146,7 @@ test('the eyes stand in for unseen ears', () => {
 });
 
 test('the calibration words name the reason and never judge posture', () => {
-  const view = (state, issue = null) => ({ state, words: '', issue, calibrated_at: null, can_calibrate: true, stats: {} });
+  const view = (state, issue = null) => ({ state, words: '', issue, calibrated_at: null, can_calibrate: true, stats: {}, today: null });
   assert.match(postureDetail(view({ kind: 'not_calibrated' })), /no posture cues/i);
   assert.match(postureDetail(view({ kind: 'calibrating', detail: { valid: 12, needed: 40 } })), /12 of 40/);
   assert.match(postureDetail(view({ kind: 'not_usable', detail: 'too_far' }, 'you are too far')), /not usable: you are too far/);
@@ -154,4 +154,18 @@ test('the calibration words name the reason and never judge posture', () => {
   assert.match(postureDetail(view({ kind: 'recalibrate' })), /Calibrate again/);
   const all = [CALIBRATION_HELP, postureDetail(view({ kind: 'ready' }))].join(' ').toLowerCase();
   for (const w of ['bad', 'poor posture', 'wrong', 'slouch', 'health']) assert.ok(!all.includes(w), w);
+});
+
+test("today's coverage is counts in words, never a score, and says nothing without data", () => {
+  assert.match(coverageText(null), /not been on long enough/);
+  const none = { camera_on_s: 30, no_reading_s: 0, unscored_s: 0, usable_s: 30, usable_share: 1, episodes: 0, cues_shown: 0 };
+  assert.match(coverageText(none), /not been on long enough/);
+  const day = { camera_on_s: 3600, no_reading_s: 300, unscored_s: 120, usable_s: 3180, usable_share: 3180 / 3600, episodes: 2, cues_shown: 1 };
+  const t = coverageText(day);
+  assert.match(t, /camera on 60 minutes/);
+  assert.match(t, /88% of it/);
+  assert.match(t, /no reading 5 minutes/);
+  assert.match(t, /not calibrated 2 minutes/);
+  assert.match(t, /1 cue shown/);
+  for (const w of ['bad', 'poor posture', 'score', 'health']) assert.ok(!t.toLowerCase().includes(w), w);
 });

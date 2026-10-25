@@ -25,6 +25,7 @@ use hy_core::camera::{
     Status, Unavailable,
 };
 use hy_core::coach::Input;
+use hy_core::posture::quality::Coverage;
 use hy_core::posture::{CueOutcome, Observation, PostureKind, PostureState, cue_outcome_of};
 use hy_core::schema::{MeasurementStatus, NewEvent};
 use hy_pet::shell::{Bubble, Effect};
@@ -179,6 +180,11 @@ impl Shell {
 
     /// The camera page's view (also the settings' Posture check tab).
     pub fn camera_page(&self) -> CameraPage {
+        // Today's coverage from the records (slice V2-3), read before the camera lock.
+        let today = {
+            let store = lock(&self.store);
+            store.today().and_then(|d| store.posture_day(d)).ok()
+        };
         // Lock order: inner before camera (the camera lock is a leaf).
         let a11y = lock(&self.inner).a11y;
         let c = lock(&self.camera);
@@ -193,7 +199,7 @@ impl Shell {
             capture: m.wants_capture() && c.guarded,
             fps: m.fps(),
             stats: m.stats(),
-            posture: posture_view(m),
+            posture: posture_view(m, today),
             selftest: c.selftest,
             a11y,
         }
@@ -347,8 +353,13 @@ impl Shell {
         let status = match o.kind {
             PostureKind::DriftEpisode => MeasurementStatus::Estimated,
             PostureKind::NoReading | PostureKind::BaselineSuspect => MeasurementStatus::NoReading,
+            PostureKind::Capture => MeasurementStatus::Measured,
         };
-        let event = NewEvent::inferred(o.payload(), status).at(Utc::now());
+        // The record's time is when the interval ended (an episode ends when the calm
+        // began, a few seconds before it is written), so its start is that time less its
+        // length (slice V2-3's report and a day's coverage rely on it).
+        let ended = Utc::now() - chrono::TimeDelta::from_std(o.ago).unwrap_or_default();
+        let event = NewEvent::inferred(o.payload(), status).at(ended);
         if let Err(e) = lock(&self.store).append_event(event) {
             eprintln!("HealthierYou: could not record a posture observation: {e}");
             return;
@@ -723,7 +734,7 @@ pub struct CameraFacts {
     pub posture: PostureState,
 }
 
-fn posture_view(m: &Machine) -> PostureView {
+fn posture_view(m: &Machine, today: Option<Coverage>) -> PostureView {
     let state = m.posture_state();
     PostureView {
         state,
@@ -736,6 +747,7 @@ fn posture_view(m: &Machine) -> PostureView {
         can_calibrate: matches!(m.status(), Status::Reading | Status::NoReading(_))
             && !matches!(state, PostureState::Calibrating { .. }),
         stats: m.posture_stats(),
+        today,
     }
 }
 

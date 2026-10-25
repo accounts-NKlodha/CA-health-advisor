@@ -31,8 +31,18 @@
 //!   [`RESTART_CHECK`] of reading match it, and is otherwise invalid (T-C6).
 //! - **Records.** `posture.observation` events only: drift episodes with what became of
 //!   the cue, no-reading intervals with their reason, and suspect intervals with theirs.
-//!   They stay on this PC. Every threshold is a D value, to be tuned in the V2-3 desk
-//!   sessions and frozen before scoring.
+//!   Slice V2-3 adds camera-on time ([`PostureKind::Capture`]) and the time with no
+//!   usable calibration ([`PostureReason::NoCalibration`]), so a day's coverage can be
+//!   derived from the records alone ([`quality::coverage`]). An episode's record holds when
+//!   its cue was actually asked (`cue_after_s`), which a stretch without a reading can
+//!   push well past a minute. No-reading spells shorter than [`NO_READING_MIN`] are added
+//!   up and written together ([`BRIEF_EVERY`]), so coverage misses none. Open intervals
+//!   are written at least every [`SEGMENT_EVERY`], so a crash loses little; a day's
+//!   coverage clips them at its midnights. They stay on this PC.
+//! - **Thresholds.** Every tunable D value is in [`Thresholds`]; the shipped ones are
+//!   [`Thresholds::PROVISIONAL`]. Slice V2-3's harness ([`desk`], [`quality`]) measures
+//!   them on synthetic desk sessions; they stay provisional until the owner's real desk
+//!   sessions pass the PRD V2 gate and the owner approves them.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -42,6 +52,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 pub use crate::schema::{CueOutcome, PostureKind, PostureReason};
+
+pub mod desk;
+pub mod quality;
 
 /// Valid frames a calibration collects (architecture 4.5: at least 40).
 pub const CAL_FRAMES: u32 = 40;
@@ -74,8 +87,11 @@ pub const FLOOR_ROLL: f64 = 2.0;
 pub const SMOOTH_OVER: Duration = Duration::from_secs(10);
 /// A smoothed |z| at or above this is drift (D).
 pub const Z_DRIFT: f64 = 3.0;
-/// An episode ends once the smoothed |z| stays below this (D; hysteresis) ...
-pub const Z_END: f64 = 2.0;
+/// An episode ends once the smoothed |z| stays below this (D; hysteresis). Slice V2-3's
+/// synthetic sweep moved it from 2.0: with 2.0 an episode could outlast its drift while
+/// the person settled about two floors from calibration, hiding the next drift
+/// (`docs/V2_Quality.md`). Provisional ...
+pub const Z_END: f64 = 2.5;
 /// ... for this long (D).
 pub const END_AFTER: Duration = Duration::from_secs(10);
 /// Drift must last this long to be an episode (architecture 4.5).
@@ -125,8 +141,89 @@ pub const MATCH_SCALE: f64 = 0.10;
 pub const HISTORY_FOR: Duration = Duration::from_secs(90);
 /// Frames further apart than this do not count as continuous reading (D).
 const READING_GAP: Duration = Duration::from_secs(2);
-/// No-reading intervals shorter than this are not recorded (D).
+/// No-reading intervals shorter than this are not recorded on their own (D) ...
 pub const NO_READING_MIN: Duration = Duration::from_secs(5);
+/// ... but added up and written together, as one no-reading record with a spell count,
+/// once the spells span this long (slice V2-3; D, one check interval), so coverage counts
+/// every moment without a reading while short flickers do not each become an event. They
+/// are also written when the camera stops, a segment ends or scoring starts or stops.
+pub const BRIEF_EVERY: Duration = Duration::from_secs(60);
+/// Open intervals (camera on, no reading, suspect, no calibration) are written at least
+/// this often while capture runs, and start again (D, slice V2-3): a crash loses at most
+/// this much.
+pub const SEGMENT_EVERY: Duration = Duration::from_secs(15 * 60);
+
+/// The tunable D values (architecture 4.5: "tuned in the desk test and frozen before
+/// scoring"). The architecture's own numbers (the floors, 60 s, 70%, the step rule, 2
+/// minutes, 20 s after a restart) are not here: changing them is a design change.
+///
+/// [`Thresholds::PROVISIONAL`] is what ships. It was checked only on synthetic desk
+/// sessions ([`desk`]); it stays provisional until the owner's real desk sessions pass
+/// the PRD V2 gate, and any change needs the owner's approval (architecture A4).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Thresholds {
+    /// A smoothed |z| at or above this is drift.
+    pub z_drift: f64,
+    /// An episode ends once the smoothed |z| stays below this ...
+    pub z_end: f64,
+    /// ... for this many seconds.
+    pub end_after_s: u64,
+    /// The head-to-shoulder width ratio's band is at least this share of its median.
+    pub span_band_min: f64,
+    /// The head faces as at calibration while its turn is within this.
+    pub turn_tolerance: f64,
+    /// Geometry matches while the shoulders' midpoint is within this share of the frame.
+    pub match_shift: f64,
+    /// ... and the shoulder width within this of the calibrated scale.
+    pub match_scale: f64,
+}
+
+impl Thresholds {
+    /// The shipped values: provisional (synthetic traces only).
+    pub const PROVISIONAL: Self = Self {
+        z_drift: Z_DRIFT,
+        z_end: Z_END,
+        end_after_s: END_AFTER.as_secs(),
+        span_band_min: SPAN_BAND_MIN,
+        turn_tolerance: TURN_TOLERANCE,
+        match_shift: MATCH_SHIFT,
+        match_scale: MATCH_SCALE,
+    };
+
+    /// Check the values' own rules.
+    ///
+    /// # Errors
+    /// [`Error::Invalid`] naming the broken rule.
+    pub fn validate(&self) -> Result<()> {
+        let positive = |v: f64| v.is_finite() && v > 0.0;
+        let ok = positive(self.z_drift)
+            && positive(self.z_end)
+            && self.z_end < self.z_drift
+            && (1..=120).contains(&self.end_after_s)
+            && positive(self.span_band_min)
+            && positive(self.turn_tolerance)
+            && positive(self.match_shift)
+            && self.match_shift < STEP_SHIFT
+            && positive(self.match_scale)
+            && self.match_scale < STEP_SCALE;
+        if ok {
+            Ok(())
+        } else {
+            Err(Error::invalid("posture thresholds out of range"))
+        }
+    }
+
+    const fn end_after(&self) -> Duration {
+        Duration::from_secs(self.end_after_s)
+    }
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Self::PROVISIONAL
+    }
+}
 
 /// Which head landmarks a frame's features use: both ears, or both eyes when the ears
 /// are not visible enough. A calibration uses one; frames with the other are not scored.
@@ -311,19 +408,19 @@ impl Calibration {
     }
 
     /// The head-to-shoulder ratio's band.
-    fn span_band(&self) -> (f64, f64) {
-        let half = (3.0 * MAD_SCALE * self.span.mad).max(SPAN_BAND_MIN * self.span.median);
+    fn span_band(&self, th: &Thresholds) -> (f64, f64) {
+        let half = (3.0 * MAD_SCALE * self.span.mad).max(th.span_band_min * self.span.median);
         (self.span.median - half, self.span.median + half)
     }
 
     /// Whether the shoulders sit where and as large as at calibration, and the head pair's
     /// ratio is in its band (the camera has not moved).
-    fn geometry_matches(&self, f: &Features) -> bool {
+    fn geometry_matches(&self, f: &Features, th: &Thresholds) -> bool {
         let shift = (f.mid_x - self.mid_x).hypot(f.mid_y - self.mid_y);
         let scale = (f.width / self.width.median.max(f64::EPSILON) - 1.0).abs();
-        let (lo, hi) = self.span_band();
-        shift < MATCH_SHIFT
-            && scale < MATCH_SCALE
+        let (lo, hi) = self.span_band(th);
+        shift < th.match_shift
+            && scale < th.match_scale
             && (f.head != self.head || (lo..=hi).contains(&f.span))
     }
 
@@ -438,6 +535,16 @@ pub struct Observation {
     pub reason: Option<PostureReason>,
     /// What became of the cue (drift episodes).
     pub cue: Option<CueOutcome>,
+    /// When the cue was asked, whole seconds after the episode's recorded start (its end
+    /// less `duration_s`; drift episodes, slice V2-3).
+    pub cue_after_s: Option<u32>,
+    /// How many short no-reading spells this record adds up ([`BRIEF_EVERY`]).
+    pub spells: Option<u32>,
+    /// How long before it was handed over it ended (an episode ends when the calm began,
+    /// [`Thresholds::end_after_s`] earlier). The record's time is its end, so its start is
+    /// that time less `duration_s` (slice V2-3). Not stored.
+    #[serde(skip)]
+    pub ago: Duration,
 }
 
 impl Observation {
@@ -449,6 +556,8 @@ impl Observation {
             duration_s: self.duration_s,
             reason: self.reason,
             cue: self.cue,
+            cue_after_s: self.cue_after_s,
+            spells: self.spells,
         }
     }
 }
@@ -530,8 +639,26 @@ enum Baseline {
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Episode {
     since: Duration,
+    /// When the cue was asked: the first frame with [`EPISODE_AFTER`] of drift and enough
+    /// valid frames, which can be much later than `since` + 60 s after a stretch without
+    /// a reading.
+    cue_at: Duration,
     cue: Option<CueOutcome>,
     calm_since: Option<Duration>,
+}
+
+/// Short no-reading spells added up until written ([`BRIEF_EVERY`]).
+#[derive(Debug, Clone, PartialEq)]
+struct Brief {
+    /// When the first spell began.
+    since: Duration,
+    /// When the latest spell ended.
+    last_end: Duration,
+    /// Their total time, by reason.
+    by_reason: Vec<(PostureReason, Duration)>,
+    spells: u32,
+    /// Whether drift was scored when the first spell began.
+    scoring: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -556,11 +683,20 @@ pub struct Detector {
     drift_since: Option<Duration>,
     episode: Option<Episode>,
     no_reading: Option<(Duration, PostureReason)>,
+    /// Short no-reading spells not yet written.
+    brief: Option<Brief>,
     step: Option<Step>,
     view_out_since: Option<Duration>,
     capturing: bool,
     started_once: bool,
     stats: PostureStats,
+    th: Thresholds,
+    /// The open camera-on segment.
+    capture_since: Option<Duration>,
+    /// The open interval with no usable calibration (none, calibrating or invalid).
+    unscored_since: Option<Duration>,
+    /// The latest time given.
+    last_now: Duration,
 }
 
 fn secs(d: Duration) -> u32 {
@@ -571,6 +707,18 @@ impl Detector {
     /// A detector with the stored calibration (it comes back suspect: T-C6).
     #[must_use]
     pub fn new(calibration: Option<Calibration>) -> Self {
+        Self::with_thresholds(calibration, Thresholds::PROVISIONAL)
+    }
+
+    /// [`Detector::new`] with other thresholds (the V2-3 harness's sweep). Values that
+    /// break [`Thresholds::validate`] are replaced by the provisional ones.
+    #[must_use]
+    pub fn with_thresholds(calibration: Option<Calibration>, th: Thresholds) -> Self {
+        let th = if th.validate().is_ok() {
+            th
+        } else {
+            Thresholds::PROVISIONAL
+        };
         let calibration = calibration.filter(|c| c.validate().is_ok());
         let baseline = if calibration.is_some() {
             Baseline::Suspect {
@@ -596,12 +744,23 @@ impl Detector {
             drift_since: None,
             episode: None,
             no_reading: None,
+            brief: None,
             step: None,
             view_out_since: None,
             capturing: false,
             started_once: false,
             stats: PostureStats::default(),
+            th,
+            capture_since: None,
+            unscored_since: None,
+            last_now: Duration::ZERO,
         }
+    }
+
+    /// The thresholds in use.
+    #[must_use]
+    pub const fn thresholds(&self) -> Thresholds {
+        self.th
     }
 
     /// The calibration to store.
@@ -655,11 +814,15 @@ impl Detector {
     /// suspect until it matches (architecture 4.5 (a) and "Restart").
     pub fn capture_started(&mut self, now: Duration) -> Vec<PostureAction> {
         let mut out = Vec::new();
+        self.last_now = self.last_now.max(now);
         self.capturing = true;
+        self.capture_since = Some(now);
         let first = !std::mem::replace(&mut self.started_once, true);
         self.history.clear();
         self.last_valid = None;
         if self.calibration.is_none() {
+            self.track_unscored(now, &mut out);
+            self.settle_brief(now, &mut out);
             return out;
         }
         match self.baseline {
@@ -683,6 +846,8 @@ impl Detector {
             }
             Baseline::None => {}
         }
+        self.track_unscored(now, &mut out);
+        self.settle_brief(now, &mut out);
         out.push(PostureAction::Render);
         out
     }
@@ -694,13 +859,19 @@ impl Detector {
         if !self.capturing {
             return out;
         }
+        self.last_now = self.last_now.max(now);
         self.capturing = false;
         if self.calibrating.take().is_some() {
             self.failed = Some(CalibrationIssue::Interrupted);
             out.push(PostureAction::Render);
         }
-        self.end_episode(now, &mut out);
+        if let Some(start) = self.capture_since.take() {
+            Self::record_capture(&mut out, now.saturating_sub(start));
+        }
+        self.track_unscored(now, &mut out);
+        self.end_episode(now, now, &mut out);
         self.end_no_reading(now, &mut out);
+        self.flush_brief(now, &mut out);
         if let Baseline::Suspect { reason, since, .. } = &mut self.baseline
             && let Some(start) = since.take()
         {
@@ -726,6 +897,7 @@ impl Detector {
         no_reading: Option<PostureReason>,
     ) -> Vec<PostureAction> {
         let mut out = Vec::new();
+        self.last_now = self.last_now.max(now);
         match (self.no_reading, no_reading) {
             (Some((_, was)), Some(reason)) if was == reason => {}
             (_, Some(reason)) => {
@@ -735,6 +907,7 @@ impl Detector {
             (Some(_), None) => self.end_no_reading(now, &mut out),
             (None, None) => {}
         }
+        self.settle_brief(now, &mut out);
         out
     }
 
@@ -744,12 +917,15 @@ impl Detector {
     /// stop until it finishes.
     pub fn start_calibration(&mut self, now: Duration) -> Vec<PostureAction> {
         let mut out = Vec::new();
-        self.end_episode(now, &mut out);
+        self.last_now = self.last_now.max(now);
+        self.end_episode(now, now, &mut out);
         self.calibrating = Some(Calibrating {
             since: now,
             frames: Vec::new(),
         });
         self.stats.calibrations += 1;
+        self.track_unscored(now, &mut out);
+        self.settle_brief(now, &mut out);
         out.push(PostureAction::Render);
         out
     }
@@ -757,7 +933,11 @@ impl Detector {
     /// The user cancelled the calibration: the previous state stands.
     pub fn cancel_calibration(&mut self) -> Vec<PostureAction> {
         if self.calibrating.take().is_some() {
-            vec![PostureAction::Render]
+            let mut out = Vec::new();
+            self.track_unscored(self.last_now, &mut out);
+            self.settle_brief(self.last_now, &mut out);
+            out.push(PostureAction::Render);
+            out
         } else {
             Vec::new()
         }
@@ -819,10 +999,24 @@ impl Detector {
         visibility: f64,
         features: Option<Features>,
     ) -> Vec<PostureAction> {
+        let mut out = self.frame_inner(now, wall, visibility, features);
+        self.settle_brief(now, &mut out);
+        out
+    }
+
+    fn frame_inner(
+        &mut self,
+        now: Duration,
+        wall: DateTime<Utc>,
+        visibility: f64,
+        features: Option<Features>,
+    ) -> Vec<PostureAction> {
         let mut out = Vec::new();
         if !self.capturing {
             return out;
         }
+        self.last_now = self.last_now.max(now);
+        self.segment(now, &mut out);
         let sample = Sample {
             t: now,
             visibility,
@@ -834,6 +1028,7 @@ impl Detector {
             let done = valid >= CAL_FRAMES as usize || now.saturating_sub(c.since) >= CAL_WITHIN;
             if done {
                 self.finish_calibration(now, &mut out, wall);
+                self.track_unscored(now, &mut out);
             } else if features.is_some() {
                 out.push(PostureAction::Render);
             }
@@ -862,7 +1057,10 @@ impl Detector {
         }
         match self.baseline {
             Baseline::None => {}
-            Baseline::Suspect { .. } => self.check_suspect(now, &cal, features, reading, &mut out),
+            Baseline::Suspect { .. } => {
+                self.check_suspect(now, &cal, features, reading, &mut out);
+                self.track_unscored(now, &mut out);
+            }
             Baseline::Valid => {
                 if self.viewpoint_check(now, &cal, &mut out) {
                     return out;
@@ -876,11 +1074,17 @@ impl Detector {
     /// The calibration clock (a calibration with too few frames ends at [`CAL_WITHIN`]).
     pub fn tick(&mut self, now: Duration, wall: DateTime<Utc>) -> Vec<PostureAction> {
         let mut out = Vec::new();
+        self.last_now = self.last_now.max(now);
         if let Some(c) = &self.calibrating
             && now.saturating_sub(c.since) >= CAL_WITHIN
         {
             self.finish_calibration(now, &mut out, wall);
+            self.track_unscored(now, &mut out);
         }
+        if self.capturing {
+            self.segment(now, &mut out);
+        }
+        self.settle_brief(now, &mut out);
         out
     }
 
@@ -951,7 +1155,8 @@ impl Detector {
             return;
         };
         let drift = cal.scores(&smooth).max_abs();
-        if drift >= Z_DRIFT {
+        let th = self.th;
+        if drift >= th.z_drift {
             let since = *self.drift_since.get_or_insert(now);
             if let Some(e) = self.episode.as_mut() {
                 e.calm_since = None;
@@ -960,6 +1165,7 @@ impl Detector {
             {
                 self.episode = Some(Episode {
                     since,
+                    cue_at: now,
                     cue: None,
                     calm_since: None,
                 });
@@ -967,10 +1173,10 @@ impl Detector {
                 out.push(PostureAction::Cue);
             }
         } else if let Some(e) = self.episode.as_mut() {
-            if drift < Z_END {
+            if drift < th.z_end {
                 let calm = *e.calm_since.get_or_insert(now);
-                if now.saturating_sub(calm) >= END_AFTER {
-                    self.end_episode(calm, out);
+                if now.saturating_sub(calm) >= th.end_after() {
+                    self.end_episode(calm, now, out);
                     self.drift_since = None;
                 }
             } else {
@@ -1041,12 +1247,11 @@ impl Detector {
         // (c) The head pair's ratio outside its band while posture stays steady and the
         // head faces as at calibration.
         if let Some(smooth) = self.smoothed(now, cal.head) {
-            let (lo, hi) = cal.span_band();
+            let (lo, hi) = cal.span_band(&self.th);
             let scores = cal.scores(&smooth);
-            let steady = scores.gap.abs() < Z_DRIFT
-                && scores.tilt.abs() < Z_DRIFT
-                && scores.roll.abs() < Z_DRIFT;
-            let facing = (smooth.turn - cal.turn.median).abs() <= TURN_TOLERANCE;
+            let z = self.th.z_drift;
+            let steady = scores.gap.abs() < z && scores.tilt.abs() < z && scores.roll.abs() < z;
+            let facing = (smooth.turn - cal.turn.median).abs() <= self.th.turn_tolerance;
             if steady && facing && !(lo..=hi).contains(&smooth.span) {
                 let since = *self.view_out_since.get_or_insert(now);
                 if now.saturating_sub(since) >= VIEWPOINT_HOLD {
@@ -1061,7 +1266,7 @@ impl Detector {
     }
 
     fn suspect(&mut self, now: Duration, reason: PostureReason, out: &mut Vec<PostureAction>) {
-        self.end_episode(now, out);
+        self.end_episode(now, now, out);
         if let Baseline::Suspect {
             reason: was,
             since: Some(start),
@@ -1108,7 +1313,7 @@ impl Detector {
         let total = total + reading;
         let matches = features
             .filter(|f| f.head == cal.head)
-            .map(|f| cal.geometry_matches(&f));
+            .map(|f| cal.geometry_matches(&f, &self.th));
         let (check, verdict) = match check {
             Check::Restart { matched, seen } => {
                 let (matched, seen) = match matches {
@@ -1181,25 +1386,195 @@ impl Detector {
         }
     }
 
-    fn end_episode(&mut self, now: Duration, out: &mut Vec<PostureAction>) {
+    /// End the episode at `end` (seen at `now`).
+    fn end_episode(&mut self, end: Duration, now: Duration, out: &mut Vec<PostureAction>) {
         if let Some(e) = self.episode.take() {
-            let d = now.saturating_sub(e.since);
+            let duration_s = secs(end.saturating_sub(e.since)).max(1);
+            // The cue's time from the start a reader derives (the end less the whole
+            // seconds), so the report finds it to within half a second.
+            let start = end.saturating_sub(Duration::from_secs(u64::from(duration_s)));
+            let cue_after = e
+                .cue_at
+                .saturating_sub(start)
+                .min(end.saturating_sub(start));
+            let cue_after_s = secs(cue_after + Duration::from_millis(500)).min(duration_s);
             out.push(PostureAction::Record(Observation {
                 kind: PostureKind::DriftEpisode,
-                duration_s: secs(d).max(1),
+                duration_s,
                 reason: None,
                 cue: Some(e.cue.unwrap_or(CueOutcome::NoAnswer)),
+                cue_after_s: Some(cue_after_s),
+                spells: None,
+                ago: now.saturating_sub(end),
             }));
         }
         self.drift_since = None;
+    }
+
+    /// Whether drift cannot be scored for want of a usable calibration (none, failed,
+    /// invalid until recalibration, or collecting one) while capture runs.
+    const fn unscored(&self) -> bool {
+        self.capturing && (self.calibrating.is_some() || matches!(self.baseline, Baseline::None))
+    }
+
+    /// Open or close the no-calibration interval as the state stands (slice V2-3).
+    fn track_unscored(&mut self, now: Duration, out: &mut Vec<PostureAction>) {
+        match (self.unscored(), self.unscored_since) {
+            (true, None) => self.unscored_since = Some(now),
+            (false, Some(start)) => {
+                self.unscored_since = None;
+                Self::record_interval(
+                    out,
+                    PostureKind::BaselineSuspect,
+                    now.saturating_sub(start),
+                    PostureReason::NoCalibration,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// Write the open intervals once the camera-on segment reaches [`SEGMENT_EVERY`], and
+    /// start them again (an episode stays one event).
+    fn segment(&mut self, now: Duration, out: &mut Vec<PostureAction>) {
+        let Some(start) = self.capture_since else {
+            return;
+        };
+        if now.saturating_sub(start) < SEGMENT_EVERY {
+            return;
+        }
+        self.flush_brief(now, out);
+        Self::record_capture(out, now.saturating_sub(start));
+        self.capture_since = Some(now);
+        if let Some(since) = self.unscored_since {
+            Self::record_interval(
+                out,
+                PostureKind::BaselineSuspect,
+                now.saturating_sub(since),
+                PostureReason::NoCalibration,
+            );
+            self.unscored_since = Some(now);
+        }
+        if let Some((since, reason)) = self.no_reading
+            && now.saturating_sub(since) >= NO_READING_MIN
+        {
+            Self::record_interval(
+                out,
+                PostureKind::NoReading,
+                now.saturating_sub(since),
+                reason,
+            );
+            self.no_reading = Some((now, reason));
+        }
+        if let Baseline::Suspect {
+            reason,
+            since: Some(since),
+            ..
+        } = &mut self.baseline
+        {
+            let d = now.saturating_sub(*since);
+            if d >= Duration::from_secs(1) {
+                Self::record_interval(out, PostureKind::BaselineSuspect, d, *reason);
+                *since = now;
+            }
+        }
+    }
+
+    fn record_capture(out: &mut Vec<PostureAction>, d: Duration) {
+        if d >= Duration::from_secs(1) {
+            out.push(PostureAction::Record(Observation {
+                kind: PostureKind::Capture,
+                duration_s: secs(d),
+                reason: None,
+                cue: None,
+                cue_after_s: None,
+                spells: None,
+                ago: Duration::ZERO,
+            }));
+        }
     }
 
     fn end_no_reading(&mut self, now: Duration, out: &mut Vec<PostureAction>) {
         if let Some((since, reason)) = self.no_reading.take() {
             let d = now.saturating_sub(since);
             if d >= NO_READING_MIN {
+                // Short spells before it are written first, so the two never overlap.
+                self.flush_brief(now, out);
                 Self::record_interval(out, PostureKind::NoReading, d, reason);
+            } else if !d.is_zero() {
+                self.add_brief(since, now, reason, out);
             }
+        }
+    }
+
+    /// Add a short no-reading spell; write the ones before it first if together they
+    /// would span more than [`BRIEF_EVERY`].
+    fn add_brief(
+        &mut self,
+        since: Duration,
+        end: Duration,
+        reason: PostureReason,
+        out: &mut Vec<PostureAction>,
+    ) {
+        if self
+            .brief
+            .as_ref()
+            .is_some_and(|b| end.saturating_sub(b.since) > BRIEF_EVERY)
+        {
+            self.flush_brief(end, out);
+        }
+        let scoring = self.scoring();
+        let b = self.brief.get_or_insert_with(|| Brief {
+            since,
+            last_end: end,
+            by_reason: Vec::new(),
+            spells: 0,
+            scoring,
+        });
+        b.last_end = end;
+        b.spells += 1;
+        let d = end.saturating_sub(since);
+        match b.by_reason.iter_mut().find(|(r, _)| *r == reason) {
+            Some((_, t)) => *t += d,
+            None => b.by_reason.push((reason, d)),
+        }
+    }
+
+    /// Write the short spells added up so far: one no-reading record of their total time,
+    /// ending when the last one ended, with the reason that took most of it.
+    fn flush_brief(&mut self, now: Duration, out: &mut Vec<PostureAction>) {
+        let Some(b) = self.brief.take() else {
+            return;
+        };
+        let total: Duration = b.by_reason.iter().map(|(_, d)| *d).sum();
+        let Some(&(reason, _)) = b.by_reason.iter().max_by_key(|(_, d)| *d) else {
+            return;
+        };
+        // Whole seconds, rounded: the total is what coverage counts.
+        let duration_s = secs(total + Duration::from_millis(500));
+        if duration_s == 0 {
+            return;
+        }
+        out.push(PostureAction::Record(Observation {
+            kind: PostureKind::NoReading,
+            duration_s,
+            reason: Some(reason),
+            cue: None,
+            cue_after_s: None,
+            spells: Some(b.spells),
+            ago: now.saturating_sub(b.last_end),
+        }));
+    }
+
+    /// Write the short spells once capture stops or scoring starts or stops, so their
+    /// record never spans a change of what the time counts as.
+    fn settle_brief(&mut self, now: Duration, out: &mut Vec<PostureAction>) {
+        if self
+            .brief
+            .as_ref()
+            .is_some_and(|b| !self.capturing || b.scoring != self.scoring())
+        {
+            self.flush_brief(now, out);
         }
     }
 
@@ -1215,6 +1590,9 @@ impl Detector {
                 duration_s: secs(d),
                 reason: Some(reason),
                 cue: None,
+                cue_after_s: None,
+                spells: None,
+                ago: Duration::ZERO,
             }));
         }
     }

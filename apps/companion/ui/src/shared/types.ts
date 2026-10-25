@@ -663,7 +663,8 @@ export type PostureReason =
   | 'app_restart'
   | 'camera_restart'
   | 'camera_moved'
-  | 'viewpoint_changed';
+  | 'viewpoint_changed'
+  | 'no_calibration';
 
 export type PostureState =
   | { kind: 'not_calibrated' }
@@ -687,6 +688,19 @@ export interface PostureView {
     suspects: number;
     invalidations: number;
   };
+  /** Today's coverage, derived from the local records (slice V2-3). */
+  today: PostureCoverage | null;
+}
+
+/** A day's posture coverage (slice V2-3): camera on = no reading + not scored + usable. */
+export interface PostureCoverage {
+  camera_on_s: number;
+  no_reading_s: number;
+  unscored_s: number;
+  usable_s: number;
+  usable_share: number | null;
+  episodes: number;
+  cues_shown: number;
 }
 
 export type CapturePath = 'processor' | 'video';

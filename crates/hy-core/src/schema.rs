@@ -337,8 +337,10 @@ text_enum! {
         DriftEpisode => "drift_episode",
         /// An interval with no usable reading.
         NoReading => "no_reading",
-        /// An interval with a suspect or invalid baseline.
+        /// An interval with a suspect or invalid baseline, or no usable calibration.
         BaselineSuspect => "baseline_suspect",
+        /// A stretch of camera-on time (slice V2-3: the denominator of a day's coverage).
+        Capture => "capture",
     }
 }
 
@@ -362,6 +364,9 @@ text_enum! {
         /// Suspect: the head-to-shoulder width ratio left its calibration band while
         /// posture stayed steady (the camera's viewpoint changed).
         ViewpointChanged => "viewpoint_changed",
+        /// Not scored: no usable calibration (none yet, not usable, being taken, or
+        /// invalid until the user recalibrates; slice V2-3).
+        NoCalibration => "no_calibration",
     }
 }
 
@@ -628,6 +633,17 @@ pub enum EventPayload {
         /// What became of the cue (drift episodes only).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cue: Option<CueOutcome>,
+        /// When the cue was asked, in whole seconds after the episode's recorded start (the
+        /// record's time less `duration_s`), at most `duration_s` (drift episodes only;
+        /// slice V2-3). Records written before it have none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cue_after_s: Option<u32>,
+        /// No-reading records only (slice V2-3): present when the record adds up this many
+        /// no-reading spells each shorter than `posture::NO_READING_MIN`, written together
+        /// within `posture::BRIEF_EVERY`; `duration_s` is their total time and the
+        /// record's time is when the last one ended.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spells: Option<u32>,
     },
     /// A sharing category changed state on this device.
     #[serde(rename = "sharing.policy_changed")]
@@ -789,9 +805,19 @@ impl EventPayload {
                 duration_s,
                 reason,
                 cue,
+                cue_after_s,
+                spells,
             } => {
                 if *duration_s == 0 || *duration_s > 24 * 3600 {
                     return Err(Error::invalid("posture duration must be 1 s to 24 h"));
+                }
+                let cue_after_ok = cue_after_s
+                    .is_none_or(|c| *kind == PostureKind::DriftEpisode && c <= *duration_s);
+                let spells_ok = spells.is_none_or(|n| *kind == PostureKind::NoReading && n >= 1);
+                if !cue_after_ok || !spells_ok {
+                    return Err(Error::invalid(
+                        "a cue time belongs to a drift episode within its length; a spell count to a no-reading record",
+                    ));
                 }
                 let consistent = match kind {
                     PostureKind::DriftEpisode => reason.is_none() && cue.is_some(),
@@ -801,6 +827,7 @@ impl EventPayload {
                     PostureKind::BaselineSuspect => {
                         cue.is_none() && reason.is_some_and(|r| !r.is_no_reading())
                     }
+                    PostureKind::Capture => cue.is_none() && reason.is_none(),
                 };
                 if !consistent {
                     return Err(Error::invalid(
@@ -1108,6 +1135,8 @@ mod tests {
                 duration_s: 75,
                 reason: None,
                 cue: Some(CueOutcome::Shown),
+                cue_after_s: None,
+                spells: None,
             },
             EventPayload::SharingPolicyChanged {
                 category: Category::Hydration,
@@ -1290,10 +1319,71 @@ mod tests {
             duration_s: d,
             reason: Some(PostureReason::Absent),
             cue: None,
+            cue_after_s: None,
+            spells: None,
         };
         assert!(p(0).validate().is_err());
         assert!(p(1).validate().is_ok());
         assert!(p(24 * 3600 + 1).validate().is_err());
+    }
+
+    #[test]
+    fn posture_cue_time_and_spell_count_belong_to_their_kinds() {
+        let p = |kind, reason, cue, cue_after_s, spells| EventPayload::PostureObservation {
+            kind,
+            duration_s: 90,
+            reason,
+            cue,
+            cue_after_s,
+            spells,
+        };
+        use PostureKind::{Capture, DriftEpisode, NoReading};
+        let shown = Some(CueOutcome::Shown);
+        let absent = Some(PostureReason::Absent);
+        assert!(
+            p(DriftEpisode, None, shown, Some(75), None)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            p(DriftEpisode, None, shown, Some(90), None)
+                .validate()
+                .is_ok()
+        );
+        // The cue cannot come after the episode ended, or on another kind.
+        assert!(
+            p(DriftEpisode, None, shown, Some(91), None)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            p(NoReading, absent, None, Some(5), None)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            p(NoReading, absent, None, None, Some(12))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            p(NoReading, absent, None, None, Some(0))
+                .validate()
+                .is_err()
+        );
+        assert!(p(Capture, None, None, None, Some(3)).validate().is_err());
+        assert!(
+            p(DriftEpisode, None, shown, Some(60), Some(1))
+                .validate()
+                .is_err()
+        );
+        // Stored as optional fields: absent when unset, read back when set.
+        let v = serde_json::to_value(p(NoReading, absent, None, None, None)).unwrap();
+        assert!(v["data"].get("spells").is_none() && v["data"].get("cue_after_s").is_none());
+        let e = p(DriftEpisode, None, shown, Some(75), None);
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["data"]["cue_after_s"], 75);
+        assert_eq!(serde_json::from_value::<EventPayload>(v).unwrap(), e);
     }
 
     #[test]
@@ -1327,6 +1417,8 @@ mod tests {
             duration_s: 60,
             reason,
             cue,
+            cue_after_s: None,
+            spells: None,
         };
         use PostureKind::{BaselineSuspect, DriftEpisode, NoReading};
         assert!(
@@ -1373,6 +1465,29 @@ mod tests {
             )
             .validate()
             .is_err()
+        );
+        // V2-3: camera-on time has neither; time without a calibration is a suspect kind.
+        use PostureKind::Capture;
+        assert!(p(Capture, None, None).validate().is_ok());
+        assert!(
+            p(Capture, Some(PostureReason::NoCalibration), None)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            p(Capture, None, Some(CueOutcome::Shown))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            p(BaselineSuspect, Some(PostureReason::NoCalibration), None)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            p(NoReading, Some(PostureReason::NoCalibration), None)
+                .validate()
+                .is_err()
         );
         // Stored without the optional fields, an episode is refused (V2-2 always writes
         // them; nothing earlier wrote posture events).
