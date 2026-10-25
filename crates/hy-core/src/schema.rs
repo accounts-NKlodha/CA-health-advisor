@@ -337,8 +337,10 @@ text_enum! {
         DriftEpisode => "drift_episode",
         /// An interval with no usable reading.
         NoReading => "no_reading",
-        /// An interval with a suspect or invalid baseline.
+        /// An interval with a suspect or invalid baseline, or no usable calibration.
         BaselineSuspect => "baseline_suspect",
+        /// A stretch of camera-on time (slice V2-3: the denominator of a day's coverage).
+        Capture => "capture",
     }
 }
 
@@ -362,6 +364,9 @@ text_enum! {
         /// Suspect: the head-to-shoulder width ratio left its calibration band while
         /// posture stayed steady (the camera's viewpoint changed).
         ViewpointChanged => "viewpoint_changed",
+        /// Not scored: no usable calibration (none yet, not usable, being taken, or
+        /// invalid until the user recalibrates; slice V2-3).
+        NoCalibration => "no_calibration",
     }
 }
 
@@ -801,6 +806,7 @@ impl EventPayload {
                     PostureKind::BaselineSuspect => {
                         cue.is_none() && reason.is_some_and(|r| !r.is_no_reading())
                     }
+                    PostureKind::Capture => cue.is_none() && reason.is_none(),
                 };
                 if !consistent {
                     return Err(Error::invalid(
@@ -1373,6 +1379,29 @@ mod tests {
             )
             .validate()
             .is_err()
+        );
+        // V2-3: camera-on time has neither; time without a calibration is a suspect kind.
+        use PostureKind::Capture;
+        assert!(p(Capture, None, None).validate().is_ok());
+        assert!(
+            p(Capture, Some(PostureReason::NoCalibration), None)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            p(Capture, None, Some(CueOutcome::Shown))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            p(BaselineSuspect, Some(PostureReason::NoCalibration), None)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            p(NoReading, Some(PostureReason::NoCalibration), None)
+                .validate()
+                .is_err()
         );
         // Stored without the optional fields, an episode is refused (V2-2 always writes
         // them; nothing earlier wrote posture events).

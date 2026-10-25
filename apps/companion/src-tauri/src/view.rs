@@ -255,6 +255,9 @@ pub struct PostureView {
     pub can_calibrate: bool,
     /// Counts (episodes, cues shown and suppressed, suspects).
     pub stats: hy_core::posture::PostureStats,
+    /// Today's coverage, derived from the local records (slice V2-3); `None` if the store
+    /// could not be read.
+    pub today: Option<hy_core::posture::quality::Coverage>,
 }
 
 /// The open bubble or menu.

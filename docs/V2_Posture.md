@@ -3,7 +3,9 @@
 Status: built on top of V2-1 (the camera). Every threshold below is a D value. The V2-3
 desk sessions tune them and freeze them before scoring (PRD V2 gate). This page covers
 what V2-2 delivers, how it follows architecture 4.5, how it is tested, and what still
-needs a person at a real desk.
+needs a person at a real desk. Slice V2-3 (`docs/V2_Quality.md`) added the quality report,
+the desk-session harness, a day's coverage from the records, and a synthetic threshold
+sweep that moved the end threshold from 2.0 to 2.5 (still provisional).
 
 ## What the user sees
 
@@ -67,7 +69,8 @@ switch stays hidden.
 - Drift is the largest |z| at or above 3.0 (D).
 - An episode starts after 60 s of drift with at least 70% valid frames, and asks for the
   cue at once (within the 30 s gate).
-- It ends after |z| stays below 2.0 for 10 s (D), or when capture stops.
+- It ends after |z| stays below 2.5 for 10 s (D; 2.0 in V2-2, changed by the V2-3
+  synthetic sweep), or when capture stops.
 - One episode is one event.
 
 **Baseline-suspect (cues paused at once):**
@@ -148,7 +151,8 @@ switch stays hidden.
 ## Needs physical testing
 
 Owner script: `scripts/windows/Test-HealthierYou-Camera.ps1 -Phase Calibration` (about
-15 minutes). The V2-3 desk sessions (5 setups × 2 sessions, raw counts) validate quality.
+15 minutes). The V2-3 desk sessions (5 setups × 2 sessions, raw counts) validate quality:
+`-Phase Desk` and `-Phase DeskReport` (see `docs/V2_Quality.md`).
 
 | Item | Slice |
 | --- | --- |
@@ -161,13 +165,16 @@ Owner script: `scripts/windows/Test-HealthierYou-Camera.ps1 -Phase Calibration` 
 
 ## Deviations and decisions to confirm
 
-1. **Thresholds are D values**, set from synthetic traces only: z 3.0 to start, 2.0 to
-   end, the end after 10 s, the band and match tolerances. V2-3 tunes them.
+1. **Thresholds are D values**, set from synthetic traces only: z 3.0 to start, 2.5 to
+   end (V2-3; was 2.0), the end after 10 s, the band and match tolerances. V2-3's sweep
+   checked them on synthetic desk sessions; the real desk sessions decide
+   (`docs/V2_Quality.md`).
 2. **A fast lean-in held for 20 s can look like a moved camera** (rule (b) uses shoulder
    scale). Cues then pause rather than coach, as the architecture prefers when unsure. If
    the desk sessions show this often, the scale threshold or hold changes.
-3. **Daily coverage is not stored separately.** It can be derived from the no-reading and
-   suspect intervals plus camera-on time. V2-3's report computes it.
+3. **Daily coverage is not stored separately.** It is derived from the no-reading and
+   suspect intervals plus camera-on time; V2-3 records camera-on time and the time with
+   no usable calibration, and computes it (`Store::posture_day`).
 4. **Calibration runs at 3 fps even when the governor chose 1 fps**, for at most 30 s,
    because 1 fps cannot give 40 frames in 30 s.
 5. **The cue is suppressed during the calm gap** after another card (no bursts), and

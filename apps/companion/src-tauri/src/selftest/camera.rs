@@ -20,7 +20,8 @@
 //! usable" with its reason; then, with the worker frozen, synthetic feature reports (made
 //! up numbers, never an image) run a calibration, a sustained drift that asks the engine
 //! for the cue and records one episode with its outcome, and a moved camera that
-//! suspends cues.
+//! suspends cues. Slice V2-3 adds: the time before a usable calibration is recorded as not
+//! scored, and the page reads today's coverage from the records.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -457,5 +458,20 @@ fn posture(shell: &Arc<Shell>, r: &mut Report) {
         "posture_moved_camera_suspends",
         fed && state == Some(PostureState::Suspect(PostureReason::CameraMoved)),
         format!("fed {fed}; state {state:?}"),
+    );
+
+    // Slice V2-3: the time before the usable calibration was written to the store as
+    // not scored (no calibration), and the page reads today's coverage from the records
+    // (camera-on time is written when capture ends, so only the read is checked here).
+    let unscored = on_main(shell, |s| {
+        s.camera_test_facts().records.iter().any(|o| {
+            o.kind == PostureKind::BaselineSuspect && o.reason == Some(PostureReason::NoCalibration)
+        })
+    }) == Some(true);
+    let today = page(shell).and_then(|p| p.posture.today);
+    r.check(
+        "posture_coverage_from_records",
+        unscored && today.is_some(),
+        format!("no-calibration interval recorded {unscored}; today {today:?}"),
     );
 }

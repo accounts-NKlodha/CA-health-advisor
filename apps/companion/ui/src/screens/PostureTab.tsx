@@ -5,7 +5,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import { call, on, report } from '../shared/ipc';
 import type { CameraPage } from '../shared/types';
-import { offersRetry, postureDetail, statusDetail } from '../camera/text';
+import { coverageText, offersRetry, postureDetail, statusDetail } from '../camera/text';
 
 export function PostureTab() {
   const [page, setPage] = useState<CameraPage | null>(null);
@@ -72,6 +72,7 @@ export function PostureTab() {
           {page.posture.calibrated_at ? (
             <p class="note">Calibrated {new Date(page.posture.calibrated_at).toLocaleString()}.</p>
           ) : null}
+          <p class="note">{coverageText(page.posture.today)}</p>
           <button type="button" class="btn" onClick={() => void call('camera_open').catch(report)}>
             Calibrate on the camera page
           </button>

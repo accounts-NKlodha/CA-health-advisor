@@ -1584,3 +1584,70 @@ fn a_correction_keeps_the_entry_type_and_a_retraction_is_final() {
         .is_err()
     );
 }
+
+#[test]
+fn a_days_posture_coverage_is_derived_from_its_records() {
+    use crate::posture::{CueOutcome, PostureKind, PostureReason};
+    let (mut s, _clock) = store();
+    let today = date(2026, 10, 21);
+    // Nothing yet: no camera-on time, so no share (never a zero).
+    let none = s.posture_day(today).unwrap();
+    assert_eq!((none.camera_on_s, none.usable_share), (0, None));
+    let at = |mins_before: i64| start() - Duration::minutes(mins_before);
+    let rec = |kind, duration_s, reason, cue| EventPayload::PostureObservation {
+        kind,
+        duration_s,
+        reason,
+        cue,
+    };
+    for (end, payload, status) in [
+        (
+            at(30),
+            rec(PostureKind::Capture, 900, None, None),
+            MeasurementStatus::Measured,
+        ),
+        (
+            at(40),
+            rec(
+                PostureKind::NoReading,
+                60,
+                Some(PostureReason::Absent),
+                None,
+            ),
+            MeasurementStatus::NoReading,
+        ),
+        (
+            at(43),
+            rec(
+                PostureKind::BaselineSuspect,
+                30,
+                Some(PostureReason::CameraRestart),
+                None,
+            ),
+            MeasurementStatus::NoReading,
+        ),
+        (
+            at(32),
+            rec(PostureKind::DriftEpisode, 90, None, Some(CueOutcome::Shown)),
+            MeasurementStatus::Estimated,
+        ),
+    ] {
+        s.append_event(NewEvent::inferred(payload, status).at(end))
+            .unwrap();
+    }
+    // Another day's record is not counted.
+    s.append_event(
+        NewEvent::inferred(
+            rec(PostureKind::Capture, 600, None, None),
+            MeasurementStatus::Measured,
+        )
+        .at(start() - Duration::days(1)),
+    )
+    .unwrap();
+    let c = s.posture_day(today).unwrap();
+    assert_eq!(c.camera_on_s, 900);
+    assert_eq!(c.no_reading_s, 60);
+    assert_eq!(c.unscored_s, 30);
+    assert_eq!(c.usable_s, 810);
+    assert_eq!((c.episodes, c.cues_shown), (1, 1));
+}

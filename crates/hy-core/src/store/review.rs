@@ -25,6 +25,30 @@ use crate::schema::{Activity, EventPayload, GoalKind, NewEvent, PhoneLabel, Remi
 pub const MAX_FACT_DAYS: i64 = 800;
 
 impl Store {
+    /// A day's posture coverage (slice V2-3), derived from that date's
+    /// `posture.observation` records alone: camera-on time, no-reading time, time not
+    /// scored (suspect or no usable calibration) and usable time. Records are dated by
+    /// when they ended; intervals are written at least every
+    /// [`crate::posture::SEGMENT_EVERY`], so little crosses midnight. Local only.
+    ///
+    /// # Errors
+    /// [`Error::Sqlite`] on a read failure.
+    pub fn posture_day(&self, date: NaiveDate) -> Result<crate::posture::quality::Coverage> {
+        let rows = self
+            .conn
+            .prepare(
+                "SELECT occurred_at, type, payload FROM events
+                 WHERE local_date = ?1 AND type = 'posture.observation'",
+            )?
+            .query_map(params![date_text(date)], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<(i64, String, String)>>>()?;
+        Ok(crate::posture::quality::coverage(
+            &crate::posture::quality::logged_from_rows(rows),
+        ))
+    }
+
     /// The first local date the app was used: the earliest of the store's creation day
     /// (in the current zone), the earliest tracker tally and the earliest event.
     ///

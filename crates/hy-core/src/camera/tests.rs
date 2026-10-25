@@ -799,15 +799,24 @@ fn drift_asks_for_the_cue_and_a_hold_records_the_episode() {
     assert_eq!(fx.iter().filter(|a| **a == Action::Cue).count(), 1);
     m.cue_outcome(CueOutcome::Focus);
     let fx = m.set_hold(t, Some(CameraHold::Meeting));
-    let rec: Vec<_> = fx
+    let all: Vec<_> = fx
         .iter()
         .filter_map(|a| match a {
             Action::Record(o) => Some(*o),
             _ => None,
         })
         .collect();
+    // The camera-on time is recorded too (slice V2-3).
+    assert!(
+        all.iter()
+            .any(|o| o.kind == crate::posture::PostureKind::Capture && o.duration_s > 60),
+        "{fx:?}"
+    );
+    let rec: Vec<_> = all
+        .into_iter()
+        .filter(|o| o.kind == crate::posture::PostureKind::DriftEpisode)
+        .collect();
     assert_eq!(rec.len(), 1, "{fx:?}");
-    assert_eq!(rec[0].kind, crate::posture::PostureKind::DriftEpisode);
     assert_eq!(rec[0].cue, Some(CueOutcome::Focus));
     rec[0].payload().validate().unwrap();
     // The camera restarts after the hold: cues wait until the view matches again.
