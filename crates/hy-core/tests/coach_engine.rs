@@ -4903,3 +4903,19 @@ fn a_posture_cue_on_show_is_withdrawn_by_a_hold() {
     h.wait(mins(30));
     assert!(!cue_shown(h.view()), "never replayed");
 }
+
+#[test]
+fn a_posture_cue_on_show_when_work_ends_is_withdrawn() {
+    // Work ends at 18:30; the cue opens at 18:29.
+    let mut h = cue_harness(18, 28);
+    h.wait(mins(1));
+    assert_eq!(h.local(), hm(18, 29));
+    assert_eq!(h.input(Input::PostureCue).outcome, InputOutcome::Applied);
+    assert!(cue_shown(h.view()));
+    // At the end of work hours it is withdrawn, not left for its ten minutes.
+    h.wait_until(mins(2), |v| !cue_shown(v));
+    assert!(h.local() <= hm(18, 30), "withdrawn at {}", h.local());
+    assert!(h.view().bubble.is_none());
+    h.wait(mins(30));
+    assert!(h.view().bubble.is_none(), "never replayed");
+}

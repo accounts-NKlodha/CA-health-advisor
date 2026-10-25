@@ -13,7 +13,8 @@
 //!   default): [`CUE_COOLDOWN`].
 //!
 //! Otherwise the card opens: one line, OK and Recalibrate. Like the recovery cards that
-//! open on their own it closes quietly after 10 minutes and any hold withdraws it.
+//! open on their own it closes quietly after 10 minutes and any hold withdraws it,
+//! including the end of work hours (unlike the long-day check-in, which may run late).
 //!
 //! [`Input::PostureCue`]: crate::coach::Input::PostureCue
 

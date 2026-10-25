@@ -104,7 +104,11 @@ pub const VIEWPOINT_HOLD: Duration = Duration::from_secs(20);
 /// A suspect baseline that has not matched again after this much reading is invalid
 /// (architecture 4.5: 2 minutes).
 pub const SUSPECT_FOR: Duration = Duration::from_secs(120);
-/// A suspect baseline matches again after this long of continuous match (D).
+/// A suspect baseline matches again after this long of continuous match (D): a run of
+/// matching frames, each within [`READING_GAP`] of the one before. A frame without usable
+/// features neither extends nor (on its own) breaks the run, but a gap longer than
+/// [`READING_GAP`] between matching frames starts it again, and a frame that does not
+/// match ends it.
 pub const MATCH_FOR: Duration = Duration::from_secs(20);
 /// After a restart, the first this-long of reading decides (architecture 4.5: 20 s).
 pub const RESTART_CHECK: Duration = Duration::from_secs(20);
@@ -499,8 +503,11 @@ struct Calibrating {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Check {
     /// Matches again after [`MATCH_FOR`] of continuous match; invalid after
-    /// [`SUSPECT_FOR`] of reading.
-    Revert { matching_since: Option<Duration> },
+    /// [`SUSPECT_FOR`] of reading. `matching` is the current run of matching frames: when
+    /// it began and its latest matching frame.
+    Revert {
+        matching: Option<(Duration, Duration)>,
+    },
     /// The first [`RESTART_CHECK`] of reading decides.
     Restart { matched: u32, seen: u32 },
 }
@@ -1072,9 +1079,7 @@ impl Detector {
             reason,
             since: Some(now),
             reading: Duration::ZERO,
-            check: Check::Revert {
-                matching_since: None,
-            },
+            check: Check::Revert { matching: None },
         };
         self.stats.suspects += 1;
         self.drift_since = None;
@@ -1115,13 +1120,22 @@ impl Detector {
                 });
                 (Check::Restart { matched, seen }, verdict)
             }
-            Check::Revert { matching_since } => {
-                let matching_since = match matches {
-                    Some(true) => Some(matching_since.unwrap_or(now)),
+            Check::Revert { matching } => {
+                // Only matching frames are evidence: the run's length is measured between
+                // its first and latest matching frames, and a stretch without usable
+                // features longer than READING_GAP ends it.
+                let continues =
+                    |(_, last): &(Duration, Duration)| now.saturating_sub(*last) <= READING_GAP;
+                let matching = match matches {
+                    Some(true) => Some(match matching.filter(continues) {
+                        Some((since, _)) => (since, now),
+                        None => (now, now),
+                    }),
                     Some(false) => None,
-                    None => matching_since,
+                    None => matching.filter(continues),
                 };
-                let verdict = if matching_since.is_some_and(|t| now.saturating_sub(t) >= MATCH_FOR)
+                let verdict = if matching
+                    .is_some_and(|(since, last)| last.saturating_sub(since) >= MATCH_FOR)
                 {
                     Some(true)
                 } else if total >= SUSPECT_FOR {
@@ -1129,7 +1143,7 @@ impl Detector {
                 } else {
                     None
                 };
-                (Check::Revert { matching_since }, verdict)
+                (Check::Revert { matching }, verdict)
             }
         };
         match verdict {

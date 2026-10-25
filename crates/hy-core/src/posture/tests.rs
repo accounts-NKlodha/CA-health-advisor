@@ -514,6 +514,76 @@ fn a_camera_moved_back_restores_the_baseline() {
     assert!(sus[0].duration_s >= 20);
 }
 
+fn suspect_after_a_move() -> Run {
+    let mut r = calibrated();
+    r.feed(25, moved_camera);
+    assert_eq!(
+        r.d.state(),
+        PostureState::Suspect(PostureReason::CameraMoved)
+    );
+    r.take();
+    r
+}
+
+#[test]
+fn one_match_then_prolonged_invalid_readings_does_not_restore_the_baseline() {
+    // No person in view.
+    let mut r = suspect_after_a_move();
+    r.sit(1);
+    r.feed(25, |_| None);
+    assert_eq!(
+        r.d.state(),
+        PostureState::Suspect(PostureReason::CameraMoved),
+        "frames without features are not matching evidence"
+    );
+    // A single matching frame afterwards starts a new run; it does not finish the old one.
+    r.sit(1);
+    assert!(matches!(r.d.state(), PostureState::Suspect(_)));
+    // Frames whose head pair differs from the calibration's are unusable too.
+    let mut r = suspect_after_a_move();
+    r.sit(1);
+    r.feed(25, |t| {
+        Some(Features {
+            head: HeadRef::Eyes,
+            ..jitter(t, base())
+        })
+    });
+    assert!(matches!(r.d.state(), PostureState::Suspect(_)));
+    assert!(r.records(PostureKind::BaselineSuspect).is_empty());
+}
+
+#[test]
+fn intermittent_dropouts_only_count_while_matches_stay_continuous() {
+    // A second of match then three seconds of nothing, for a minute: never 20 s of
+    // continuous match.
+    let mut r = suspect_after_a_move();
+    r.feed(60, |t| (t.as_secs() % 4 == 0).then(|| jitter(t, base())));
+    assert!(matches!(r.d.state(), PostureState::Suspect(_)));
+    // Brief dropouts (one second in three) inside a sustained match: the run continues.
+    let mut r = suspect_after_a_move();
+    r.feed(19, |t| (t.as_secs() % 3 != 2).then(|| jitter(t, base())));
+    assert!(matches!(r.d.state(), PostureState::Suspect(_)));
+    r.feed(3, |t| (t.as_secs() % 3 != 2).then(|| jitter(t, base())));
+    assert_eq!(r.d.state(), PostureState::Ready);
+}
+
+#[test]
+fn sustained_matching_after_invalid_readings_restores_the_baseline() {
+    let mut r = suspect_after_a_move();
+    r.sit(1);
+    r.feed(25, |_| None);
+    r.feed(10, |t| (t.as_secs() % 4 == 0).then(|| jitter(t, base())));
+    r.feed(3, |_| None);
+    assert!(matches!(r.d.state(), PostureState::Suspect(_)));
+    r.sit(19);
+    assert!(matches!(r.d.state(), PostureState::Suspect(_)));
+    r.sit(2);
+    assert_eq!(r.d.state(), PostureState::Ready);
+    let sus = r.records(PostureKind::BaselineSuspect);
+    assert_eq!(sus.len(), 1);
+    assert_eq!(sus[0].reason, Some(PostureReason::CameraMoved));
+}
+
 #[test]
 fn a_step_that_does_not_hold_or_a_slow_change_is_not_a_move() {
     let mut r = calibrated();

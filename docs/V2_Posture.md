@@ -32,7 +32,8 @@ needs a person at a real desk.
   - Dropped during focus, never queued.
   - Suppressed during holds, while another card, an exercise or a Pomodoro is on show, and
     in the calm gap after a card.
-  - Closes quietly after 10 minutes.
+  - Closes quietly after 10 minutes. A hold withdraws it, including the end of work
+    hours.
 - **Camera moved or tilted:** cues pause at once ("Camera position changed? Cues
   paused"). If the view does not match the calibration again within two minutes of
   reading, a notice beside the pet asks once to recalibrate. Nothing is scored until then.
@@ -80,7 +81,10 @@ switch stays hidden.
 
 **Leaving suspect:**
 - **Revert:** the suspect state clears after 20 s of continuous geometry match (midpoint
-  within 7.5% of the frame and width within 10%, D).
+  within 7.5% of the frame and width within 10%, D). Only matching frames count: the 20 s
+  run is measured from its first to its latest matching frame, a frame that does not match
+  ends it, and more than 2 s without a matching frame (no person, invalid or unusable
+  frames) starts it again.
 - **Invalid:**
   - After 2 minutes of reading without a match, the baseline is invalid. The calibration
     is dropped, and the user is asked once to recalibrate.
@@ -115,6 +119,8 @@ switch stays hidden.
     - **T-C6** a stored calibration is accepted when the first 20 s match and invalid
       when they do not; unusable stored numbers are ignored
     - a camera restart is suspect until the view matches
+    - a suspect baseline is restored only by 20 s of continuous match: one match then
+      invalid frames, or matches broken by long dropouts, do not restore it
   - Records and limits:
     - stopping records the episode (no answer)
     - no-reading intervals with their reasons
@@ -126,7 +132,8 @@ switch stays hidden.
   no-reading records.
 - **`hy-core` engine:** the cue shows, then waits out its 30-minute cooldown and closes
   after 10 minutes; focus drops it; a meeting, off hours, a Pomodoro or a reminder
-  suppress it; a hold withdraws it, and it is never replayed.
+  suppress it; a hold (including the end of work hours) withdraws it, and it is never
+  replayed.
 - **`hy-core` schema:** reasons and cue outcomes belong to their kinds.
 - **`hy-pet` link:** the cue card's words and actions route.
 - **UI `node --test`:** features from synthetic landmarks (units, slump, lean, tilt, roll,

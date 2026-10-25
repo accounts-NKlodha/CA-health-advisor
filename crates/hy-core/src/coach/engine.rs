@@ -1816,7 +1816,9 @@ impl Engine {
                 None => self.prompt_blocked(ctx),
             }
             || (p.is_recovery_card()
-                && self.s.now.saturating_sub(self.s.prompt_since) >= ms(CARD_CLOSES_AFTER));
+                && self.s.now.saturating_sub(self.s.prompt_since) >= ms(CARD_CLOSES_AFTER))
+            // The posture cue keeps to work hours (the check-in may run late).
+            || (p == Prompt::PostureCue && self.off_hours(ctx));
         if withdraw {
             self.clear_prompt();
             out.significant = true;
