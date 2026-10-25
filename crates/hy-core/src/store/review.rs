@@ -25,27 +25,35 @@ use crate::schema::{Activity, EventPayload, GoalKind, NewEvent, PhoneLabel, Remi
 pub const MAX_FACT_DAYS: i64 = 800;
 
 impl Store {
-    /// A day's posture coverage (slice V2-3), derived from that date's
-    /// `posture.observation` records alone: camera-on time, no-reading time, time not
-    /// scored (suspect or no usable calibration) and usable time. Records are dated by
-    /// when they ended; intervals are written at least every
-    /// [`crate::posture::SEGMENT_EVERY`], so little crosses midnight. Local only.
+    /// A day's posture coverage (slice V2-3), derived from the `posture.observation`
+    /// records alone: camera-on time, no-reading time, time not scored (suspect or no
+    /// usable calibration) and usable time. Every record whose interval meets local date
+    /// `date` (in the user's current zone, [`crate::time::UserZone::day_bounds`]) counts,
+    /// clipped to that day's boundaries, so an interval that crosses midnight is split
+    /// between the two days and every kind is split the same way. Episodes and cues count
+    /// on the day the cue was asked. Local only.
     ///
     /// # Errors
-    /// [`Error::Sqlite`] on a read failure.
+    /// [`Error::Sqlite`] on a read failure, [`Error::Json`] if the zone cannot be read.
     pub fn posture_day(&self, date: NaiveDate) -> Result<crate::posture::quality::Coverage> {
+        let day = read_zone(&self.conn)?.day_bounds(date);
+        let (from, to) = (day.start.timestamp_millis(), day.end.timestamp_millis());
+        // A record is written when its interval ends and lasts at most 24 h (the payload's
+        // own rule), so every record that meets the day ends within a day after it.
         let rows = self
             .conn
             .prepare(
                 "SELECT occurred_at, type, payload FROM events
-                 WHERE local_date = ?1 AND type = 'posture.observation'",
+                 WHERE type = 'posture.observation' AND occurred_at > ?1 AND occurred_at <= ?2",
             )?
-            .query_map(params![date_text(date)], |r| {
+            .query_map(params![from, to.saturating_add(86_400_000)], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })?
             .collect::<rusqlite::Result<Vec<(i64, String, String)>>>()?;
-        Ok(crate::posture::quality::coverage(
+        Ok(crate::posture::quality::coverage_within(
             &crate::posture::quality::logged_from_rows(rows),
+            from,
+            to,
         ))
     }
 

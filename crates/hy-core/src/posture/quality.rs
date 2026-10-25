@@ -430,6 +430,28 @@ pub fn coverage(logs: &[Logged]) -> Coverage {
     }
 }
 
+/// The coverage of the records' time from `from_ms` to `to_ms` (a local day): every
+/// interval is clipped to the window, so each kind is cut at the same boundaries and the
+/// parts still add up; episodes and cues count when their cue was asked within it.
+#[must_use]
+pub fn coverage_within(logs: &[Logged], from_ms: i64, to_ms: i64) -> Coverage {
+    let clipped: Vec<Logged> = logs
+        .iter()
+        .filter_map(|l| {
+            if l.kind == PostureKind::DriftEpisode {
+                return (from_ms..to_ms).contains(&l.cue_at_ms()).then_some(*l);
+            }
+            let (start_ms, end_ms) = (l.start_ms.max(from_ms), l.end_ms.min(to_ms));
+            (end_ms > start_ms).then_some(Logged {
+                start_ms,
+                end_ms,
+                ..*l
+            })
+        })
+        .collect();
+    coverage(&clipped)
+}
+
 /// Turn stored rows (`occurred_at` in Unix ms, `type`, `payload`) into records; rows of
 /// other types, or that this build cannot read, are skipped.
 pub fn logged_from_rows(rows: impl IntoIterator<Item = (i64, String, String)>) -> Vec<Logged> {

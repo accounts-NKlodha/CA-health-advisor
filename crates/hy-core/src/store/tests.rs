@@ -1655,3 +1655,88 @@ fn a_days_posture_coverage_is_derived_from_its_records() {
     assert_eq!(c.usable_s, 810);
     assert_eq!((c.episodes, c.cues_shown), (1, 1));
 }
+
+#[test]
+fn a_days_posture_coverage_clips_every_record_at_local_midnight() {
+    use crate::posture::{CueOutcome, PostureKind, PostureReason};
+    let (mut s, clock) = store();
+    clock.set_wall(Utc.with_ymd_and_hms(2026, 10, 24, 6, 0, 0).unwrap());
+    let zone = s.user_zone().unwrap();
+    // An instant given as a local date and time (Asia/Kolkata by default).
+    let local = |d: u32, h: u32, m: u32| {
+        zone.resolve_local(date(2026, 10, d).and_hms_opt(h, m, 0).unwrap())
+    };
+    let mut add = |end: DateTime<Utc>, kind, duration_s, reason, cue: Option<CueOutcome>| {
+        let payload = EventPayload::PostureObservation {
+            kind,
+            duration_s,
+            reason,
+            cue,
+            cue_after_s: cue.map(|_| 60),
+            spells: None,
+        };
+        s.append_event(NewEvent::inferred(payload, MeasurementStatus::Measured).at(end))
+            .unwrap();
+    };
+    // The review's case: camera on 23:50 to 00:05 (it ends on the 22nd), no reading
+    // 23:51 to 23:59 (it ends on the 21st). Each day gets its own part of both.
+    add(local(22, 0, 5), PostureKind::Capture, 900, None, None);
+    add(
+        local(21, 23, 59),
+        PostureKind::NoReading,
+        480,
+        Some(PostureReason::Absent),
+        None,
+    );
+    // Wholly inside the 22nd: camera on 08:00 to 08:10, not scored 08:02 to 08:04.
+    add(local(22, 8, 10), PostureKind::Capture, 600, None, None);
+    add(
+        local(22, 8, 4),
+        PostureKind::BaselineSuspect,
+        120,
+        Some(PostureReason::CameraRestart),
+        None,
+    );
+    // Both crossing the next midnight: camera on 23:58 to 00:04, no reading 23:59 to
+    // 00:02; and an episode from 23:58, cued at 23:59, ended at 00:03, counts on the 22nd.
+    add(local(23, 0, 4), PostureKind::Capture, 360, None, None);
+    add(
+        local(23, 0, 2),
+        PostureKind::NoReading,
+        180,
+        Some(PostureReason::LowConfidence),
+        None,
+    );
+    add(
+        local(23, 0, 3),
+        PostureKind::DriftEpisode,
+        300,
+        None,
+        Some(CueOutcome::Shown),
+    );
+    let day = |d: u32| s.posture_day(date(2026, 10, d)).unwrap();
+    let (d21, d22, d23) = (day(21), day(22), day(23));
+    let parts = |c: &crate::posture::quality::Coverage| {
+        (c.camera_on_s, c.no_reading_s, c.unscored_s, c.usable_s)
+    };
+    // 23:50 to midnight: 10 minutes on, 8 of them without a reading.
+    assert_eq!(parts(&d21), (600, 480, 0, 120));
+    // 00:00 to 00:05 + 08:00 to 08:10 + 23:58 to midnight; 1 minute without a reading.
+    assert_eq!(parts(&d22), (300 + 600 + 120, 60, 120, 840));
+    assert_eq!((d22.episodes, d22.cues_shown), (1, 1));
+    // Midnight to 00:04, 2 minutes of them without a reading.
+    assert_eq!(parts(&d23), (240, 120, 0, 120));
+    assert_eq!(d23.episodes, 0);
+    for c in [d21, d22, d23] {
+        assert_eq!(c.camera_on_s, c.no_reading_s + c.unscored_s + c.usable_s);
+    }
+    // No time is lost or counted twice across the three days.
+    assert_eq!(
+        d21.camera_on_s + d22.camera_on_s + d23.camera_on_s,
+        900 + 600 + 360
+    );
+    assert_eq!(
+        d21.no_reading_s + d22.no_reading_s + d23.no_reading_s,
+        480 + 180
+    );
+}

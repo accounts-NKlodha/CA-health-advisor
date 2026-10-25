@@ -25,9 +25,9 @@ success").
 
 | Part | Where | What |
 | --- | --- | --- |
-| Records | `crates/hy-core/src/posture.rs` | Two more `posture.observation` records, additive JSON (no migration): **camera-on time** (`kind: capture`) and **time with no usable calibration** (`kind: baseline_suspect`, `reason: no_calibration`: not calibrated, not usable, being taken, or invalid until the user recalibrates). Two additive fields: a drift episode holds **when its cue was actually asked** (`cue_after_s`, whole seconds after the record's start), and **no-reading spells under 5 s** are added up into one no-reading record (`spells`: how many; `duration_s`: their total; the reason that took most of the time) written once the spells span a minute (`BRIEF_EVERY`), and also when the camera stops, a segment ends, scoring starts or stops, or a long no-reading interval follows. Open intervals (camera on, no reading, suspect, no calibration) are written at least every 15 minutes (`SEGMENT_EVERY`) and start again, so a crash loses little and a day's records stay near their date. A record's time is when it ended (an episode ends when the calm began, 10 s before it is written; added-up spells end when the last one ended), so its start is that time less its length. |
+| Records | `crates/hy-core/src/posture.rs` | Two more `posture.observation` records, additive JSON (no migration): **camera-on time** (`kind: capture`) and **time with no usable calibration** (`kind: baseline_suspect`, `reason: no_calibration`: not calibrated, not usable, being taken, or invalid until the user recalibrates). Two additive fields: a drift episode holds **when its cue was actually asked** (`cue_after_s`, whole seconds after the record's start), and **no-reading spells under 5 s** are added up into one no-reading record (`spells`: how many; `duration_s`: their total; the reason that took most of the time) written once the spells span a minute (`BRIEF_EVERY`), and also when the camera stops, a segment ends, scoring starts or stops, or a long no-reading interval follows. Open intervals (camera on, no reading, suspect, no calibration) are written at least every 15 minutes (`SEGMENT_EVERY`) and start again, so a crash loses little. A record's time is when it ended (an episode ends when the calm began, 10 s before it is written; added-up spells end when the last one ended), so its start is that time less its length. |
 | Thresholds | `posture.rs` `Thresholds` | Every tunable D value in one struct; `Thresholds::PROVISIONAL` is what ships. The architecture's own numbers (floors, 60 s, 70% valid, the step rule, 2 minutes, 20 s after a restart) are not in it: changing them is a design change. |
-| A day's coverage | `posture::quality::coverage`, `Store::posture_day` | From that date's records alone: camera on = no reading + not scored + usable, with overlaps counted once. Short flickers count as no reading through the added-up records, so repeated 3 to 4 s dropouts can no longer show as near 100% usable. |
+| A day's coverage | `posture::quality::coverage_within`, `Store::posture_day` | From the records alone: every interval that meets the local day, clipped at its midnights (each kind cut at the same instant); camera on = no reading + not scored + usable, with overlaps counted once. Short flickers count as no reading through the added-up records, so repeated 3 to 4 s dropouts can no longer show as near 100% usable. |
 | Quality report | `posture::quality` | Matches the operator's labels with the records and counts, as raw numbers (below). `gate` adds a setup's sessions and checks the PRD V2 gate per setup. |
 | Synthetic sessions | `posture::desk` | The desk protocol played through the real camera machine and detector with made-up numbers: 5 setups x 2 sessions, plus a second set of seeds the sweep never tuned on. |
 | Sweep | `hy-sim posture --sweep` | The drift and viewpoint grids on both seed sets, one line per setting. |
@@ -154,7 +154,11 @@ V2-2 end threshold failing the check set.
   minute, their total within 10 s of the time the machine showed no reading, no planned
   minute usable in the session report, and under 50% usable in the day's coverage read
   from a store.
-- **`hy-core` store and schema:** a day's coverage from the store; capture and
+- **`hy-core` store and schema:** a day's coverage from the store; **records clipped at
+  local midnight** (camera on 23:50 to 00:05 with no reading 23:51 to 23:59 gives the
+  21st 10 minutes with 8 unread and the 22nd 5 usable minutes; records wholly inside a
+  day; camera, no reading and an episode crossing the next midnight split, the episode on
+  its cue's day; nothing lost or counted twice); capture and
   no-calibration records belong to their kinds; the cue time and spell count belong to
   their kinds. Camera and posture tests updated for the new records.
 - **Companion:** the `--hy-posture-report` command is routed and refuses bad arguments;
@@ -209,9 +213,11 @@ the values are frozen before the scoring sessions are run again.
    Both are additive JSON in the existing event log (migrations 0001 to 0006 unchanged),
    as are the two optional fields `cue_after_s` (drift episodes) and `spells` (added-up
    no-reading records). An older build ignores records it cannot read.
-4. **A day's coverage is attributed to the date a record ended.** Intervals are written
-   at least every 15 minutes, so at most 15 minutes of an interval that crosses midnight
-   land on the next day.
+4. **A day's coverage is the records' time within that local day.** Every record whose
+   interval meets the day (in the user's current zone) counts, clipped to the day's
+   boundaries, so an interval that crosses midnight is split between the two days and
+   camera-on time and its exclusions are always cut at the same instant. Episodes and cues
+   count on the day the cue was asked.
 5. **An episode belongs to a staged drift when it began no more than 10 s before the
    operator's mark and its cue was asked during the drift or up to 30 s after it.** The
    10 s allows for a mark that trails the movement. An episode already running before a

@@ -37,8 +37,8 @@
 //!   its cue was actually asked (`cue_after_s`), which a stretch without a reading can
 //!   push well past a minute. No-reading spells shorter than [`NO_READING_MIN`] are added
 //!   up and written together ([`BRIEF_EVERY`]), so coverage misses none. Open intervals
-//!   are written at least every [`SEGMENT_EVERY`], so a crash loses little and a day's
-//!   records stay close to its date. They stay on this PC.
+//!   are written at least every [`SEGMENT_EVERY`], so a crash loses little; a day's
+//!   coverage clips them at its midnights. They stay on this PC.
 //! - **Thresholds.** Every tunable D value is in [`Thresholds`]; the shipped ones are
 //!   [`Thresholds::PROVISIONAL`]. Slice V2-3's harness ([`desk`], [`quality`]) measures
 //!   them on synthetic desk sessions; they stay provisional until the owner's real desk
@@ -150,7 +150,7 @@ pub const NO_READING_MIN: Duration = Duration::from_secs(5);
 pub const BRIEF_EVERY: Duration = Duration::from_secs(60);
 /// Open intervals (camera on, no reading, suspect, no calibration) are written at least
 /// this often while capture runs, and start again (D, slice V2-3): a crash loses at most
-/// this much, and a day's coverage is attributed to within this of its date.
+/// this much.
 pub const SEGMENT_EVERY: Duration = Duration::from_secs(15 * 60);
 
 /// The tunable D values (architecture 4.5: "tuned in the desk test and frozen before
