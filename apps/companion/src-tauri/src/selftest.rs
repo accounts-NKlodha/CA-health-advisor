@@ -37,6 +37,9 @@
 //! the camera budget, the watchdog, a presentation hold, Off within two seconds, and a
 //! refused camera with the pet still running.
 //!
+//! With `HY_SELFTEST_CAMERA_SOAK_S` set it then runs the accelerated camera soak
+//! ([`camera_soak`], slice V2-5) on the same synthetic camera.
+//!
 //! A CI runner is not an office PC: focus checks that depend on an interactive desktop
 //! are recorded as informational, and real Windows acceptance of focus and DPI remains a
 //! UAT item (architecture 11; A6, A8).
@@ -61,6 +64,7 @@ use crate::coach::CoachRunner;
 use crate::shell::{Shell, current_monitors};
 
 mod camera;
+pub mod camera_soak;
 pub mod soak;
 
 /// Where the simulated clock starts: Monday 26 Oct 2026, 10:00 in Kolkata, inside the
@@ -87,6 +91,8 @@ struct Report {
     webview2: String,
     /// The accelerated soak, if it ran (slice V1-7).
     soak: Option<soak::SoakSummary>,
+    /// The accelerated camera soak, if it ran (slice V2-5).
+    camera_soak: Option<camera_soak::CameraSoakSummary>,
 }
 
 impl Report {
@@ -201,6 +207,18 @@ pub fn spawn(
                 report.soak = Some(summary);
             }
             camera::camera_end_to_end(&mut report, &shell);
+            if let Some(plan) = camera_soak::CameraSoakPlan::from_env() {
+                if report.checks.iter().all(|c| c.ok || !c.required) {
+                    let runner = coach.as_ref().map(|(r, _)| r);
+                    report.camera_soak = Some(camera_soak::run(&mut report, &shell, runner, plan));
+                } else {
+                    report.check(
+                        "camera_soak_started",
+                        false,
+                        "not run: a required self-test check failed first",
+                    );
+                }
+            }
             report.ok = report.checks.iter().all(|c| c.ok || !c.required);
             std::thread::sleep(idle_after);
             let code = i32::from(!report.ok);

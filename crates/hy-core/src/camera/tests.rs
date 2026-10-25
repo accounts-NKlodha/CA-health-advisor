@@ -259,6 +259,14 @@ fn off_releases_within_two_seconds_even_if_the_page_hangs() {
     assert_eq!(m.page_stopped(ms(10_350)), vec![Action::ClosePage]);
     assert_eq!(m.stats().last_stop_ms, Some(350));
     assert!(!m.stats().last_stop_forced);
+    assert_eq!(
+        (
+            m.stats().stops,
+            m.stats().forced_stops,
+            m.stats().max_stop_ms
+        ),
+        (1, 0, Some(350))
+    );
     assert!(!m.page_open());
     // The page never confirms: destroyed after CLOSE_AFTER, inside STOP_WITHIN.
     let mut m = capturing(s(0));
@@ -273,6 +281,8 @@ fn off_releases_within_two_seconds_even_if_the_page_hangs() {
     let st = m.stats();
     assert!(st.last_stop_forced);
     assert!(Duration::from_millis(st.last_stop_ms.unwrap()) < STOP_WITHIN);
+    assert_eq!((st.stops, st.forced_stops), (1, 1));
+    assert_eq!(st.max_stop_ms, st.last_stop_ms);
     // A confirmation after the forced close is ignored.
     assert!(m.page_stopped(s(12)).is_empty());
 }
@@ -313,6 +323,35 @@ fn holds_release_capture_and_capture_starts_again_after() {
     let mut m = Machine::new(CameraSettings::default());
     assert!(m.set_hold(s(0), Some(CameraHold::Meeting)).is_empty());
     assert_eq!(m.status(), Status::Off);
+}
+
+#[test]
+fn every_stop_is_counted_with_the_longest_kept_for_the_soak() {
+    // V2-5: the soak reads these counters to show every release kept to the deadline.
+    let mut m = capturing(s(0));
+    feed(&mut m, s(0), s(3), ms(333), person());
+    m.set_hold(s(3), Some(CameraHold::Presentation));
+    m.page_stopped(ms(3_600));
+    m.page_gone(ms(3_700));
+    m.set_hold(s(10), None);
+    m.page_started(s(10), started());
+    feed(&mut m, s(10), s(13), ms(333), person());
+    m.turn_off(s(13));
+    m.page_stopped(ms(13_250));
+    m.page_gone(ms(13_300));
+    let st = m.stats();
+    assert_eq!((st.stops, st.forced_stops), (2, 0));
+    assert_eq!(st.max_stop_ms, Some(600));
+    assert_eq!(st.last_stop_ms, Some(250));
+    // A stop that is never confirmed counts as forced and can be the longest.
+    m.turn_on(s(20)).unwrap();
+    m.page_started(s(20), started());
+    feed(&mut m, s(20), s(22), ms(333), person());
+    m.turn_off(s(22));
+    m.tick(s(23));
+    let st = m.stats();
+    assert_eq!((st.stops, st.forced_stops), (3, 1));
+    assert_eq!(st.max_stop_ms, Some(1000));
 }
 
 #[test]

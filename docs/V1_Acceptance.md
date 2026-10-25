@@ -116,3 +116,26 @@ These are required by the approved architecture and not dropped. Each is outside
 ## 8. Filing results
 
 For each item: the report file (or a short note for manual items), the build version, the Windows build, the date, and PASS or FAIL with what was seen. A failure is fixed in a slice with a test where one can be written, and the item is run again on the fixed build.
+
+## 9. V2 acceptance: the camera soak (slice V2-5, before V2 UAT)
+
+From architecture 11 ("2-hour camera soak and second webcam (V2-5) before V2 UAT"), A2 and
+A3, and the PRD V2 targets (combined working set at most 350 MB during check-ins, at most
+10% CPU averaged during capture, Off ends capture within two seconds, no posture data leaves
+the PC). The script, its checks and what CI already proves are in `docs/V2_Soak.md`. Run
+each item as the office user (no administrator) with HealthierYou installed. The script
+quits nothing by itself: it asks you to quit HealthierYou from the tray, then starts it with
+its camera log on.
+
+| Id | Test | How | Expected | Who |
+| --- | --- | --- | --- | --- |
+| CS1 | 2-hour camera soak, built-in webcam, Windows 11 (A2) | `scripts/windows/Test-CameraSoak.ps1 -Webcam built-in -Report hy-camera-soak-w11.txt` on a Windows 11 office PC. Turn the posture check on when asked and work as usual, sitting in view. Lock the PC at least once (lunch, or Windows+L for a minute) and, if possible, have one call or slide show. At the end turn the camera off when asked | Overall PASS (exit 0). The same process throughout; at least 2 h of camera time; never stopped as "not responding"; frame rate as set (median at least 0.8 of it, 5th percentile at least 0.5, never over 3 a second); at most 1 watchdog stall per hour; every release (holds and the final Off) confirmed within 2 s, none forced; every hold closed the camera page; working set median at most 350 MB and CPU at most 10% on average while capturing; no growth trend in working set, private bytes, handles or threads; no TCP connection to an internet address; the final Off within 2 s and the webcam light seen going out. INCONCLUSIVE (exit 2) names the missing evidence (too little camera time, no hold, no release, no log): fix that and run again | Owner |
+| CS2 | 2-hour camera soak on the Windows 10 PC (A2, A3) | As CS1 on the 4 GB Windows 10 office PC, `-Report hy-camera-soak-w10.txt`. If its webcam is not detected (the batch 1 finding), record that and run CS3 there instead | As CS1. The memory and CPU budgets are the ones most at risk on this PC: record the numbers even if they fail | Owner |
+| CS3 | 2-hour camera soak with a USB (second) webcam (A3) | As CS1 with a USB webcam as the one in use, `-Webcam usb -Report hy-camera-soak-usb.txt`, on at least one of the two PCs. The V2-1 session phase (`Test-HealthierYou-Camera.ps1 -Phase Session`) covers unplugging it | As CS1 | Owner |
+| CS4 | The pilot PCs' webcams (A3) | On every V2 pilot PC, at least the first 15 minutes of CS1 (`-Hours 0.25`): frames read, a lock released and resumed, Off within 2 s | Camera on, frame rate as set and the releases PASS on each PC (the 2-hour checks are CS1 to CS3) | Owner |
+
+**What CI proves for these, and what only the physical run proves.**
+
+| Area | CI (every PR, GitHub runners) | Only the office run |
+| --- | --- | --- |
+| Camera soak | `Test-CameraSoak.ps1 -CiSelfTest -Minutes 10` on the Windows job. The installed app, after its self-test, keeps the camera capturing on Chromium's synthetic camera for 10 minutes. It releases it about every 30 s, in turn by lock, presentation and sleep (through the coaching engine), meeting and Off. The app checks each release is confirmed within 2 s with the page closed, capture reads again afterwards, the rate the governor set is delivered, and no stall or worker restart happens. The script samples the process tree for growth trends and internet connections and reads the app's camera log with the office run's analysis. The analysis self-test runs under PowerShell 7 and Windows PowerShell 5.1 | A real webcam and driver (built-in and USB) on Windows 10 and 11; two real hours with a person in view (real inference load); real lock, sleep, meetings and slide shows; the office PC's CPU and memory against the PRD budgets; the webcam light going out |

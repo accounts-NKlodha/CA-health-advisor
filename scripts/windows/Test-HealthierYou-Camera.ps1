@@ -180,6 +180,7 @@ if ($Phase -eq 'Session') {
   Do-Step 'Put the camera back, choose Calibrate on the camera page, then quit HealthierYou from the tray and start it again at the same desk. Wait 1 minute.'
   Ask 'restart-accepted' 'Does the camera page show "Calibrated" again (not "Recalibrate")?'
 } else {
+  Write-Host 'For the V2-5 soak use Test-CameraSoak.ps1 (it adds the app''s camera log, holds, releases and verdicts); this phase is the V2-1 quick look.' -ForegroundColor Yellow
   Do-Step 'Turn the posture check ON (pet menu > Posture check). Then work normally; keep this window open.'
   $res = Measure-For 'soak' ($Minutes * 60)
   Add-Line "Soak ($Minutes min): working set peak $($res.ws_mb) MB, mean CPU $($res.cpu_pct)% of the PC"

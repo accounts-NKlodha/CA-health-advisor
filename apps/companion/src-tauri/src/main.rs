@@ -36,6 +36,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod camera_log;
 mod coach;
 mod commands;
 mod selftest;
@@ -195,6 +196,8 @@ fn setup(
         shell.post(move |_| s.camera_resume());
     }
     shell::start_camera_clock(&shell);
+    // The camera soak's log (V2-5), only when its script asked for it.
+    camera_log::start_from_env(&shell);
 
     // A new store opens the setup wizard (W1). The self-test opens it itself.
     if selftest.is_none() && shell.setup_needed() {
