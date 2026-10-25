@@ -64,6 +64,7 @@ const COMMANDS: &[&str] = &[
     "camera_withdraw",
     "camera_report",
     "camera_frame",
+    "camera_calibrate",
 ];
 
 /// The update public keys this build trusts (slice V1-6), passed to the program as

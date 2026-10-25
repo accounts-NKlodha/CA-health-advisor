@@ -11,6 +11,10 @@
 //! Locks: the camera lock is a leaf. It may be taken while `inner` is held (the pet's
 //! view reads the status), so nothing here takes `inner` or the store while holding it:
 //! the machine's actions are collected under the lock and carried out after.
+//!
+//! Slice V2-2 adds the posture detector's part: "Calibrate" on the page, the cue (asked
+//! of the coaching engine on its thread, its answer posted back), the local
+//! `posture.observation` records, and the one request to recalibrate.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,12 +24,15 @@ use hy_core::camera::{
     Action, CameraHold, CameraNotice, CameraSettings, FrameReport, Machine, SETTINGS_KEY, Started,
     Status, Unavailable,
 };
+use hy_core::coach::Input;
+use hy_core::posture::{CueOutcome, Observation, PostureKind, PostureState, cue_outcome_of};
+use hy_core::schema::{MeasurementStatus, NewEvent};
 use hy_pet::shell::{Bubble, Effect};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, WebviewWindow};
 
 use super::{CAMERA, SCREENS, Shell, lock};
-use crate::view::{CameraMenu, CameraPage};
+use crate::view::{CameraMenu, CameraPage, PostureView};
 use crate::windows;
 
 /// How long a camera notice stays beside the pet.
@@ -121,13 +128,20 @@ pub struct CameraState {
     probe: Option<(bool, String)>,
     /// The tray's camera entry was last built for this choice.
     tray_on: Option<bool>,
+    /// Self-test only: added to the clock, so posture traces run in seconds.
+    skew: Duration,
+    /// Self-test only: the cue outcomes heard and the posture records written.
+    cue_outcomes: Vec<CueOutcome>,
+    records: Vec<Observation>,
 }
 
 impl CameraState {
     /// The state for the stored settings.
     pub fn new(settings: CameraSettings, selftest: bool) -> Self {
+        let mut machine = Machine::new(settings);
+        machine.set_wall_origin(Utc::now());
         Self {
-            machine: Machine::new(settings),
+            machine,
             origin: Instant::now(),
             guarded: false,
             show_next: false,
@@ -136,11 +150,14 @@ impl CameraState {
             path: None,
             probe: None,
             tray_on: None,
+            skew: Duration::ZERO,
+            cue_outcomes: Vec::new(),
+            records: Vec::new(),
         }
     }
 
     fn now(&self) -> Duration {
-        self.origin.elapsed()
+        self.origin.elapsed() + self.skew
     }
 }
 
@@ -176,6 +193,7 @@ impl Shell {
             capture: m.wants_capture() && c.guarded,
             fps: m.fps(),
             stats: m.stats(),
+            posture: posture_view(m),
             selftest: c.selftest,
             a11y,
         }
@@ -276,6 +294,69 @@ impl Shell {
         };
         self.camera_apply(actions);
         self.camera_page()
+    }
+
+    /// "Calibrate" (`start`) or "Cancel" (slice V2-2).
+    ///
+    /// # Errors
+    /// Calibration needs the camera on and reading.
+    pub fn camera_calibrate(self: &Arc<Self>, start: bool) -> Result<CameraPage, String> {
+        let actions = {
+            let mut c = lock(&self.camera);
+            let now = c.now();
+            if start {
+                c.machine.calibrate(now).map_err(|e| e.to_string())?
+            } else {
+                c.machine.cancel_calibration()
+            }
+        };
+        self.camera_apply(actions);
+        Ok(self.camera_page())
+    }
+
+    /// The coaching engine's answer to the posture cue.
+    fn camera_cue_outcome(&self, outcome: CueOutcome) {
+        let mut c = lock(&self.camera);
+        c.machine.cue_outcome(outcome);
+        if c.selftest {
+            c.cue_outcomes.push(outcome);
+        }
+    }
+
+    /// A drift episode started: ask the engine (on its thread) for the cue.
+    fn camera_ask_cue(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        let queued = self.runner().is_some_and(|r| {
+            r.submit(move |link| {
+                let outcome = match link.input(Input::PostureCue) {
+                    Ok(out) => cue_outcome_of(&out.outcome),
+                    Err(_) => CueOutcome::NoAnswer,
+                };
+                if let Some(s) = weak.upgrade() {
+                    s.post(move |s| s.camera_cue_outcome(outcome));
+                }
+            })
+        });
+        if !queued {
+            self.camera_cue_outcome(CueOutcome::NoAnswer);
+        }
+    }
+
+    /// Write a posture observation (local only; never shared).
+    fn camera_record(&self, o: Observation) {
+        let status = match o.kind {
+            PostureKind::DriftEpisode => MeasurementStatus::Estimated,
+            PostureKind::NoReading | PostureKind::BaselineSuspect => MeasurementStatus::NoReading,
+        };
+        let event = NewEvent::inferred(o.payload(), status).at(Utc::now());
+        if let Err(e) = lock(&self.store).append_event(event) {
+            eprintln!("HealthierYou: could not record a posture observation: {e}");
+            return;
+        }
+        let mut c = lock(&self.camera);
+        if c.selftest {
+            c.records.push(o);
+        }
     }
 
     // ------------------------------------------------------------ the page
@@ -460,6 +541,8 @@ impl Shell {
                 }
                 Action::Notify(n) => self.camera_notice(n),
                 Action::Render => render = true,
+                Action::Cue => self.camera_ask_cue(),
+                Action::Record(o) => self.camera_record(o),
             }
         }
         if render {
@@ -536,7 +619,7 @@ impl Shell {
         let visible = self
             .camera_window()
             .is_some_and(|w| w.is_visible().unwrap_or(false));
-        if visible && notice != CameraNotice::Off {
+        if visible && !matches!(notice, CameraNotice::Off | CameraNotice::Recalibrate) {
             return;
         }
         let (title, line) = notice_text(notice);
@@ -593,7 +676,33 @@ impl Shell {
             path: c.path,
             probe: c.probe.clone(),
             guarded: c.guarded,
+            cue_outcomes: c.cue_outcomes.clone(),
+            records: c.records.clone(),
+            posture: c.machine.posture_state(),
         }
+    }
+
+    /// Self-test only: feed one synthetic frame report `step` after the last (the clock is
+    /// moved on by `step`), as the page would. Used with the worker frozen, so only these
+    /// frames arrive; nothing comes from a camera image.
+    ///
+    /// # Errors
+    /// A report that breaks its rules.
+    pub fn camera_test_frame(
+        self: &Arc<Self>,
+        report: FrameReport,
+        step: Duration,
+    ) -> Result<(), String> {
+        {
+            let mut c = lock(&self.camera);
+            if !c.selftest {
+                return Err("self-test only".into());
+            }
+            c.skew += step;
+        }
+        self.camera_frame(report)?;
+        self.camera_tick();
+        Ok(())
     }
 }
 
@@ -606,6 +715,28 @@ pub struct CameraFacts {
     pub probe: Option<(bool, String)>,
     /// The permission guard is installed on the camera window.
     pub guarded: bool,
+    /// The posture cue outcomes heard from the engine.
+    pub cue_outcomes: Vec<CueOutcome>,
+    /// The posture observations written.
+    pub records: Vec<Observation>,
+    /// The posture state.
+    pub posture: PostureState,
+}
+
+fn posture_view(m: &Machine) -> PostureView {
+    let state = m.posture_state();
+    PostureView {
+        state,
+        words: state.words(),
+        issue: match state {
+            PostureState::NotUsable(i) => Some(i.words()),
+            _ => None,
+        },
+        calibrated_at: m.settings().calibration.map(|c| c.at),
+        can_calibrate: matches!(m.status(), Status::Reading | Status::NoReading(_))
+            && !matches!(state, PostureState::Calibrating { .. }),
+        stats: m.posture_stats(),
+    }
 }
 
 /// Start the camera's clock: a thread that posts a tick to the main thread every
@@ -627,6 +758,10 @@ pub fn start_camera_clock(shell: &Arc<Shell>) {
 pub const fn notice_text(n: CameraNotice) -> (&'static str, &'static str) {
     match n {
         CameraNotice::Off => ("Camera off. Capture stopped.", ""),
+        CameraNotice::Recalibrate => (
+            "Camera position changed?",
+            "The posture check no longer matches its calibration, so posture cues are paused. Choose Posture check, then Calibrate, to resume them.",
+        ),
         CameraNotice::StoppedAfterStalls => (
             "Posture check stopped",
             "The camera page stopped responding twice, so the camera was turned off. Everything else keeps working. You can turn it on again from the pet menu.",
@@ -664,6 +799,7 @@ mod tests {
     fn notices_fit_a_bubble() {
         let all = [
             CameraNotice::Off,
+            CameraNotice::Recalibrate,
             CameraNotice::StoppedAfterStalls,
             CameraNotice::Unavailable(Unavailable::Denied),
             CameraNotice::Unavailable(Unavailable::Busy),

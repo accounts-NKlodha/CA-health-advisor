@@ -34,6 +34,8 @@
 //! Slice V2-1 adds [`camera`]: the posture check's camera session (consent, holds,
 //! conflicts, the worker watchdog, release on off, and the frame-rate budget). Frames and
 //! landmarks never reach it; the camera page sends one derived report per frame.
+//! Slice V2-2 adds [`posture`]: calibration quality, scale floors, sustained drift, the
+//! viewpoint check and the cue, on the few numbers each usable frame gives.
 
 pub mod backup;
 pub mod camera;
@@ -44,6 +46,7 @@ pub mod ids;
 #[cfg(feature = "link")]
 pub mod link;
 pub mod migrations;
+pub mod posture;
 pub mod prefs;
 pub mod protocol;
 pub mod review;

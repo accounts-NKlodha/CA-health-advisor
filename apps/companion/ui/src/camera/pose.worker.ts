@@ -1,7 +1,8 @@
 // The pose worker (architecture 4.5): MediaPipe Pose Landmarker lite on the CPU, in video
 // mode, at the frame rate the shell sets (3 a second, 1 under load). The landmarks stay in
 // this worker and are dropped after each frame; only the derived result (valid or not,
-// why not, inference time, mean visibility) goes to the page. The model and the WebAssembly
+// why not, inference time, mean visibility, and a valid frame's few posture numbers) goes
+// to the page. The model and the WebAssembly
 // runtime are bundled with the app and loaded from it; nothing is fetched from the network,
 // and the page's content policy (which this inline worker inherits) blocks any attempt.
 //
@@ -63,7 +64,9 @@ function detect(source: VideoFrame | ImageBitmap): void {
   const t0 = performance.now();
   const result = landmarker.detectForVideo(source, lastTs);
   const ms = performance.now() - t0;
-  const report = judgeFrame(result.landmarks, ms);
+  const w = 'displayWidth' in source ? source.displayWidth : source.width;
+  const h = 'displayHeight' in source ? source.displayHeight : source.height;
+  const report = judgeFrame(result.landmarks, ms, h > 0 ? w / h : 4 / 3);
   // The landmarks go no further than this function.
   post({ type: 'result', report });
 }

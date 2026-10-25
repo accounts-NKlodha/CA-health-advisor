@@ -600,6 +600,15 @@ pub fn camera_withdraw(shell: ShellState<'_>) -> CameraPage {
     shell.camera_withdraw()
 }
 
+/// "Calibrate" (`start`) or "Cancel" on the camera page (slice V2-2).
+///
+/// # Errors
+/// Calibration needs the camera on and reading.
+#[tauri::command]
+pub fn camera_calibrate(shell: ShellState<'_>, start: bool) -> Result<CameraPage, String> {
+    shell.camera_calibrate(start)
+}
+
 /// The camera page's report (started, error, stopped).
 ///
 /// # Errors

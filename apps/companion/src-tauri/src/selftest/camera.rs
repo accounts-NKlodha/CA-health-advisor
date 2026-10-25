@@ -15,11 +15,20 @@
 //! restarts it; Off releases the camera within two seconds and removes the badge; and a
 //! camera refused by the system gives "blocked" while the pet keeps running, without the
 //! refusal being remembered.
+//!
+//! Slice V2-2 adds: a calibration on the synthetic camera (no one in view) is "not
+//! usable" with its reason; then, with the worker frozen, synthetic feature reports (made
+//! up numbers, never an image) run a calibration, a sustained drift that asks the engine
+//! for the cue and records one episode with its outcome, and a moved camera that
+//! suspends cues.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hy_core::camera::{CameraHold, FrameIssue, NoReading, Status, Unavailable};
+use hy_core::camera::{CameraHold, FrameIssue, FrameReport, NoReading, Status, Unavailable};
+use hy_core::posture::{
+    CalibrationIssue, Features, HeadRef, PostureKind, PostureReason, PostureState,
+};
 use tauri::Manager;
 
 use super::{Report, on_main, pet_visible, wait_until};
@@ -267,6 +276,8 @@ pub(super) fn camera_end_to_end(r: &mut Report, shell: &Arc<Shell>) {
         ),
     );
 
+    posture(shell, r);
+
     // 9. Off: capture stops within two seconds and the badge goes at once.
     let _ = on_main(shell, |s| s.camera_off());
     let off = wait_until(Duration::from_secs(5), || {
@@ -329,5 +340,122 @@ pub(super) fn camera_end_to_end(r: &mut Report, shell: &Arc<Shell>) {
         "camera_off_at_end",
         off,
         format!("status {:?}", status(shell)),
+    );
+}
+
+/// A synthetic frame report: a person sitting as usual, changed by `change`.
+fn synthetic(t: f64, change: impl Fn(Features) -> Features) -> FrameReport {
+    let w = |amp: f64, phase: f64| amp * (t * 1.37 + phase).sin();
+    let f = Features {
+        head: HeadRef::Ears,
+        gap: 0.55 + w(0.008, 0.0),
+        width: 0.35 * (1.0 + w(0.006, 1.0)),
+        tilt: w(0.005, 2.0),
+        roll: w(0.8, 3.0),
+        mid_x: 0.5 + w(0.004, 4.0),
+        mid_y: 0.75 + w(0.004, 5.0),
+        span: 0.45 * (1.0 + w(0.01, 6.0)),
+        turn: w(0.02, 7.0),
+    };
+    FrameReport {
+        valid: true,
+        issue: None,
+        inference_ms: 30.0,
+        visibility: 0.9,
+        features: Some(change(f)),
+    }
+}
+
+/// Feed `secs` of synthetic frames at 3 a second (the clock moved on with each).
+fn feed(shell: &Arc<Shell>, t: &mut f64, secs: u32, change: fn(Features) -> Features) -> bool {
+    let step = Duration::from_millis(333);
+    for _ in 0..secs * 3 {
+        let report = synthetic(*t, change);
+        if on_main(shell, move |s| s.camera_test_frame(report, step)) != Some(Ok(())) {
+            return false;
+        }
+        *t += 0.333;
+    }
+    true
+}
+
+fn posture_state(shell: &Arc<Shell>) -> Option<PostureState> {
+    on_main(shell, |s| s.camera_test_facts().posture)
+}
+
+/// Slice V2-2: calibration, drift, the cue and the viewpoint check.
+fn posture(shell: &Arc<Shell>, r: &mut Report) {
+    // On the real page and the synthetic camera (no one in view): not usable, with the
+    // reason, after at most 30 s at the full frame rate.
+    let started = on_main(shell, |s| s.camera_calibrate(true)).is_some_and(|p| p.is_ok());
+    let full_rate = page(shell).is_some_and(|p| p.fps == hy_core::camera::FPS_HIGH);
+    let refused = wait_until(Duration::from_secs(40), || {
+        posture_state(shell) == Some(PostureState::NotUsable(CalibrationIssue::OutOfView))
+    });
+    r.check(
+        "posture_calibration_out_of_view",
+        started && full_rate && refused,
+        format!(
+            "calibration started {started}; full rate {full_rate}; refused as out of view {refused}; state {:?}",
+            posture_state(shell)
+        ),
+    );
+
+    // Synthetic numbers with the worker frozen (only these frames arrive).
+    let _ = on_main(shell, |s| s.camera_test_command(PageCommand::Freeze));
+    std::thread::sleep(Duration::from_millis(500));
+    let mut t = 0.0;
+    let _ = on_main(shell, |s| s.camera_calibrate(true));
+    let fed = feed(shell, &mut t, 20, |f| f);
+    let ready = posture_state(shell) == Some(PostureState::Ready);
+    let stored = page(shell).is_some_and(|p| p.posture.calibrated_at.is_some());
+    r.check(
+        "posture_calibration_usable",
+        fed && ready && stored,
+        format!("fed {fed}; ready {ready}; stored {stored}"),
+    );
+
+    // A sustained drift: one cue asked of the engine, one episode recorded with its
+    // outcome when it ends.
+    let fed =
+        feed(shell, &mut t, 85, |f| Features { gap: 0.40, ..f }) && feed(shell, &mut t, 20, |f| f);
+    let answered = wait_until(Duration::from_secs(10), || {
+        on_main(shell, |s| !s.camera_test_facts().cue_outcomes.is_empty()) == Some(true)
+    });
+    let facts = on_main(shell, |s| s.camera_test_facts());
+    let outcomes = facts
+        .as_ref()
+        .map(|f| f.cue_outcomes.clone())
+        .unwrap_or_default();
+    let episodes: Vec<_> = facts
+        .as_ref()
+        .map(|f| {
+            f.records
+                .iter()
+                .filter(|o| o.kind == PostureKind::DriftEpisode)
+                .copied()
+                .collect()
+        })
+        .unwrap_or_default();
+    r.check(
+        "posture_drift_cues_once",
+        fed && answered
+            && outcomes.len() == 1
+            && episodes.len() == 1
+            && episodes[0].cue == outcomes.first().copied(),
+        format!("fed {fed}; engine answers {outcomes:?}; episodes recorded {episodes:?}"),
+    );
+
+    // The camera pushed back: cues suspended within 20 s.
+    let fed = feed(shell, &mut t, 25, |f| Features {
+        mid_y: f.mid_y - 0.18,
+        width: f.width * 0.75,
+        ..f
+    });
+    let state = posture_state(shell);
+    r.check(
+        "posture_moved_camera_suspends",
+        fed && state == Some(PostureState::Suspect(PostureReason::CameraMoved)),
+        format!("fed {fed}; state {state:?}"),
     );
 }

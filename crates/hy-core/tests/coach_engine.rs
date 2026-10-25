@@ -4801,3 +4801,121 @@ fn the_view_reports_each_hold_for_the_camera() {
     let back: CoachView = serde_json::from_value(v).unwrap();
     assert_eq!(back.holds, HoldSources::default());
 }
+
+// ------------------------------------------------------- posture cue (V2-2)
+
+fn cue_harness(h: u32, m: u32) -> H {
+    H::at(
+        ist(20, h, m),
+        cats(false, false, false),
+        WaterSnapshot::default(),
+    )
+}
+
+fn cue_shown(v: &CoachView) -> bool {
+    matches!(v.bubble, Some(Bubble::PostureCue))
+}
+
+#[test]
+fn posture_cue_shows_once_then_waits_out_its_cooldown() {
+    use hy_core::coach::engine::{CUE_COOLDOWN, POSTURE_CUE_COOLDOWN};
+    let mut h = cue_harness(11, 0);
+    h.wait(mins(1));
+    assert_eq!(h.input(Input::PostureCue).outcome, InputOutcome::Applied);
+    assert!(cue_shown(h.view()));
+    // OK closes it.
+    assert_eq!(h.input(Input::CloseBubble).outcome, InputOutcome::Applied);
+    assert!(h.view().bubble.is_none());
+    h.wait(mins(10));
+    assert_eq!(
+        h.input(Input::PostureCue).outcome,
+        InputOutcome::Ignored(CUE_COOLDOWN)
+    );
+    assert!(h.view().bubble.is_none(), "suppressed, never queued");
+    h.wait(POSTURE_CUE_COOLDOWN - mins(10));
+    assert_eq!(h.input(Input::PostureCue).outcome, InputOutcome::Applied);
+    // Left unanswered it closes quietly after ten minutes.
+    h.wait_until(mins(11), |v| !cue_shown(v));
+    assert!(h.view().bubble.is_none());
+}
+
+#[test]
+fn posture_cue_is_dropped_in_focus_and_suppressed_by_holds_and_other_cards() {
+    use hy_core::coach::engine::{CUE_BUSY, CUE_FOCUS, CUE_HELD};
+    let mut h = cue_harness(11, 0);
+    h.input(Input::StartFocus {
+        minutes: 30,
+        replace_pomodoro: false,
+    });
+    assert_eq!(
+        h.input(Input::PostureCue).outcome,
+        InputOutcome::Ignored(CUE_FOCUS)
+    );
+    // Dropped, not queued: nothing appears when focus ends.
+    h.input(Input::EndFocus);
+    h.wait(mins(10));
+    assert!(!cue_shown(h.view()));
+
+    let mut h = cue_harness(11, 0);
+    h.input(Input::SetMeeting(true));
+    assert_eq!(
+        h.input(Input::PostureCue).outcome,
+        InputOutcome::Ignored(CUE_HELD)
+    );
+    let mut h = cue_harness(19, 0);
+    assert_eq!(
+        h.input(Input::PostureCue).outcome,
+        InputOutcome::Ignored(CUE_HELD),
+        "off hours"
+    );
+    let mut h = cue_harness(11, 0);
+    h.input(Input::StartPomodoro {
+        preset: PomodoroPreset::Classic,
+        replace_focus: false,
+        resume_coaching: false,
+    });
+    assert_eq!(
+        h.input(Input::PostureCue).outcome,
+        InputOutcome::Ignored(CUE_BUSY)
+    );
+    // A reminder on show keeps the bubble.
+    let mut h = H::at(
+        ist(20, 9, 40),
+        cats(false, true, false),
+        WaterSnapshot::default(),
+    );
+    h.wait_until(mins(30), |v| v.bubble.is_some());
+    assert_eq!(
+        h.input(Input::PostureCue).outcome,
+        InputOutcome::Ignored(CUE_BUSY)
+    );
+}
+
+#[test]
+fn a_posture_cue_on_show_is_withdrawn_by_a_hold() {
+    let mut h = cue_harness(11, 0);
+    h.wait(mins(1));
+    h.input(Input::PostureCue);
+    assert!(cue_shown(h.view()));
+    h.input(Input::SetMeeting(true));
+    assert!(!cue_shown(h.view()));
+    h.input(Input::SetMeeting(false));
+    h.wait(mins(30));
+    assert!(!cue_shown(h.view()), "never replayed");
+}
+
+#[test]
+fn a_posture_cue_on_show_when_work_ends_is_withdrawn() {
+    // Work ends at 18:30; the cue opens at 18:29.
+    let mut h = cue_harness(18, 28);
+    h.wait(mins(1));
+    assert_eq!(h.local(), hm(18, 29));
+    assert_eq!(h.input(Input::PostureCue).outcome, InputOutcome::Applied);
+    assert!(cue_shown(h.view()));
+    // At the end of work hours it is withdrawn, not left for its ten minutes.
+    h.wait_until(mins(2), |v| !cue_shown(v));
+    assert!(h.local() <= hm(18, 30), "withdrawn at {}", h.local());
+    assert!(h.view().bubble.is_none());
+    h.wait(mins(30));
+    assert!(h.view().bubble.is_none(), "never replayed");
+}

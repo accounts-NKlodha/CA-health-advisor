@@ -28,6 +28,11 @@
 //! - **Stop.** Stop asks the page to end the track and close its worker, then destroys
 //!   the page as soon as it confirms, or after [`CLOSE_AFTER`] without confirmation, so
 //!   capture always ends within [`STOP_WITHIN`] (PRD: two seconds).
+//! - **Posture (slice V2-2).** The machine owns the [`crate::posture::Detector`]: it
+//!   feeds it each frame's features, the stream's starts and ends and the reading's
+//!   changes, and carries out its actions (the cue, records, saving the calibration, the
+//!   one request to recalibrate). The page runs at [`FPS_HIGH`] while a calibration
+//!   collects frames.
 //! - **Budget.** The page runs pose lite at [`FPS_HIGH`] frames a second and drops to
 //!   [`FPS_LOW`] when inference would use more than its share of the PC
 //!   ([`FpsGovernor`]); camera mode as a whole must stay within 10% CPU and 350 MB
@@ -40,6 +45,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::posture::{
+    Calibration, CueOutcome, Detector, Features, Observation, PostureAction, PostureReason,
+    PostureState, PostureStats,
+};
 
 /// Settings key under which [`CameraSettings`] is stored.
 pub const SETTINGS_KEY: &str = "camera";
@@ -93,7 +102,7 @@ pub struct Consent {
 }
 
 /// What is stored about the camera: numbers and choices only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CameraSettings {
     /// The user's consent, if given.
@@ -101,6 +110,9 @@ pub struct CameraSettings {
     /// The user wants the posture check on (it starts again after a restart). Off by
     /// default.
     pub on: bool,
+    /// The posture calibration (slice V2-2): numbers only, never an image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration: Option<Calibration>,
 }
 
 impl CameraSettings {
@@ -292,6 +304,9 @@ pub struct FrameReport {
     pub inference_ms: f64,
     /// Mean visibility of the required landmarks (0 with no person).
     pub visibility: f64,
+    /// The posture features of a valid frame (slice V2-2); landmarks stay in the worker.
+    #[serde(default)]
+    pub features: Option<Features>,
 }
 
 impl FrameReport {
@@ -310,6 +325,12 @@ impl FrameReport {
             return Err(Error::invalid(
                 "a frame is either valid or has an issue, not both",
             ));
+        }
+        if let Some(f) = &self.features {
+            if !self.valid {
+                return Err(Error::invalid("only a valid frame has posture features"));
+            }
+            f.validate()?;
         }
         Ok(())
     }
@@ -359,6 +380,11 @@ pub enum Action {
     Notify(CameraNotice),
     /// The status changed: redraw the pet's badge, the tray and open pages.
     Render,
+    /// A posture drift episode started: ask the coaching engine for the cue, then report
+    /// what became of it ([`Machine::cue_outcome`]).
+    Cue,
+    /// Record this posture observation (local only).
+    Record(Observation),
 }
 
 /// A one-off message beside the pet.
@@ -371,6 +397,8 @@ pub enum CameraNotice {
     StoppedAfterStalls,
     /// The camera was turned off ("Camera off. Capture stopped.").
     Off,
+    /// The posture baseline no longer holds (the camera moved): recalibrate.
+    Recalibrate,
 }
 
 /// The frame rate decision (architecture 4.5: drop to 1 fps if over budget).
@@ -510,6 +538,11 @@ pub struct Machine {
     governor: FpsGovernor,
     stats: CameraStats,
     status: Status,
+    detector: Detector,
+    /// The latest time the machine was given.
+    now: Duration,
+    /// The wall-clock time at offset zero (for the calibration's date).
+    wall_origin: DateTime<Utc>,
 }
 
 impl Machine {
@@ -534,7 +567,65 @@ impl Machine {
                 ..CameraStats::default()
             },
             status: Status::Off,
+            detector: Detector::new(settings.calibration),
+            now: Duration::ZERO,
+            wall_origin: DateTime::UNIX_EPOCH,
         }
+    }
+
+    /// Set the wall-clock time at offset zero (the companion's start).
+    pub const fn set_wall_origin(&mut self, origin: DateTime<Utc>) {
+        self.wall_origin = origin;
+    }
+
+    fn wall(&self, now: Duration) -> DateTime<Utc> {
+        self.wall_origin + chrono::TimeDelta::from_std(now).unwrap_or_default()
+    }
+
+    /// The posture calibration's and baseline's state.
+    #[must_use]
+    pub fn posture_state(&self) -> PostureState {
+        self.detector.state()
+    }
+
+    /// Posture counts so far.
+    #[must_use]
+    pub const fn posture_stats(&self) -> PostureStats {
+        self.detector.stats()
+    }
+
+    /// "Calibrate": collect a calibration from the frames now coming in.
+    ///
+    /// # Errors
+    /// [`Error::Invalid`] unless the camera is capturing.
+    pub fn calibrate(&mut self, now: Duration) -> Result<Vec<Action>> {
+        self.now = self.now.max(now);
+        if !matches!(self.phase, Phase::Capturing { .. }) || self.stopping.is_some() {
+            return Err(Error::invalid(
+                "calibration needs the camera on and reading",
+            ));
+        }
+        let before = self.fps();
+        let fx = self.detector.start_calibration(now);
+        let mut out = Vec::new();
+        self.posture(fx, &mut out);
+        self.fps_changed(before, &mut out);
+        Ok(out)
+    }
+
+    /// "Cancel" on a calibration in progress.
+    pub fn cancel_calibration(&mut self) -> Vec<Action> {
+        let before = self.fps();
+        let fx = self.detector.cancel_calibration();
+        let mut out = Vec::new();
+        self.posture(fx, &mut out);
+        self.fps_changed(before, &mut out);
+        out
+    }
+
+    /// What became of the cue asked for by [`Action::Cue`].
+    pub fn cue_outcome(&mut self, outcome: CueOutcome) {
+        self.detector.cue_outcome(outcome);
     }
 
     /// The stored settings as they stand.
@@ -555,10 +646,14 @@ impl Machine {
         self.stats
     }
 
-    /// The frame rate the page should run.
+    /// The frame rate the page should run (the full rate while calibrating).
     #[must_use]
     pub const fn fps(&self) -> u8 {
-        self.governor.fps()
+        if self.detector.calibrating() {
+            FPS_HIGH
+        } else {
+            self.governor.fps()
+        }
     }
 
     /// Whether the page should be capturing now (open and not asked to stop).
@@ -581,6 +676,7 @@ impl Machine {
     /// The app started: if the user left the posture check on (with a current consent),
     /// start it, unless a hold applies (the last one given to [`Machine::set_hold`]).
     pub fn resume(&mut self, now: Duration) -> Vec<Action> {
+        self.now = self.now.max(now);
         if self.settings.on && self.settings.consent_current() {
             let mut out = Vec::new();
             self.start(now, &mut out);
@@ -610,6 +706,7 @@ impl Machine {
     /// # Errors
     /// [`Error::Invalid`] if no current consent is recorded.
     pub fn turn_on(&mut self, now: Duration) -> Result<Vec<Action>> {
+        self.now = self.now.max(now);
         if !self.settings.consent_current() {
             return Err(Error::invalid("the camera needs your consent first"));
         }
@@ -627,6 +724,7 @@ impl Machine {
 
     /// "Turn camera off" (from the camera page, the pet menu, the tray or settings).
     pub fn turn_off(&mut self, now: Duration) -> Vec<Action> {
+        self.now = self.now.max(now);
         let mut out = Vec::new();
         if self.settings.on {
             self.settings.on = false;
@@ -644,6 +742,7 @@ impl Machine {
 
     /// Withdraw consent: the camera goes off and asks again next time.
     pub fn withdraw_consent(&mut self, now: Duration) -> Vec<Action> {
+        self.now = self.now.max(now);
         let mut out = self.turn_off(now);
         if self.settings.consent.take().is_some() && !out.contains(&Action::Persist) {
             out.push(Action::Persist);
@@ -653,6 +752,7 @@ impl Machine {
 
     /// "Try again" after the camera was denied, failed or stopped.
     pub fn try_again(&mut self, now: Duration) -> Vec<Action> {
+        self.now = self.now.max(now);
         let mut out = Vec::new();
         if self.settings.on && matches!(self.phase, Phase::Unavailable { .. }) {
             self.start(now, &mut out);
@@ -664,6 +764,7 @@ impl Machine {
 
     /// The engine's holds changed.
     pub fn set_hold(&mut self, now: Duration, hold: Option<CameraHold>) -> Vec<Action> {
+        self.now = self.now.max(now);
         let mut out = Vec::new();
         if self.hold == hold {
             return out;
@@ -694,6 +795,7 @@ impl Machine {
 
     /// The page has the camera track and the model loaded.
     pub fn page_started(&mut self, now: Duration, started: Started) -> Vec<Action> {
+        self.now = self.now.max(now);
         let mut out = Vec::new();
         if !matches!(
             self.phase,
@@ -712,7 +814,9 @@ impl Machine {
         self.governor.reset_window();
         self.window.clear();
         self.phase = Phase::Capturing { last_result: now };
-        out.push(Action::SetFps(self.governor.fps()));
+        out.push(Action::SetFps(self.fps()));
+        let fx = self.detector.capture_started(now);
+        self.posture(fx, &mut out);
         self.refresh(&mut out);
         out
     }
@@ -720,6 +824,7 @@ impl Machine {
     /// The page could not get the camera (a `getUserMedia` error name) or the model
     /// (`model: true`).
     pub fn page_error(&mut self, now: Duration, name: &str, model: bool) -> Vec<Action> {
+        self.now = self.now.max(now);
         let mut out = Vec::new();
         if !self.settings.on || self.stopping.is_some() || matches!(self.phase, Phase::Held(_)) {
             return out;
@@ -738,6 +843,7 @@ impl Machine {
     /// # Errors
     /// [`Error::Invalid`] if the report breaks its rules (nothing changes).
     pub fn frame(&mut self, now: Duration, report: FrameReport) -> Result<Vec<Action>> {
+        self.now = self.now.max(now);
         report.validate()?;
         let mut out = Vec::new();
         let Phase::Capturing { .. } = self.phase else {
@@ -759,17 +865,23 @@ impl Machine {
         {
             self.window.pop_front();
         }
-        if let Some(fps) = self.governor.record(now, report.inference_ms, self.cores) {
-            out.push(Action::SetFps(fps));
-        }
+        let before = self.fps();
+        self.governor.record(now, report.inference_ms, self.cores);
         self.stats.inference_ms = self.governor.mean_ms();
-        self.stats.fps = self.governor.fps();
+        let wall = self.wall(now);
+        let fx = self
+            .detector
+            .frame(now, wall, report.visibility, report.features);
+        self.posture(fx, &mut out);
+        self.fps_changed(before, &mut out);
+        self.stats.fps = self.fps();
         self.refresh(&mut out);
         Ok(out)
     }
 
     /// The page confirmed its track ended and its worker closed.
     pub fn page_stopped(&mut self, now: Duration) -> Vec<Action> {
+        self.now = self.now.max(now);
         let mut out = Vec::new();
         if let Some(asked) = self.stopping.take() {
             self.stats.last_stop_ms = Some(millis(now.saturating_sub(asked)));
@@ -809,6 +921,7 @@ impl Machine {
     /// The camera page went away without being asked (its window was destroyed or its
     /// web content crashed).
     pub fn page_gone(&mut self, now: Duration) -> Vec<Action> {
+        self.now = self.now.max(now);
         let mut out = Vec::new();
         if std::mem::take(&mut self.closing) {
             // The page asked to close (an earlier capture) has gone: a start that waited
@@ -841,7 +954,13 @@ impl Machine {
     /// Called about once a second: the watchdog, the start timeout, the stop deadline and
     /// the retry of a busy or missing camera.
     pub fn tick(&mut self, now: Duration) -> Vec<Action> {
+        self.now = self.now.max(now);
         let mut out = Vec::new();
+        let before = self.fps();
+        let wall = self.wall(now);
+        let fx = self.detector.tick(now, wall);
+        self.posture(fx, &mut out);
+        self.fps_changed(before, &mut out);
         if let Some(asked) = self.stopping
             && now.saturating_sub(asked) >= CLOSE_AFTER
         {
@@ -903,6 +1022,8 @@ impl Machine {
 
     fn release(&mut self, now: Duration, out: &mut Vec<Action>) {
         self.restart_pending = false;
+        let fx = self.detector.capture_ended(now);
+        self.posture(fx, out);
         if self.page_open && self.stopping.is_none() {
             self.stopping = Some(now);
             out.push(Action::RequestStop);
@@ -1005,6 +1126,56 @@ impl Machine {
             if !out.contains(&Action::Render) {
                 out.push(Action::Render);
             }
+            let reason = match status {
+                Status::NoReading(NoReading::Frame(FrameIssue::Absent)) => {
+                    Some(PostureReason::Absent)
+                }
+                Status::NoReading(NoReading::Frame(FrameIssue::LowConfidence)) => {
+                    Some(PostureReason::LowConfidence)
+                }
+                Status::NoReading(NoReading::Frame(FrameIssue::OutOfFrame)) => {
+                    Some(PostureReason::OutOfFrame)
+                }
+                Status::NoReading(NoReading::Stalled) => Some(PostureReason::Stalled),
+                _ => None,
+            };
+            let now = self.last_now();
+            let fx = self.detector.reading_changed(now, reason);
+            self.posture(fx, out);
+        }
+    }
+
+    /// The time of the latest event the machine saw.
+    const fn last_now(&self) -> Duration {
+        self.now
+    }
+
+    /// Carry out the detector's actions.
+    fn posture(&mut self, fx: Vec<PostureAction>, out: &mut Vec<Action>) {
+        for a in fx {
+            let action = match a {
+                PostureAction::Cue => Action::Cue,
+                PostureAction::Record(o) => Action::Record(o),
+                PostureAction::Persist => {
+                    self.settings.calibration = self.detector.calibration();
+                    Action::Persist
+                }
+                PostureAction::AskRecalibrate => Action::Notify(CameraNotice::Recalibrate),
+                PostureAction::Render => Action::Render,
+            };
+            if !(matches!(action, Action::Render | Action::Persist) && out.contains(&action)) {
+                out.push(action);
+            }
+        }
+    }
+
+    /// Tell the page a new frame rate if it changed (a calibration starting or ending, or
+    /// the governor).
+    fn fps_changed(&self, before: u8, out: &mut Vec<Action>) {
+        let fps = self.fps();
+        if fps != before {
+            out.retain(|a| !matches!(a, Action::SetFps(_)));
+            out.push(Action::SetFps(fps));
         }
     }
 }

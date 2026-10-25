@@ -281,6 +281,10 @@ pub enum Input {
     Phone(PhoneInput),
     /// An answer on the weekly review offer (wireframe B9).
     Review(ReviewAnswer),
+    /// The posture check asks for its cue: a drift episode started (slice V2-2). Applied
+    /// if the card opened; otherwise ignored with the reason
+    /// ([`crate::coach::engine::CUE_FOCUS`] and the others).
+    PostureCue,
 }
 
 /// An answer on the weekly review offer (wireframe B9).
@@ -308,6 +312,7 @@ impl Input {
                 | Self::Resume
                 | Self::PresentationChanged(_)
                 | Self::MediaInUseChanged(_)
+                | Self::PostureCue
         )
     }
 }
@@ -557,6 +562,9 @@ pub enum Bubble {
         /// "Later" is offered (the first offer of the week).
         later: bool,
     },
+    /// The posture cue (slice V2-2): a sustained change from the calibration. OK, or
+    /// Recalibrate (the shell opens the camera page).
+    PostureCue,
 }
 
 /// Where the movement guide is (wireframe B4, flow 3).

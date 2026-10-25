@@ -234,6 +234,7 @@ fn all_bubbles() -> Vec<CoachBubble> {
             at: NaiveTime::from_hms_opt(11, 52, 0).unwrap(),
             label: None,
         },
+        CoachBubble::PostureCue,
     ]
 }
 
@@ -3041,6 +3042,28 @@ fn the_review_offer_routes_its_three_answers() {
     });
     let b = present::bubble(v.bubble.as_ref().unwrap(), &v);
     assert!(b.actions.iter().all(|a| a.id != "review_later"));
+}
+
+#[test]
+fn the_posture_cue_offers_ok_and_recalibrate() {
+    let v = view(PetMode::Idle);
+    let b = present::bubble(&CoachBubble::PostureCue, &v);
+    assert!(b.lines.iter().all(|l| l.len() <= 200));
+    assert_eq!(b.title, "Posture check");
+    assert_eq!(all_actions(&b), vec!["ok", "posture_recalibrate"]);
+    // No judgement and no medical claim in its words.
+    let text = format!("{} {}", b.title, b.lines.join(" ")).to_lowercase();
+    for word in ["bad", "poor", "wrong", "slouch", "health", "pain", "injur"] {
+        assert!(!text.contains(word), "{word}: {text}");
+    }
+    let k = BubbleKind::PostureCue;
+    assert_eq!(BubbleKind::parse(&k.id(2)), Some(k));
+    assert_eq!(bubble_command(k, "ok"), Some(Input::CloseBubble));
+    assert_eq!(
+        bubble_command(k, "posture_recalibrate"),
+        Some(Input::CloseBubble)
+    );
+    assert_eq!(bubble_command(k, "review_skip"), None);
 }
 
 #[test]
