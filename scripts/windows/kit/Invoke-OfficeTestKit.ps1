@@ -31,8 +31,11 @@
   sign-in (HKCU RunOnce), and removes that when it is done.
 
   Administrator steps (server install and soak, the network capture) run in a second
-  window started once with one UAC prompt at the start. That window only runs a fixed
-  list of steps with checked parameters. Every other step runs as the signed-in user.
+  window started once with one UAC prompt at the start. That window runs a protected copy
+  of this script (under %ProgramData%, Administrators only), made only when its bytes match
+  the ones this window started with; the user's own copy is never run elevated. It only
+  runs a fixed list of steps with checked parameters. Every other step runs as the
+  signed-in user.
 
   The zip (HealthierYou-results-<PC1|PC2>-<date>.zip on the Desktop) holds only .txt,
   .json and .csv reports. Each file is scanned first: user, PC, domain and server names,
@@ -430,7 +433,13 @@ function Set-AutoResume([bool]$On) {
 # ===================================================================== administrator window
 # The agent is this script run elevated (-Agent), started once with one UAC prompt.
 #
-# Trust boundary: the moment the person approves the UAC prompt. Right then the agent
+# Trust boundary, part one: the kit window hashes this script's bytes when it starts. The
+# elevated window is started with -EncodedCommand holding a small bootstrap (never -File on
+# the user's writable kit folder): it reads the user's copy once, refuses unless those bytes
+# have that hash, writes them into <admin>\boot (Administrators and SYSTEM only) and runs
+# that copy (New-AgentBootstrap below). A copy replaced while the UAC prompt waits never runs.
+#
+# Part two: the moment the person approves the UAC prompt. Right then the agent
 # copies everything it will ever execute (the test script its role needs and, on PC1, the
 # server installer) into a folder under %ProgramData% that only Administrators and SYSTEM
 # can write, records each copy's SHA-256 in memory (and checks it against
@@ -447,7 +456,8 @@ $AdminOps = @('server-install', 'server-passphrase', 'server-pairing-evidence', 
 
 function Get-AdminRoot {
   if ($script:AdminRootOverride) { return $script:AdminRootOverride }
-  return (Join-Path (Join-Path $env:ProgramData 'HealthierYou-TestKit-Admin') $script:RoleName)
+  # The known folder, not %ProgramData% (a user may set that variable for their own account).
+  return (Join-Path (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'HealthierYou-TestKit-Admin') $script:RoleName)
 }
 function Get-AdminDir([string]$Part) { Join-Path (Get-AdminRoot) $Part }
 function Get-AdminResultsDir { Join-Path (Get-AdminDir 'out') 'results' }
@@ -543,7 +553,7 @@ function Get-StagedFile([string]$Name) {
 # Children of the administrator window load modules from system folders only.
 function Set-SafeModulePath {
   if (-not $script:IsWin) { return }
-  $paths = @((Join-Path $PSHOME 'Modules'), (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'), (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\Modules'))
+  $paths = @((Join-Path $PSHOME 'Modules'), (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'WindowsPowerShell\Modules'), (Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\Modules'))
   $env:PSModulePath = (@($paths | Select-Object -Unique) -join ';')
 }
 
@@ -744,6 +754,86 @@ function Initialize-InlineAdmin {
   $script:InlineAdminDone = $true
 }
 
+# The elevated entry: a small bootstrap passed with -EncodedCommand (no -File on any path the
+# user can write). The kit window hashes this script's bytes when it starts and embeds that
+# SHA-256, the role and the paths as checked literals. Elevated, the bootstrap reads the
+# user's copy of the script once into memory and refuses (exit 3, writing nothing) unless
+# those bytes have the embedded hash; then it makes <admin>\boot (Administrators and SYSTEM
+# only, a folder or link made earlier by a user is moved aside), writes those same bytes
+# there, checks the copy's hash and runs that copy as the agent. The module path is system
+# folders only from its first line, before any module can load.
+$AgentBootstrapTemplate = @'
+$ErrorActionPreference = 'Stop'
+$env:PSModulePath = (@([IO.Path]::Combine($PSHOME, 'Modules'), [IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\Modules'), [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\Modules')) -join [IO.Path]::PathSeparator)
+function D([string]$s) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) }
+$role = '@ROLE@'; $want = '@SHA@'; $src = D '@SRC@'; $root = D '@ROOT@'; $acl = @ACL@; $pause = @PAUSE@
+$run = @{ Agent = $true; Role = $role; StateDir = (D '@STATE@'); InstallersDir = (D '@INST@'); ScriptsDir = (D '@SCRIPTS@'); OwnerPid = @OWNER@ }
+function Fail([int]$Code, [string]$Msg) { Write-Host $Msg -ForegroundColor Red; if ($pause) { try { $null = Read-Host 'Press Enter to close this window' } catch { } }; exit $Code }
+function Hash([byte[]]$b) { $h = [Security.Cryptography.SHA256]::Create(); try { ([BitConverter]::ToString($h.ComputeHash($b))) -replace '-', '' } finally { $h.Dispose() } }
+function Safe([string]$p, [bool]$fresh) {
+  $i = Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+  if ($i) {
+    $bad = [bool]($i.Attributes -band [IO.FileAttributes]::ReparsePoint) -or -not $i.PSIsContainer
+    if (-not $bad -and $acl) { $bad = @('S-1-5-32-544', 'S-1-5-18') -notcontains (Get-Acl -LiteralPath $p).GetOwner([Security.Principal.SecurityIdentifier]).Value }
+    if ($bad) { Move-Item -LiteralPath $p -Destination ("$p.untrusted-" + [guid]::NewGuid().ToString('N').Substring(0, 8)) -Force }
+    elseif ($fresh) { Remove-Item -LiteralPath $p -Recurse -Force }
+  }
+  if (-not (Get-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue)) { $null = New-Item -ItemType Directory -Path $p }
+  if ($acl) {
+    $ic = [IO.Path]::Combine([Environment]::SystemDirectory, 'icacls.exe')
+    & $ic $p /setowner '*S-1-5-32-544' /Q | Out-Null; if ($LASTEXITCODE -ne 0) { throw "icacls /setowner failed ($LASTEXITCODE)" }
+    & $ic $p /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /Q | Out-Null; if ($LASTEXITCODE -ne 0) { throw "icacls failed ($LASTEXITCODE)" }
+  }
+}
+try {
+  $bytes = [IO.File]::ReadAllBytes($src)
+  if ((Hash $bytes) -ne $want) { Fail 3 'Refused: the kit script changed after the kit window started. Nothing was run as administrator. Close the kit and start it again from a fresh copy.' }
+  if (-not $root) { $top = [IO.Path]::Combine([Environment]::GetFolderPath('CommonApplicationData'), 'HealthierYou-TestKit-Admin'); Safe $top $false; $root = [IO.Path]::Combine($top, $role) }
+  Safe $root $false
+  $boot = [IO.Path]::Combine($root, 'boot')
+  Safe $boot $true
+  $staged = [IO.Path]::Combine($boot, 'Invoke-OfficeTestKit.ps1')
+  [IO.File]::WriteAllBytes($staged, $bytes)
+  if ((Hash ([IO.File]::ReadAllBytes($staged))) -ne $want) { Fail 3 'Refused: the protected copy of the kit script does not match.' }
+} catch { Fail 2 "The administrator window could not start: $($_.Exception.Message)" }
+& $staged @run
+exit 0
+'@
+
+function Get-FileSha256([string]$Path) {
+  $h = [Security.Cryptography.SHA256]::Create()
+  try { return (([BitConverter]::ToString($h.ComputeHash([IO.File]::ReadAllBytes($Path)))) -replace '-', '') } finally { $h.Dispose() }
+}
+
+# The bootstrap text with its literals checked first (a bad value is never embedded).
+function New-AgentBootstrap([hashtable]$B) {
+  if ([string]$B.role -cnotmatch '^(Server|Camera)$') { throw 'refused: bad role for the administrator window' }
+  if ([string]$B.sha256 -cnotmatch '^[0-9A-F]{64}$') { throw 'refused: bad SHA-256 for the administrator window' }
+  if ([string]$B.ownerPid -notmatch '^[0-9]{1,10}$') { throw 'refused: bad owner process id' }
+  if (-not $B.src) { throw 'refused: no kit script path' }
+  $t = $AgentBootstrapTemplate
+  $lit = @{ '@ROLE@' = [string]$B.role; '@SHA@' = [string]$B.sha256; '@OWNER@' = [string][int64]$B.ownerPid
+    '@ACL@' = $(if ($B.acl) { '$true' } else { '$false' }); '@PAUSE@' = $(if ($B.pause) { '$true' } else { '$false' }) }
+  foreach ($k in 'src', 'root', 'state', 'inst', 'scripts') {
+    $v = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$B[$k]))
+    if ($v -cnotmatch '^[A-Za-z0-9+/=]*$') { throw "refused: bad $k" }
+    $lit["@$($k.ToUpperInvariant())@"] = $v
+  }
+  foreach ($k in $lit.Keys) { $t = $t.Replace($k, $lit[$k]) }
+  return $t
+}
+
+function ConvertTo-EncodedCommand([string]$Text) { [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Text)) }
+
+# The command line of the elevated window: the bootstrap only, never a script file.
+function Get-AgentLaunchArgs {
+  $text = New-AgentBootstrap @{ role = $script:RoleName; sha256 = $script:KitSha256; src = $script:KitScriptPath; root = ''; acl = $true; pause = $true
+    state = $script:StateDirResolved; inst = $script:InstallersDirResolved; scripts = $script:ScriptsDirResolved; ownerPid = $PID }
+  $line = '-NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + (ConvertTo-EncodedCommand $text)
+  if ($line.Length -gt 30000) { throw 'the administrator command line is too long' }
+  return $line
+}
+
 # Start the administrator window once (one UAC prompt), or reuse one still open.
 function Start-AdminAgent([string[]]$Why) {
   if ($script:AgentInline -or $script:AgentStarted) { return $true }
@@ -754,8 +844,7 @@ function Start-AdminAgent([string[]]$Why) {
   }
   Show-Banner 'One administrator prompt' (@('Some steps need an administrator:') + @($Why | ForEach-Object { "  - $_" }) + @('', 'Windows will now ask once: "Do you want to allow this app to make changes?"', 'Click Yes (or type an administrator password if Windows asks for one).', 'A second window, "HealthierYou test kit - ADMINISTRATOR", opens: keep it open.', 'Every other step runs as you, without administrator rights.'))
   while ($true) {
-    $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Agent', '-Role', $script:RoleName, '-StateDir', $script:StateDirResolved, '-InstallersDir', $script:InstallersDirResolved, '-ScriptsDir', $script:ScriptsDirResolved, '-OwnerPid', [string]$PID)
-    try { Start-Process -FilePath (Get-HostExe) -ArgumentList (ConvertTo-ArgString $a) -Verb RunAs | Out-Null }
+    try { Start-Process -FilePath (Get-HostExe) -ArgumentList (Get-AgentLaunchArgs) -Verb RunAs | Out-Null }
     catch {
       Write-Log "The administrator window was not started: $($_.Exception.Message)" 'Red'
       if (Read-YesNo 'Try the administrator prompt again?' $true) { continue }
@@ -1612,6 +1701,73 @@ function Invoke-SelfTest {
       $script:TestAcl = $false
     }
     else { Write-Host '[SKIP] folder rights (needs an elevated Windows run; CI runs it)' }
+
+    # --- the elevated entry: the bootstrap runs only the bytes the kit window started with
+    $bt = Join-Path $tmp 'boot-test'
+    $btKit = Join-Path $bt 'kit folder'; $btState = Join-Path $bt 'state'
+    New-Item -ItemType Directory -Force -Path $btKit, $btState | Out-Null
+    $btSrc = Join-Path $btKit 'Invoke-OfficeTestKit.ps1'
+    $fakeV1 = "param([switch]`$Agent, [string]`$Role, [string]`$StateDir, [string]`$InstallersDir, [string]`$ScriptsDir, [int]`$OwnerPid)`n# kit v1`nSet-Content -LiteralPath (Join-Path `$StateDir 'ran-v1.txt') -Value @(`$PSCommandPath, `$Role, `$OwnerPid, [string]`$Agent, `$env:PSModulePath)`n"
+    $fakeEvil = "param([switch]`$Agent, [string]`$Role, [string]`$StateDir, [string]`$InstallersDir, [string]`$ScriptsDir, [int]`$OwnerPid)`nSet-Content -LiteralPath (Join-Path `$StateDir 'EVIL-RAN.txt') -Value 'evil'`n"
+    [IO.File]::WriteAllText($btSrc, $fakeV1)
+    $v1Hash = Get-FileSha256 $btSrc
+    $btRoot = Join-Path $bt 'admin'
+    $bootArgs = @{ role = 'Camera'; sha256 = $v1Hash; src = $btSrc; root = $btRoot; acl = $false; pause = $false; state = $btState; inst = (Join-Path $btKit 'installers'); scripts = $btKit; ownerPid = 4242 }
+    function Invoke-BootForTest([hashtable]$A) {
+      $ErrorActionPreference = 'Continue'
+      $o = & (Get-HostExe) -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand (ConvertTo-EncodedCommand (New-AgentBootstrap $A)) 2>&1 | Out-String
+      return @{ code = $LASTEXITCODE; out = $o }
+    }
+    $btBoot = Join-Path $btRoot 'boot'
+    # (a) the user's copy is replaced between the launch (hash taken) and the elevated run.
+    [IO.File]::WriteAllText($btSrc, $fakeEvil)
+    $ra = Invoke-BootForTest $bootArgs
+    Check 'elevated entry: a kit script changed after launch is refused (exit 3)' ($ra.code -eq 3 -and $ra.out -like '*Refused*')
+    Check 'elevated entry: the replacement never runs and nothing is written' (-not (Test-Path -LiteralPath (Join-Path $btState 'EVIL-RAN.txt')) -and -not (Test-Path -LiteralPath $btRoot))
+    # (b) unchanged: the protected copy runs, never the user's file; later changes have no effect.
+    [IO.File]::WriteAllText($btSrc, $fakeV1)
+    $rb = Invoke-BootForTest $bootArgs
+    $ran = @(); if (Test-Path -LiteralPath (Join-Path $btState 'ran-v1.txt')) { $ran = @(Get-Content -LiteralPath (Join-Path $btState 'ran-v1.txt')) }
+    $btStaged = Join-Path $btBoot 'Invoke-OfficeTestKit.ps1'
+    Check 'elevated entry: unchanged, the protected copy runs as the agent with its role' ($rb.code -eq 0 -and $ran.Count -ge 4 -and [IO.Path]::GetFullPath($ran[0]) -eq [IO.Path]::GetFullPath($btStaged) -and $ran[1] -eq 'Camera' -and $ran[2] -eq '4242' -and $ran[3] -eq 'True')
+    $userMods = @([Environment]::GetFolderPath('MyDocuments'), [Environment]::GetFolderPath('UserProfile'), [Environment]::GetFolderPath('LocalApplicationData')) | Where-Object { $_ }
+    Check 'elevated entry: the agent''s module path holds no per-user folder' ($ran.Count -ge 5 -and @($userMods | Where-Object { $ran[4].ToLowerInvariant().Contains($_.ToLowerInvariant()) }).Count -eq 0)
+    [IO.File]::WriteAllText($btSrc, $fakeEvil)
+    Check 'elevated entry: changing the user''s copy afterwards leaves the protected copy as launched' ((Get-FileSha256 $btStaged) -eq $v1Hash -and -not (Test-Path -LiteralPath (Join-Path $btState 'EVIL-RAN.txt')))
+    # A link a user put where the protected folder goes is moved aside, never written through.
+    [IO.File]::WriteAllText($btSrc, $fakeV1)
+    Remove-Item -LiteralPath $btBoot -Recurse -Force
+    $lure = Join-Path $bt 'lure'; New-Item -ItemType Directory -Force -Path $lure | Out-Null
+    $linkType = if ($script:IsWin) { 'Junction' } else { 'SymbolicLink' }
+    $null = New-Item -ItemType $linkType -Path $btBoot -Target $lure
+    $rl = Invoke-BootForTest $bootArgs
+    Check 'elevated entry: a link in place of the protected folder is moved aside' ($rl.code -eq 0 -and @(Get-ChildItem -LiteralPath $lure -Force).Count -eq 0 -and @(Get-ChildItem -LiteralPath $btRoot -Filter 'boot.untrusted-*' -Force).Count -eq 1 -and (Test-Path -LiteralPath $btStaged))
+    # (c) the elevation command line runs no script file from the user's folder.
+    $saveRole = $script:RoleName; $saveSha = $script:KitSha256; $savePath = $script:KitScriptPath
+    $script:RoleName = 'Server'; $script:KitSha256 = $v1Hash; $script:KitScriptPath = $btSrc
+    $line = Get-AgentLaunchArgs
+    $enc = ($line -split ' ')[-1]
+    $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($enc))
+    Check 'elevation command line: -EncodedCommand only, no -File, no kit folder path' ($line -match '^-NoProfile -ExecutionPolicy Bypass -EncodedCommand [A-Za-z0-9+/=]+$' -and $line -notmatch '(?i)-File' -and -not $line.Contains($btKit) -and $line.Length -le 30000)
+    Check 'elevation bootstrap: embeds the launch hash and runs no -File' ($decoded.Contains("'$v1Hash'") -and $decoded -notmatch '(?i)-File\b' -and -not $decoded.Contains($btKit))
+    $script:RoleName = $saveRole; $script:KitSha256 = $saveSha; $script:KitScriptPath = $savePath
+    # (d) bad literals are refused before anything is embedded.
+    foreach ($bad in @(@{ role = "Server'; calc; '" }, @{ role = 'server' }, @{ sha256 = 'abc' }, @{ sha256 = ($v1Hash.Substring(0, 63) + "'") }, @{ sha256 = $v1Hash.ToLowerInvariant() }, @{ ownerPid = '1; calc' })) {
+      $x = $bootArgs.Clone(); foreach ($k in $bad.Keys) { $x[$k] = $bad[$k] }
+      $refused = $false; try { $null = New-AgentBootstrap $x } catch { $refused = $_.Exception.Message -like 'refused*' }
+      Check "elevation bootstrap: bad $(@($bad.Keys)[0]) '$(@($bad.Values)[0])' refused" $refused
+    }
+    $q1 = $bootArgs.Clone(); $q1.state = "C:\it's `$(calc) here"
+    Check 'elevation bootstrap: paths are embedded only as base64' (-not (New-AgentBootstrap $q1).Contains('calc'))
+    if ($script:IsWin -and (Test-Elevated)) {
+      $acl1 = $bootArgs.Clone(); $acl1.acl = $true; $acl1.root = Join-Path $bt 'admin-acl'
+      $rc = Invoke-BootForTest $acl1
+      $ab = Join-Path $acl1.root 'boot'
+      $wb = [Security.AccessControl.FileSystemRights]'WriteData, AppendData, WriteExtendedAttributes, WriteAttributes, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
+      $uw = @((Get-Acl -LiteralPath $ab).Access | Where-Object { $_.AccessControlType -eq 'Allow' -and @('S-1-5-32-545', 'S-1-1-0', 'S-1-5-11') -contains $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -and ($_.FileSystemRights -band $wb) })
+      Check 'rights: the protected kit copy belongs to Administrators and users cannot write it' ($rc.code -eq 0 -and $uw.Count -eq 0 -and (Get-Acl -LiteralPath $ab).GetOwner([Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-32-544')
+    }
+    else { Write-Host '[SKIP] protected kit copy rights (needs an elevated Windows run; CI runs it)' }
     $script:ScriptStub = $null
     $script:AdminRootOverride = $null
     $script:ScriptsDirResolved = $saveScripts; $script:InstallersDirResolved = $saveInst; $script:Manifest = $saveManifest
@@ -1799,6 +1955,10 @@ $script:Ctx = @{}
 $script:Sim = $null
 
 if ($SelfTest) { Initialize-KitPaths; Invoke-SelfTest; return }
+
+# What the person started: the elevated window runs only these exact bytes.
+$script:KitScriptPath = $PSCommandPath
+$script:KitSha256 = Get-FileSha256 $PSCommandPath
 
 if (-not $Role) { throw 'Give -Role Server or -Role Camera (or -SelfTest).' }
 $script:RoleName = $Role
