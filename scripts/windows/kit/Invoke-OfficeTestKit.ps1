@@ -70,7 +70,14 @@ param(
   # Run this step again (its id, for example P2-05), then carry on.
   [string]$Redo,
   # Internal: the kit window's process id, given to the administrator window.
-  [int]$OwnerPid = 0
+  [int]$OwnerPid = 0,
+  # Internal (administrator window, from the bootstrap only): the SHA-256 of each file it may
+  # stage, pinned by the kit window before the UAC prompt (name=HEX;name=HEX).
+  [string]$StagePins,
+  # Internal (self-test of the bootstrap): the protected folder, and process the requests
+  # already waiting once, then exit.
+  [string]$AdminRoot,
+  [switch]$AgentOnce
 )
 $ErrorActionPreference = 'Stop'
 $KitVersion = '1.0'
@@ -442,8 +449,9 @@ function Set-AutoResume([bool]$On) {
 # Part two: the moment the person approves the UAC prompt. Right then the agent
 # copies everything it will ever execute (the test script its role needs and, on PC1, the
 # server installer) into a folder under %ProgramData% that only Administrators and SYSTEM
-# can write, records each copy's SHA-256 in memory (and checks it against
-# kit-manifest.json), and from then on runs only those copies, after checking the hash
+# can write, requires each copy's SHA-256 to equal the one the kit window pinned before the
+# UAC prompt (and checked against kit-manifest.json; no pin or a different file: refused),
+# and from then on runs only those copies, after checking the hash
 # again. Nothing in the user's (writable) kit folder or profile is executed elevated later.
 # The user's kit window talks to it through <admin>\queue (the only folder the user may
 # write: requests are data, an allowlisted operation name and parameters that are checked);
@@ -524,20 +532,28 @@ function Initialize-AdminArea {
     Initialize-SafeDir (Get-AdminResultsDir) 'read'
     Initialize-SafeDir (Get-AdminDir 'raw') 'private'
     Initialize-SafeDir (Get-AdminDir 'stage') 'read' -Fresh
-    foreach ($f in (Get-StageList)) {
+    # Every file is checked against the SHA-256 the kit window pinned before the UAC prompt
+    # (checked there against kit-manifest.json). No pin, or a different file: refused.
+    $pins = $script:PinnedDigests
+    if (-not ($pins -is [System.Collections.IDictionary]) -or $pins.Count -eq 0) { throw 'no SHA-256 was pinned by the kit window for the files to stage; refused' }
+    $list = @(Get-StageList)
+    foreach ($n in @($pins.Keys)) { if (@($list | Where-Object { $_.name -eq $n }).Count -eq 0) { throw "$n was checked when the kit window started but is not in the kit now; refused" } }
+    foreach ($f in $list) {
+      if (-not $pins.Contains($f.name)) { throw "$($f.name) has no SHA-256 pinned by the kit window (it was not in the kit when the kit window checked it); refused" }
       if (-not (Test-Path -LiteralPath $f.src)) { throw "the kit is incomplete: $($f.name) is missing" }
       $dest = Join-Path (Get-AdminDir 'stage') $f.name
       Copy-Item -LiteralPath $f.src -Destination $dest -Force
-      $h = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
-      if ($script:Manifest -and $script:Manifest.sha256 -and $script:Manifest.sha256[$f.name] -and ([string]$script:Manifest.sha256[$f.name]).ToUpperInvariant() -ne $h) {
-        throw "$($f.name) does not match kit-manifest.json: it was changed after the kit was built"
-      }
+      $h = Get-FileSha256 $dest
+      if ($h -cne [string]$pins[$f.name]) { Remove-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue; throw "$($f.name) changed after the kit window checked it against kit-manifest.json; refused" }
       $script:StageHashes[$f.name] = $h
       if ($f.installer) { $script:StagedInstaller = $f.name }
     }
     $script:AdminReady = $true
   }
-  catch { $script:AdminSetupError = $_.Exception.Message; Write-Log "The administrator folder could not be prepared: $($script:AdminSetupError)" 'Red' }
+  catch {
+    $script:StageHashes = @{}; $script:StagedInstaller = $null
+    $script:AdminSetupError = $_.Exception.Message; Write-Log "The administrator folder could not be prepared: $($script:AdminSetupError)" 'Red'
+  }
 }
 
 # A staged file, only if it is still exactly what was staged.
@@ -738,6 +754,14 @@ function Start-AgentLoop([int]$Owner) {
   Remove-Item -LiteralPath (Join-Path $out 'agent.pid') -ErrorAction SilentlyContinue
 }
 
+# Self-test of the bootstrap: set up as the agent does, answer the waiting requests, exit.
+function Invoke-AgentRequestsOnce {
+  Set-SafeModulePath
+  Initialize-AdminArea
+  while (Invoke-AgentOnce) { }
+  if ($script:AdminReady) { return 0 } else { return 4 }
+}
+
 function Test-AgentAlive {
   if ($script:AgentInline) { return $true }
   $f = Join-Path (Get-AdminDir 'out') 'agent.pid'
@@ -750,24 +774,30 @@ function Test-AgentAlive {
 function Initialize-InlineAdmin {
   if ($script:InlineAdminDone) { return }
   Set-SafeModulePath
+  try { $script:PinnedDigests = Get-StagePins } catch { $script:PinnedDigests = $null; Write-Log "Administrator steps refused: $($_.Exception.Message)" 'Red' }
   Initialize-AdminArea
   $script:InlineAdminDone = $true
 }
 
 # The elevated entry: a small bootstrap passed with -EncodedCommand (no -File on any path the
-# user can write). The kit window hashes this script's bytes when it starts and embeds that
-# SHA-256, the role and the paths as checked literals. Elevated, the bootstrap reads the
-# user's copy of the script once into memory and refuses (exit 3, writing nothing) unless
-# those bytes have the embedded hash; then it makes <admin>\boot (Administrators and SYSTEM
-# only, a folder or link made earlier by a user is moved aside), writes those same bytes
-# there, checks the copy's hash and runs that copy as the agent. The module path is system
-# folders only from its first line, before any module can load.
+# user can write). The kit window hashes this script's bytes when it starts. Before the UAC
+# prompt it embeds as checked literals: that SHA-256, the role, the paths, and the pinned
+# SHA-256 of every file the agent will stage (Get-StagePins: hashed from the files and
+# checked against kit-manifest.json). Elevated, the bootstrap reads the user's copy of the
+# script once into memory and refuses (exit 3, writing nothing) unless those bytes have the
+# embedded hash. Then it makes <admin>\boot (Administrators and SYSTEM only; a folder or
+# link a user made earlier is moved aside), writes those same bytes there, checks the copy's
+# hash and runs that copy as the agent. The pins reach the agent only as its -StagePins
+# argument, from this bootstrap, never from a file the user can write; the agent refuses any
+# file to stage without a pin or with a different SHA-256. The module path is system
+# folders only from the first line, before any module can load.
 $AgentBootstrapTemplate = @'
 $ErrorActionPreference = 'Stop'
 $env:PSModulePath = (@([IO.Path]::Combine($PSHOME, 'Modules'), [IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\Modules'), [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\Modules')) -join [IO.Path]::PathSeparator)
 function D([string]$s) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) }
 $role = '@ROLE@'; $want = '@SHA@'; $src = D '@SRC@'; $root = D '@ROOT@'; $acl = @ACL@; $pause = @PAUSE@
-$run = @{ Agent = $true; Role = $role; StateDir = (D '@STATE@'); InstallersDir = (D '@INST@'); ScriptsDir = (D '@SCRIPTS@'); OwnerPid = @OWNER@ }
+$run = @{ Agent = $true; Role = $role; StateDir = (D '@STATE@'); InstallersDir = (D '@INST@'); ScriptsDir = (D '@SCRIPTS@'); OwnerPid = @OWNER@; StagePins = '@PINS@' }
+if ($root) { $run.AdminRoot = $root }; if (@ONCE@) { $run.AgentOnce = $true }
 function Fail([int]$Code, [string]$Msg) { Write-Host $Msg -ForegroundColor Red; if ($pause) { try { $null = Read-Host 'Press Enter to close this window' } catch { } }; exit $Code }
 function Hash([byte[]]$b) { $h = [Security.Cryptography.SHA256]::Create(); try { ([BitConverter]::ToString($h.ComputeHash($b))) -replace '-', '' } finally { $h.Dispose() } }
 function Safe([string]$p, [bool]$fresh) {
@@ -796,13 +826,37 @@ try {
   [IO.File]::WriteAllBytes($staged, $bytes)
   if ((Hash ([IO.File]::ReadAllBytes($staged))) -ne $want) { Fail 3 'Refused: the protected copy of the kit script does not match.' }
 } catch { Fail 2 "The administrator window could not start: $($_.Exception.Message)" }
+$global:LASTEXITCODE = 0
 & $staged @run
-exit 0
+exit $LASTEXITCODE
 '@
 
 function Get-FileSha256([string]$Path) {
   $h = [Security.Cryptography.SHA256]::Create()
   try { return (([BitConverter]::ToString($h.ComputeHash([IO.File]::ReadAllBytes($Path)))) -replace '-', '') } finally { $h.Dispose() }
+}
+
+$PinPattern = '^[A-Za-z0-9._-]{1,120}=[0-9A-F]{64}(;[A-Za-z0-9._-]{1,120}=[0-9A-F]{64}){0,15}$'
+
+# The kit window, before the UAC prompt: the SHA-256 of each file the agent will stage, from
+# the files themselves, each required to match kit-manifest.json.
+function Get-StagePins {
+  $pins = [ordered]@{}
+  foreach ($f in (Get-StageList)) {
+    if (-not (Test-Path -LiteralPath $f.src)) { throw "the kit is incomplete: $($f.name) is missing" }
+    $h = Get-FileSha256 $f.src
+    $m = if ($script:Manifest -and $script:Manifest.sha256) { [string]$script:Manifest.sha256[$f.name] } else { '' }
+    if (-not $m) { throw "$($f.name) has no SHA-256 in kit-manifest.json" }
+    if ($m.ToUpperInvariant() -ne $h) { throw "$($f.name) does not match kit-manifest.json: it was changed after the kit was built" }
+    $pins[$f.name] = $h
+  }
+  return $pins
+}
+function ConvertTo-PinText($Pins) { return (@($Pins.Keys | ForEach-Object { "$_=$($Pins[$_])" }) -join ';') }
+function ConvertFrom-PinText([string]$Text) {
+  $pins = [ordered]@{}
+  if ($Text -cmatch $PinPattern) { foreach ($p in $Text.Split(';')) { $kv = $p.Split('='); $pins[$kv[0]] = $kv[1] } }
+  return $pins
 }
 
 # The bootstrap text with its literals checked first (a bad value is never embedded).
@@ -811,9 +865,11 @@ function New-AgentBootstrap([hashtable]$B) {
   if ([string]$B.sha256 -cnotmatch '^[0-9A-F]{64}$') { throw 'refused: bad SHA-256 for the administrator window' }
   if ([string]$B.ownerPid -notmatch '^[0-9]{1,10}$') { throw 'refused: bad owner process id' }
   if (-not $B.src) { throw 'refused: no kit script path' }
+  if ([string]$B.pins -cnotmatch $PinPattern) { throw 'refused: bad or missing SHA-256 pins for the files to stage' }
   $t = $AgentBootstrapTemplate
   $lit = @{ '@ROLE@' = [string]$B.role; '@SHA@' = [string]$B.sha256; '@OWNER@' = [string][int64]$B.ownerPid
-    '@ACL@' = $(if ($B.acl) { '$true' } else { '$false' }); '@PAUSE@' = $(if ($B.pause) { '$true' } else { '$false' }) }
+    '@ACL@' = $(if ($B.acl) { '$true' } else { '$false' }); '@PAUSE@' = $(if ($B.pause) { '$true' } else { '$false' })
+    '@ONCE@' = $(if ($B.once) { '$true' } else { '$false' }); '@PINS@' = [string]$B.pins }
   foreach ($k in 'src', 'root', 'state', 'inst', 'scripts') {
     $v = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$B[$k]))
     if ($v -cnotmatch '^[A-Za-z0-9+/=]*$') { throw "refused: bad $k" }
@@ -826,9 +882,12 @@ function New-AgentBootstrap([hashtable]$B) {
 function ConvertTo-EncodedCommand([string]$Text) { [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Text)) }
 
 # The command line of the elevated window: the bootstrap only, never a script file.
+function New-AgentLaunchBootstrap([string]$Root = '', [bool]$Acl = $true, [bool]$Pause = $true, [bool]$Once = $false) {
+  return (New-AgentBootstrap @{ role = $script:RoleName; sha256 = $script:KitSha256; src = $script:KitScriptPath; root = $Root; acl = $Acl; pause = $Pause; once = $Once
+    pins = (ConvertTo-PinText (Get-StagePins)); state = $script:StateDirResolved; inst = $script:InstallersDirResolved; scripts = $script:ScriptsDirResolved; ownerPid = $PID })
+}
 function Get-AgentLaunchArgs {
-  $text = New-AgentBootstrap @{ role = $script:RoleName; sha256 = $script:KitSha256; src = $script:KitScriptPath; root = ''; acl = $true; pause = $true
-    state = $script:StateDirResolved; inst = $script:InstallersDirResolved; scripts = $script:ScriptsDirResolved; ownerPid = $PID }
+  $text = New-AgentLaunchBootstrap
   $line = '-NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + (ConvertTo-EncodedCommand $text)
   if ($line.Length -gt 30000) { throw 'the administrator command line is too long' }
   return $line
@@ -844,7 +903,10 @@ function Start-AdminAgent([string[]]$Why) {
   }
   Show-Banner 'One administrator prompt' (@('Some steps need an administrator:') + @($Why | ForEach-Object { "  - $_" }) + @('', 'Windows will now ask once: "Do you want to allow this app to make changes?"', 'Click Yes (or type an administrator password if Windows asks for one).', 'A second window, "HealthierYou test kit - ADMINISTRATOR", opens: keep it open.', 'Every other step runs as you, without administrator rights.'))
   while ($true) {
-    try { Start-Process -FilePath (Get-HostExe) -ArgumentList (Get-AgentLaunchArgs) -Verb RunAs | Out-Null }
+    $launch = $null
+    try { $launch = Get-AgentLaunchArgs }
+    catch { Write-Log "Administrator steps refused: $($_.Exception.Message). Download the kit again." 'Red'; return $false }
+    try { Start-Process -FilePath (Get-HostExe) -ArgumentList $launch -Verb RunAs | Out-Null }
     catch {
       Write-Log "The administrator window was not started: $($_.Exception.Message)" 'Red'
       if (Read-YesNo 'Try the administrator prompt again?' $true) { continue }
@@ -1633,6 +1695,8 @@ function Invoke-SelfTest {
     $script:Manifest = @{ sha256 = @{ 'Test-Soak.ps1' = (Get-FileHash -LiteralPath (Join-Path $kitScripts 'Test-Soak.ps1') -Algorithm SHA256).Hash; 'HealthierYou-Server_0.1.0_x64-setup.exe' = (Get-FileHash -LiteralPath (Join-Path $kitInst 'HealthierYou-Server_0.1.0_x64-setup.exe') -Algorithm SHA256).Hash } }
     $script:RoleName = 'Server'
     $script:AdminRootOverride = Join-Path $tmp 'admin'
+    $script:PinnedDigests = Get-StagePins
+    Check 'pins: the kit window pins the role''s script and the server installer from the manifest' ($script:PinnedDigests.Count -eq 2 -and $script:PinnedDigests['Test-Soak.ps1'] -eq $script:Manifest.sha256['Test-Soak.ps1'])
     Initialize-AdminArea
     Check 'staging: the role''s script and the server installer are staged' ($script:AdminReady -and $script:StageHashes.ContainsKey('Test-Soak.ps1') -and $script:StagedInstaller -eq 'HealthierYou-Server_0.1.0_x64-setup.exe')
     $q = Get-AdminDir 'queue'; $out = Get-AdminDir 'out'
@@ -1669,13 +1733,36 @@ function Invoke-SelfTest {
     $script:Seen = @{}
     $rt = $null; try { $rt = Invoke-AdminOp 'soak-server' @{ hours = '0.01' } } catch { $rt = New-Result 'INCONCLUSIVE' $_.Exception.Message }
     Check 'tamper: a changed staged copy is refused, nothing runs' ($rt.verdict -ne 'PASS' -and $rt.detail -like '*changed after it was staged*' -and -not $script:Seen.path)
-    # A user's copy changed before staging (it no longer matches kit-manifest.json) is never staged.
+    # A user's copy changed after the kit window pinned it is never staged.
     Initialize-AdminArea
-    Check 'tamper: a script that does not match the manifest is not staged' (-not $script:AdminReady -and $script:AdminSetupError -like '*Test-Soak.ps1*manifest*')
+    Check 'tamper: a script changed after it was pinned is not staged' (-not $script:AdminReady -and $script:AdminSetupError -like '*Test-Soak.ps1 changed after the kit window checked it*' -and $script:StageHashes.Count -eq 0)
     $rn = Invoke-AdminOp 'soak-server' @{ hours = '0.01' }
     Check 'tamper: with staging refused, every administrator step is refused' ($rn.verdict -eq 'INCONCLUSIVE' -and $rn.detail -like '*not ready*')
-    # Results are copied back only when written by this step.
+    $pinErr = ''; try { $null = Get-StagePins } catch { $pinErr = $_.Exception.Message }
+    Check 'pins: a script that does not match kit-manifest.json is refused before the UAC prompt' ($pinErr -like '*Test-Soak.ps1 does not match kit-manifest.json*')
     Set-Content -LiteralPath (Join-Path $kitScripts 'Test-Soak.ps1') -Value '# soak v1'
+    # Missing digests are a hard refusal, never a skipped check.
+    $goodPins = $script:PinnedDigests
+    $script:PinnedDigests = [ordered]@{ 'Test-Soak.ps1' = $goodPins['Test-Soak.ps1'] }
+    Initialize-AdminArea
+    Check 'pins: a staged file without a pinned digest is refused' (-not $script:AdminReady -and $script:AdminSetupError -like '*HealthierYou-Server_0.1.0_x64-setup.exe has no SHA-256 pinned*')
+    $script:PinnedDigests = $null
+    Initialize-AdminArea
+    Check 'pins: no pins at all is refused' (-not $script:AdminReady -and $script:AdminSetupError -like '*no SHA-256 was pinned*')
+    $script:PinnedDigests = $goodPins
+    $planted = Join-Path $kitInst 'HealthierYou-Server_0.0.1_x64-setup.exe'
+    Set-Content -LiteralPath $planted -Value 'planted'
+    Initialize-AdminArea
+    Check 'pins: an installer added after the kit window checked the kit is refused' (-not $script:AdminReady -and $script:AdminSetupError -like '*HealthierYou-Server_0.*refused')
+    Remove-Item -LiteralPath $planted -Force
+    $saveM = $script:Manifest; $script:Manifest = @{ sha256 = @{ 'Test-Soak.ps1' = $saveM.sha256['Test-Soak.ps1'] } }
+    $pinErr = ''; try { $null = Get-StagePins } catch { $pinErr = $_.Exception.Message }
+    Check 'pins: a file with no SHA-256 in kit-manifest.json is refused before the UAC prompt' ($pinErr -like '*HealthierYou-Server_0.1.0_x64-setup.exe has no SHA-256 in kit-manifest.json*')
+    $script:Manifest = $null
+    $pinErr = ''; try { $null = Get-StagePins } catch { $pinErr = $_.Exception.Message }
+    Check 'pins: no kit-manifest.json at all is refused before the UAC prompt' ($pinErr -like '*no SHA-256 in kit-manifest.json*')
+    $script:Manifest = $saveM
+    # Results are copied back only when written by this step.
     Initialize-AdminArea
     $old = Join-Path (Get-AdminResultsDir) 'stale.txt'; Set-Content $old 'old PASS'
     (Get-Item -LiteralPath $old).LastWriteTime = (Get-Date).AddHours(-3)
@@ -1707,12 +1794,12 @@ function Invoke-SelfTest {
     $btKit = Join-Path $bt 'kit folder'; $btState = Join-Path $bt 'state'
     New-Item -ItemType Directory -Force -Path $btKit, $btState | Out-Null
     $btSrc = Join-Path $btKit 'Invoke-OfficeTestKit.ps1'
-    $fakeV1 = "param([switch]`$Agent, [string]`$Role, [string]`$StateDir, [string]`$InstallersDir, [string]`$ScriptsDir, [int]`$OwnerPid)`n# kit v1`nSet-Content -LiteralPath (Join-Path `$StateDir 'ran-v1.txt') -Value @(`$PSCommandPath, `$Role, `$OwnerPid, [string]`$Agent, `$env:PSModulePath)`n"
-    $fakeEvil = "param([switch]`$Agent, [string]`$Role, [string]`$StateDir, [string]`$InstallersDir, [string]`$ScriptsDir, [int]`$OwnerPid)`nSet-Content -LiteralPath (Join-Path `$StateDir 'EVIL-RAN.txt') -Value 'evil'`n"
+    $fakeV1 = "param([switch]`$Agent, [string]`$Role, [string]`$StateDir, [string]`$InstallersDir, [string]`$ScriptsDir, [int]`$OwnerPid, [string]`$StagePins, [string]`$AdminRoot, [switch]`$AgentOnce)`n# kit v1`nSet-Content -LiteralPath (Join-Path `$StateDir 'ran-v1.txt') -Value @(`$PSCommandPath, `$Role, `$OwnerPid, [string]`$Agent, `$env:PSModulePath)`n"
+    $fakeEvil = "param([switch]`$Agent, [string]`$Role, [string]`$StateDir, [string]`$InstallersDir, [string]`$ScriptsDir, [int]`$OwnerPid, [string]`$StagePins, [string]`$AdminRoot, [switch]`$AgentOnce)`nSet-Content -LiteralPath (Join-Path `$StateDir 'EVIL-RAN.txt') -Value 'evil'`n"
     [IO.File]::WriteAllText($btSrc, $fakeV1)
     $v1Hash = Get-FileSha256 $btSrc
     $btRoot = Join-Path $bt 'admin'
-    $bootArgs = @{ role = 'Camera'; sha256 = $v1Hash; src = $btSrc; root = $btRoot; acl = $false; pause = $false; state = $btState; inst = (Join-Path $btKit 'installers'); scripts = $btKit; ownerPid = 4242 }
+    $bootArgs = @{ role = 'Camera'; pins = ('Test-NetworkCapture.ps1=' + ('A' * 64)); sha256 = $v1Hash; src = $btSrc; root = $btRoot; acl = $false; pause = $false; state = $btState; inst = (Join-Path $btKit 'installers'); scripts = $btKit; ownerPid = 4242 }
     function Invoke-BootForTest([hashtable]$A) {
       $ErrorActionPreference = 'Continue'
       $o = & (Get-HostExe) -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand (ConvertTo-EncodedCommand (New-AgentBootstrap $A)) 2>&1 | Out-String
@@ -1742,17 +1829,73 @@ function Invoke-SelfTest {
     $null = New-Item -ItemType $linkType -Path $btBoot -Target $lure
     $rl = Invoke-BootForTest $bootArgs
     Check 'elevated entry: a link in place of the protected folder is moved aside' ($rl.code -eq 0 -and @(Get-ChildItem -LiteralPath $lure -Force).Count -eq 0 -and @(Get-ChildItem -LiteralPath $btRoot -Filter 'boot.untrusted-*' -Force).Count -eq 1 -and (Test-Path -LiteralPath $btStaged))
+    # End to end through the real bootstrap and the real kit script as the agent: a test script
+    # the agent stages is changed between the launch (pins taken) and the elevated run.
+    $e2eOk = (-not $script:IsWin) -or (Test-Elevated)
+    if ($e2eOk) {
+      $ee = Join-Path $tmp 'e2e'
+      $eKit = Join-Path $ee 'kit'; $eScripts = Join-Path $eKit 'scripts'; $eInst = Join-Path $eKit 'installers'; $eState = Join-Path $ee 'state'; $eMark = Join-Path $ee 'marks'
+      New-Item -ItemType Directory -Force -Path $eScripts, $eInst, $eState, $eMark | Out-Null
+      $eSrc = Join-Path $eKit 'Invoke-OfficeTestKit.ps1'
+      Copy-Item -LiteralPath $PSCommandPath -Destination $eSrc
+      $soakTpl = "param([string]`$Role, [string]`$Hours, [string]`$Report)`nSet-Content -LiteralPath '" + (Join-Path $eMark 'MARK.txt') + "' -Value 'ran'`nSet-Content -LiteralPath `$Report -Value 'Overall: PASS'`nSet-Content -LiteralPath (`$Report + '.json') -Value '{""ok"":true,""checks"":[]}'`n"
+      $eSoak = Join-Path $eScripts 'Test-Soak.ps1'
+      [IO.File]::WriteAllText($eSoak, $soakTpl.Replace('MARK', 'soak-v1'))
+      [IO.File]::WriteAllText((Join-Path $eInst 'HealthierYou-Server_0.1.0_x64-setup.exe'), 'server v1')
+      $saveE = @{ r = $script:RoleName; s = $script:ScriptsDirResolved; i = $script:InstallersDirResolved; m = $script:Manifest; st = $script:StateDirResolved; kp = $script:KitScriptPath; kh = $script:KitSha256 }
+      $script:RoleName = 'Server'; $script:ScriptsDirResolved = $eScripts; $script:InstallersDirResolved = $eInst; $script:StateDirResolved = $eState
+      $script:Manifest = @{ sha256 = @{ 'Test-Soak.ps1' = (Get-FileSha256 $eSoak); 'HealthierYou-Server_0.1.0_x64-setup.exe' = (Get-FileSha256 (Join-Path $eInst 'HealthierYou-Server_0.1.0_x64-setup.exe')) } }
+      $script:KitScriptPath = $eSrc; $script:KitSha256 = Get-FileSha256 $eSrc
+      $eAcl = [bool]$script:IsWin
+      function Invoke-E2E([string]$Root, [string]$Text) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $Root 'queue') | Out-Null
+        Write-JsonFile (Join-Path (Join-Path $Root 'queue') 'job-20260101000000001-soak-server.json') @{ op = 'soak-server'; params = @{ hours = '0.01' } }
+        # As the kit window's request would find it: the folders already belong to Administrators.
+        if ($script:IsWin) { & icacls.exe $Root /setowner '*S-1-5-32-544' /T /Q | Out-Null }
+        $ErrorActionPreference = 'Continue'
+        $o = & (Get-HostExe) -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand (ConvertTo-EncodedCommand $Text) 2>&1 | Out-String
+        return @{ code = $LASTEXITCODE; out = $o; result = (Read-JsonFile (Join-Path (Join-Path $Root 'out') 'job-20260101000000001-soak-server.result.json')) }
+      }
+      # Unchanged: the agent stages the pinned script and runs it.
+      $eRoot1 = Join-Path $ee 'admin1'
+      $t1 = New-AgentLaunchBootstrap $eRoot1 $eAcl $false $true
+      $e1 = Invoke-E2E $eRoot1 $t1
+      Check 'end to end: unchanged kit, the agent stages the pinned script and runs it' ($e1.code -eq 0 -and $e1.result.verdict -eq 'PASS' -and (Test-Path -LiteralPath (Join-Path $eMark 'soak-v1.txt')))
+      if ($e1.code -ne 0 -or $e1.result.verdict -ne 'PASS') { Write-Host $e1.out }
+      # Changed after the launch: the bootstrap text (pins) is made first, then the script is swapped.
+      $eRoot2 = Join-Path $ee 'admin2'
+      $t2 = New-AgentLaunchBootstrap $eRoot2 $eAcl $false $true
+      [IO.File]::WriteAllText($eSoak, $soakTpl.Replace('MARK', 'EVIL-soak'))
+      $e2 = Invoke-E2E $eRoot2 $t2
+      Check 'end to end: a test script changed between launch and elevation is refused by the agent' ($e2.code -eq 4 -and $e2.result.verdict -eq 'INCONCLUSIVE' -and $e2.result.detail -like '*Test-Soak.ps1 changed after the kit window checked it*')
+      Check 'end to end: the changed script never ran and was not left staged' (-not (Test-Path -LiteralPath (Join-Path $eMark 'EVIL-soak.txt')) -and -not (Test-Path -LiteralPath (Join-Path (Join-Path $eRoot2 'stage') 'Test-Soak.ps1')))
+      if ($e2.code -ne 4) { Write-Host $e2.out }
+      # A bootstrap whose pins leave out a file the agent would stage: refused, nothing runs.
+      [IO.File]::WriteAllText($eSoak, $soakTpl.Replace('MARK', 'soak-v3'))
+      $script:Manifest.sha256['Test-Soak.ps1'] = Get-FileSha256 $eSoak
+      $eRoot3 = Join-Path $ee 'admin3'
+      $t3 = New-AgentLaunchBootstrap $eRoot3 $eAcl $false $true
+      $t3 = $t3.Replace(";HealthierYou-Server_0.1.0_x64-setup.exe=$($script:Manifest.sha256['HealthierYou-Server_0.1.0_x64-setup.exe'])", '').Replace("HealthierYou-Server_0.1.0_x64-setup.exe=$($script:Manifest.sha256['HealthierYou-Server_0.1.0_x64-setup.exe']);", '')
+      $e3 = Invoke-E2E $eRoot3 $t3
+      Check 'end to end: a missing pinned digest is refused by the agent, nothing runs' ($e3.code -eq 4 -and $e3.result.detail -like '*has no SHA-256 pinned*' -and -not (Test-Path -LiteralPath (Join-Path $eMark 'soak-v3.txt')))
+      $script:RoleName = $saveE.r; $script:ScriptsDirResolved = $saveE.s; $script:InstallersDirResolved = $saveE.i; $script:Manifest = $saveE.m; $script:StateDirResolved = $saveE.st; $script:KitScriptPath = $saveE.kp; $script:KitSha256 = $saveE.kh
+    }
+    else { Write-Host '[SKIP] end-to-end bootstrap run (on Windows it needs an elevated run; CI runs it)' }
     # (c) the elevation command line runs no script file from the user's folder.
     $saveRole = $script:RoleName; $saveSha = $script:KitSha256; $savePath = $script:KitScriptPath
+    $saveScripts2 = $script:ScriptsDirResolved; $saveInst2 = $script:InstallersDirResolved; $saveMan2 = $script:Manifest
+    $script:ScriptsDirResolved = $kitScripts; $script:InstallersDirResolved = $kitInst; $script:Manifest = $saveM
     $script:RoleName = 'Server'; $script:KitSha256 = $v1Hash; $script:KitScriptPath = $btSrc
     $line = Get-AgentLaunchArgs
     $enc = ($line -split ' ')[-1]
     $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($enc))
     Check 'elevation command line: -EncodedCommand only, no -File, no kit folder path' ($line -match '^-NoProfile -ExecutionPolicy Bypass -EncodedCommand [A-Za-z0-9+/=]+$' -and $line -notmatch '(?i)-File' -and -not $line.Contains($btKit) -and $line.Length -le 30000)
     Check 'elevation bootstrap: embeds the launch hash and runs no -File' ($decoded.Contains("'$v1Hash'") -and $decoded -notmatch '(?i)-File\b' -and -not $decoded.Contains($btKit))
+    Check 'elevation bootstrap: embeds the pinned digest of every file to stage' ($decoded.Contains("StagePins = '" + (ConvertTo-PinText $goodPins) + "'") -and $goodPins.Count -eq 2)
     $script:RoleName = $saveRole; $script:KitSha256 = $saveSha; $script:KitScriptPath = $savePath
+    $script:ScriptsDirResolved = $saveScripts2; $script:InstallersDirResolved = $saveInst2; $script:Manifest = $saveMan2
     # (d) bad literals are refused before anything is embedded.
-    foreach ($bad in @(@{ role = "Server'; calc; '" }, @{ role = 'server' }, @{ sha256 = 'abc' }, @{ sha256 = ($v1Hash.Substring(0, 63) + "'") }, @{ sha256 = $v1Hash.ToLowerInvariant() }, @{ ownerPid = '1; calc' })) {
+    foreach ($bad in @(@{ role = "Server'; calc; '" }, @{ role = 'server' }, @{ sha256 = 'abc' }, @{ sha256 = ($v1Hash.Substring(0, 63) + "'") }, @{ sha256 = $v1Hash.ToLowerInvariant() }, @{ ownerPid = '1; calc' }, @{ pins = '' }, @{ pins = "Test-Soak.ps1=$v1Hash'; calc; '" }, @{ pins = "..\x=$v1Hash" + 'x' })) {
       $x = $bootArgs.Clone(); foreach ($k in $bad.Keys) { $x[$k] = $bad[$k] }
       $refused = $false; try { $null = New-AgentBootstrap $x } catch { $refused = $_.Exception.Message -like 'refused*' }
       Check "elevation bootstrap: bad $(@($bad.Keys)[0]) '$(@($bad.Values)[0])' refused" $refused
@@ -1905,6 +2048,10 @@ function Invoke-DryRun([string]$RoleName, [string]$Dir) {
     Set-Content -LiteralPath (Join-Path $inst $f) -Value "stand-in $f"
     $sha[$f] = (Get-FileHash -LiteralPath (Join-Path $inst $f) -Algorithm SHA256).Hash
   }
+  foreach ($f in 'Test-Soak.ps1', 'Test-NetworkCapture.ps1') {
+    $p = Join-Path $script:ScriptsDirResolved $f
+    if (Test-Path -LiteralPath $p) { $sha[$f] = Get-FileSha256 $p }
+  }
   $script:InstallersDirResolved = $inst
   $script:Manifest = @{ commit = 'dry-run'; run_id = '0'; companion = 'HealthierYou_0.1.0_x64-setup.exe'; companion_newer = 'HealthierYou_0.1.1_x64-setup.exe'; server = 'HealthierYou-Server_0.1.0_x64-setup.exe'; sha256 = $sha }
   $script:State = Read-State
@@ -1973,14 +2120,19 @@ if ($DryRun) {
   return
 }
 
-if (-not $script:IsWin) { throw 'The office test kit runs on Windows (use -DryRun or -SelfTest elsewhere).' }
+if (-not $script:IsWin -and -not ($Agent -and $AgentOnce)) { throw 'The office test kit runs on Windows (use -DryRun or -SelfTest elsewhere).' }
 $script:StateDirResolved = if ($StateDir) { $StateDir } else { Join-Path (Join-Path $env:LOCALAPPDATA 'HealthierYou-TestKit') $Role }
 New-Item -ItemType Directory -Force -Path (Join-Path $script:StateDirResolved 'results') | Out-Null
 $script:StatePath = Join-Path $script:StateDirResolved 'state.json'
 $script:LogFile = Join-Path $script:StateDirResolved 'kit-log.txt'
 $script:OutDirResolved = $OutDir
 
-if ($Agent) { Start-AgentLoop $OwnerPid; return }
+if ($Agent) {
+  if ($AdminRoot) { $script:AdminRootOverride = $AdminRoot }
+  $script:PinnedDigests = ConvertFrom-PinText $StagePins
+  if ($AgentOnce) { exit (Invoke-AgentRequestsOnce) }
+  Start-AgentLoop $OwnerPid; return
+}
 
 try { $Host.UI.RawUI.WindowTitle = "HealthierYou test kit - $script:PcLabel ($Role)" } catch { }
 $script:State = Read-State
