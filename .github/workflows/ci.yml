@@ -31,6 +31,8 @@
 # (T-S23 on the wire, crates/hy-server/tests/capture.rs) to the capture script's analyser,
 # and both scripts' analysis self-tests run under PowerShell 7 (Linux) and Windows
 # PowerShell 5.1 (Windows), the versions office PCs have.
+# Office test kit (scripts/windows/kit): its self-test runs on both jobs, and the Windows
+# job packs the tested installers with the kit as the artifact office-test-kit.
 name: ci
 
 on:
@@ -95,6 +97,8 @@ jobs:
           pwsh -NoProfile -File scripts/windows/Test-Soak.ps1 -SelfTest
           pwsh -NoProfile -File scripts/windows/Test-HealthierYou-Camera.ps1 -SelfTest
           pwsh -NoProfile -File scripts/windows/Test-CameraSoak.ps1 -SelfTest
+          # The office test kit: step order, resume, administrator jobs, verdicts, zip and redaction.
+          pwsh -NoProfile -File scripts/windows/kit/Invoke-OfficeTestKit.ps1 -SelfTest
 
   ui:
     name: Companion UI - type check and build
@@ -304,6 +308,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Test-HealthierYou-Camera.ps1 -SelfTest failed under Windows PowerShell 5.1' }
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Test-CameraSoak.ps1 -SelfTest
           if ($LASTEXITCODE -ne 0) { throw 'Test-CameraSoak.ps1 -SelfTest failed under Windows PowerShell 5.1' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/kit/Invoke-OfficeTestKit.ps1 -SelfTest
+          if ($LASTEXITCODE -ne 0) { throw 'Invoke-OfficeTestKit.ps1 -SelfTest failed under Windows PowerShell 5.1' }
 
       - name: Update, rollback, refusals and uninstall of the installed app
         timeout-minutes: 25
@@ -371,6 +377,55 @@ jobs:
             ${{ runner.temp }}/hy-lifecycle/*.csv
             ${{ runner.temp }}/hy-soak/*
             ${{ runner.temp }}/webview2-fixed.txt
+
+      # The office test kit (scripts/windows/kit/README.md): the companion installers A and B
+      # and server installer S1 exactly as built and tested above (CI test builds: no
+      # Authenticode signature; update keys made for this run only, A trusts B's key so the
+      # owner can try the update from file), the kit's launchers and orchestrator, the test
+      # scripts it calls, and a manifest with each installer's SHA-256. The kit's self-test
+      # and both roles' dry runs run from the assembled folder under Windows PowerShell 5.1.
+      # GitHub serves the artifact as office-test-kit.zip, holding HealthierYou-office-test-kit/.
+      - name: Assemble the office test kit
+        run: |
+          $kit = Join-Path $env:RUNNER_TEMP 'office-test-kit\HealthierYou-office-test-kit'
+          $inst = Join-Path $kit 'installers'
+          New-Item -ItemType Directory -Force $inst, (Join-Path $kit 'scripts') | Out-Null
+          Copy-Item scripts/windows/kit/* $kit
+          foreach ($s in 'Test-HealthierYou-OfficePC.ps1', 'Test-Soak.ps1', 'Test-NetworkCapture.ps1', 'Test-CameraSoak.ps1', 'Test-HealthierYou-Camera.ps1') {
+            Copy-Item (Join-Path 'scripts/windows' $s) (Join-Path $kit 'scripts')
+          }
+          $companion = 'HealthierYou_0.1.0_x64-setup.exe'
+          $newer = 'HealthierYou_0.1.1_x64-setup.exe'
+          $server = 'HealthierYou-Server_0.1.0_x64-setup.exe'
+          foreach ($f in @((Join-Path $env:RUNNER_TEMP "hy-installers\$companion"), (Join-Path $env:RUNNER_TEMP "hy-installers\$newer"), (Join-Path $env:RUNNER_TEMP "hy-server-installers\$server"))) {
+            if (-not (Test-Path $f) -or -not (Test-Path "$f.sig")) { throw "missing installer or signature: $f" }
+            Copy-Item $f, "$f.sig" $inst
+          }
+          $sha = [ordered]@{}
+          foreach ($f in @(Get-ChildItem $inst -Filter *.exe | Sort-Object Name)) { $sha[$f.Name] = (Get-FileHash $f.FullName -Algorithm SHA256).Hash }
+          $commit = '${{ github.event.pull_request.head.sha || github.sha }}'
+          [ordered]@{
+            commit = $commit.Substring(0, 12); run_id = '${{ github.run_id }}'; built_utc = (Get-Date).ToUniversalTime().ToString('o')
+            companion = $companion; companion_newer = $newer; server = $server; sha256 = $sha
+            note = 'CI test builds: no Authenticode signature; update keys made for this CI run only'
+          } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $kit 'kit-manifest.json')
+          Get-Content (Join-Path $kit 'kit-manifest.json')
+          $orch = Join-Path $kit 'Invoke-OfficeTestKit.ps1'
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File $orch -SelfTest
+          if ($LASTEXITCODE -ne 0) { throw 'the kit self-test failed from the assembled folder' }
+          foreach ($role in 'Server', 'Camera') {
+            powershell.exe -NoProfile -ExecutionPolicy Bypass -File $orch -Role $role -DryRun
+            if ($LASTEXITCODE -ne 0) { throw "the kit dry run ($role) failed from the assembled folder" }
+          }
+          Get-ChildItem -Recurse $kit | Select-Object @{ n = 'file'; e = { $_.FullName.Substring($kit.Length + 1) } }, Length | Format-Table -AutoSize | Out-String -Width 200
+
+      - name: Upload the office test kit
+        uses: actions/upload-artifact@v4
+        with:
+          name: office-test-kit
+          retention-days: 30
+          if-no-files-found: error
+          path: ${{ runner.temp }}/office-test-kit/
 
       # The server's first start on Windows: keys sealed with machine-scope DPAPI, then
       # loaded back (V1-5a). Then the load simulator (V1-5b): the real server in process

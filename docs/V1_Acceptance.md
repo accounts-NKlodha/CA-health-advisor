@@ -117,6 +117,8 @@ These are required by the approved architecture and not dropped. Each is outside
 
 For each item: the report file (or a short note for manual items), the build version, the Windows build, the date, and PASS or FAIL with what was seen. A failure is fixed in a slice with a test where one can be written, and the item is run again on the fixed build.
 
+**The office test kit** (`scripts/windows/kit/`, artifact `office-test-kit` of each CI run, retention 30 days) runs the owner's items of sections 1, 3 and 9 on two PCs in order, with the parameters above: PC1 (server) SV1, SV2 and LAN pairing, S2 and S1; PC2 (camera) I1 to I4, I6, S3 (and S4 on Windows 10), I5, CS1 or CS2 (CS3 with a USB webcam, CS4 within it), the V2-3 desk sessions, S1 on a Windows 10 or 4 GB PC, I7 and I9b. It takes each verdict from the script's own report, never marks an item passed, and packs the redacted reports into `HealthierYou-results-<PC1|PC2>-<date>.zip` to file here. The network capture runs on PC2: on PC1 the companion's traffic to its own server never crosses a network adapter, so pktmon could not see it.
+
 ## 9. V2 acceptance: the camera soak (slice V2-5, before V2 UAT)
 
 From architecture 11 ("2-hour camera soak and second webcam (V2-5) before V2 UAT"), A2 and

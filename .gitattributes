@@ -4,3 +4,5 @@
 *.icns binary
 # The posture check model (V2-1) is binary.
 *.task binary
+# Windows batch files need CRLF line endings.
+*.cmd text eol=crlf
