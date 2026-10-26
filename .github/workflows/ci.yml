@@ -402,7 +402,8 @@ jobs:
             Copy-Item $f, "$f.sig" $inst
           }
           $sha = [ordered]@{}
-          foreach ($f in @(Get-ChildItem $inst -Filter *.exe | Sort-Object Name)) { $sha[$f.Name] = (Get-FileHash $f.FullName -Algorithm SHA256).Hash }
+          # The installers and the scripts the administrator window stages: it refuses any that differ.
+          foreach ($f in @(Get-ChildItem $inst -Filter *.exe) + @(Get-ChildItem (Join-Path $kit 'scripts') -Filter *.ps1) | Sort-Object Name) { $sha[$f.Name] = (Get-FileHash $f.FullName -Algorithm SHA256).Hash }
           $commit = '${{ github.event.pull_request.head.sha || github.sha }}'
           [ordered]@{
             commit = $commit.Substring(0, 12); run_id = '${{ github.run_id }}'; built_utc = (Get-Date).ToUniversalTime().ToString('o')

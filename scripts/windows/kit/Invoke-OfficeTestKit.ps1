@@ -65,7 +65,9 @@ param(
   [string]$InstallersDir,
   [string]$ScriptsDir,
   # Run this step again (its id, for example P2-05), then carry on.
-  [string]$Redo
+  [string]$Redo,
+  # Internal: the kit window's process id, given to the administrator window.
+  [int]$OwnerPid = 0
 )
 $ErrorActionPreference = 'Stop'
 $KitVersion = '1.0'
@@ -348,18 +350,39 @@ function Save-State { Write-JsonFile $script:StatePath $script:State }
 
 # ===================================================================== child scripts
 
-# Run one of the repository's test scripts in this console (prompts and colours work),
-# as the signed-in user. Returns the exit code.
-function Invoke-KitScript([string]$Name, [string[]]$Arguments) {
-  if ($script:ScriptStub) { return [int](& $script:ScriptStub $Name $Arguments) }
-  $path = Join-Path $script:ScriptsDirResolved $Name
+# Run one of the repository's test scripts in this console (prompts and colours work).
+# With -Staged (the administrator window), only the protected, hash-checked copy is run.
+# Returns the exit code.
+function Invoke-KitScript([string]$Name, [string[]]$Arguments, [switch]$Staged) {
+  $path = if ($Staged) { Get-StagedFile $Name } else { Join-Path $script:ScriptsDirResolved $Name }
+  $script:LastScriptPath = $path
+  if ($script:ScriptStub) { return [int](& $script:ScriptStub $Name $Arguments $path) }
   if (-not (Test-Path -LiteralPath $path)) { throw "The kit is incomplete: $Name is missing" }
   $all = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $path) + $Arguments
   Write-Log "Running $Name $($Arguments -join ' ')" 'DarkGray'
-  $p = Start-Process -FilePath (Get-HostExe) -ArgumentList (ConvertTo-ArgString $all) -NoNewWindow -PassThru
+  $sp = @{ FilePath = (Get-HostExe); ArgumentList = (ConvertTo-ArgString $all); NoNewWindow = $true; PassThru = $true }
+  if ($Staged) { $sp.WorkingDirectory = (Get-AdminDir 'stage') }
+  $p = Start-Process @sp
   $null = $p.Handle
   $p.WaitForExit()
   return [int]$p.ExitCode
+}
+
+# Run a script for its report(s): old copies are removed first, so only a report written
+# by this run counts. Returns @{ code; fresh }.
+function Invoke-ReportedScript([string]$Name, [string[]]$Arguments, [string[]]$Reports, [switch]$Staged) {
+  foreach ($r in $Reports) { Remove-Item -LiteralPath $r -Force -ErrorAction SilentlyContinue }
+  $since = (Get-Date).AddSeconds(-2)
+  $code = Invoke-KitScript $Name $Arguments -Staged:$Staged
+  $stale = @($Reports | Where-Object { -not ((Test-Path -LiteralPath $_) -and (Get-Item -LiteralPath $_).LastWriteTime -ge $since) })
+  return @{ code = $code; fresh = ($stale.Count -eq 0); missing = @($stale | ForEach-Object { Split-Path -Leaf $_ }) }
+}
+
+# A verdict needs this run's own report, and a script that exited with an error is never PASS.
+function Limit-Verdict($Verdict, $Run) {
+  if (-not $Run.fresh) { return @{ verdict = 'INCONCLUSIVE'; detail = "this run wrote no report ($(@($Run.missing) -join ', ') missing; exit code $($Run.code))" } }
+  if ([int]$Run.code -ne 0 -and $Verdict.verdict -eq 'PASS') { return @{ verdict = 'INCONCLUSIVE'; detail = "$($Verdict.detail); but the script exited with code $($Run.code)" } }
+  return $Verdict
 }
 
 function Start-KeepAwake {
@@ -405,44 +428,154 @@ function Set-AutoResume([bool]$On) {
 }
 
 # ===================================================================== administrator window
-# The agent is this script run elevated (-Agent). It takes job files from
-# <state>\agent\job-*.json, runs only the operations below with checked parameters, and
-# writes job-*.result.json. It stops when the kit window has been gone for 2 minutes.
+# The agent is this script run elevated (-Agent), started once with one UAC prompt.
+#
+# Trust boundary: the moment the person approves the UAC prompt. Right then the agent
+# copies everything it will ever execute (the test script its role needs and, on PC1, the
+# server installer) into a folder under %ProgramData% that only Administrators and SYSTEM
+# can write, records each copy's SHA-256 in memory (and checks it against
+# kit-manifest.json), and from then on runs only those copies, after checking the hash
+# again. Nothing in the user's (writable) kit folder or profile is executed elevated later.
+# The user's kit window talks to it through <admin>\queue (the only folder the user may
+# write: requests are data, an allowlisted operation name and parameters that are checked);
+# results and reports come back through <admin>\out (users may read, not write); raw
+# captures go to <admin>\raw (Administrators and SYSTEM only). Report paths are chosen by
+# the agent, never taken from a request. Child PowerShell processes get a module path
+# without the user's own module folders.
 
 $AdminOps = @('server-install', 'server-passphrase', 'server-pairing-evidence', 'soak-server', 'network-capture', 'echo')
 
-function Test-AdminParams([string]$Op, [hashtable]$P) {
-  $results = (Join-Path $script:StateDirResolved 'results')
-  function Under([string]$x, [string]$dir) {
-    if (-not $x) { return $false }
-    $full = [IO.Path]::GetFullPath($x)
-    return $full.StartsWith(([IO.Path]::GetFullPath($dir).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)
+function Get-AdminRoot {
+  if ($script:AdminRootOverride) { return $script:AdminRootOverride }
+  return (Join-Path (Join-Path $env:ProgramData 'HealthierYou-TestKit-Admin') $script:RoleName)
+}
+function Get-AdminDir([string]$Part) { Join-Path (Get-AdminRoot) $Part }
+function Get-AdminResultsDir { Join-Path (Get-AdminDir 'out') 'results' }
+
+function Test-AclApplies { return ($script:IsWin -and ((-not $script:Sim) -or $script:TestAcl)) }
+
+# Owner Administrators; only SYSTEM and Administrators may write. Mode: read (users may
+# read), queue (users may also create and delete files), private (no users at all).
+function Set-AdminAcl([string]$Path, [string]$Mode) {
+  if (-not (Test-AclApplies)) { return }
+  $grant = @('*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F')
+  if ($Mode -eq 'read') { $grant += '*S-1-5-32-545:(OI)(CI)RX' }
+  if ($Mode -eq 'queue') { $grant += '*S-1-5-32-545:(OI)(CI)M' }
+  & icacls.exe $Path /setowner '*S-1-5-32-544' /Q | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "could not make Administrators the owner of the kit's administrator folder (icacls exit $LASTEXITCODE)" }
+  $a = @($Path, '/inheritance:r', '/grant:r') + $grant + @('/Q')
+  & icacls.exe @a | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "could not protect the kit's administrator folder (icacls exit $LASTEXITCODE)" }
+}
+
+# A folder an ordinary user may have made first (or a link) is moved aside, never used.
+function Initialize-SafeDir([string]$Path, [string]$Mode, [switch]$Fresh) {
+  if (Test-Path -LiteralPath $Path) {
+    $item = Get-Item -LiteralPath $Path -Force
+    $untrusted = $false
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { $untrusted = $true }
+    elseif (Test-AclApplies) {
+      $owner = (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier]).Value
+      if (@('S-1-5-32-544', 'S-1-5-18') -notcontains $owner) { $untrusted = $true }
+    }
+    if ($untrusted) {
+      $aside = "$Path.untrusted-" + [guid]::NewGuid().ToString('N').Substring(0, 8)
+      Move-Item -LiteralPath $Path -Destination $aside -Force
+      Write-Log 'A folder made before the administrator window existed was moved aside (not used).' 'Yellow'
+    }
+    elseif ($Fresh) { Remove-Item -LiteralPath $Path -Recurse -Force }
   }
+  if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Force -Path $Path | Out-Null }
+  Set-AdminAcl $Path $Mode
+}
+
+function Get-StageList {
+  $list = @()
+  if ($script:RoleName -eq 'Server') {
+    $list += @{ name = 'Test-Soak.ps1'; src = (Join-Path $script:ScriptsDirResolved 'Test-Soak.ps1') }
+    $inst = Get-Installer 'server'
+    if ($inst) { $list += @{ name = (Split-Path -Leaf $inst); src = $inst; installer = $true } }
+  }
+  else { $list += @{ name = 'Test-NetworkCapture.ps1'; src = (Join-Path $script:ScriptsDirResolved 'Test-NetworkCapture.ps1') } }
+  return $list
+}
+
+# The elevated side only: make the protected folders and stage the files it will run.
+function Initialize-AdminArea {
+  $script:AdminReady = $false
+  $script:AdminSetupError = $null
+  $script:StageHashes = @{}
+  $script:StagedInstaller = $null
+  try {
+    if (-not $script:AdminRootOverride) { Initialize-SafeDir (Split-Path -Parent (Get-AdminRoot)) 'read' }
+    Initialize-SafeDir (Get-AdminRoot) 'read'
+    Initialize-SafeDir (Get-AdminDir 'queue') 'queue'
+    Initialize-SafeDir (Get-AdminDir 'out') 'read'
+    Initialize-SafeDir (Get-AdminResultsDir) 'read'
+    Initialize-SafeDir (Get-AdminDir 'raw') 'private'
+    Initialize-SafeDir (Get-AdminDir 'stage') 'read' -Fresh
+    foreach ($f in (Get-StageList)) {
+      if (-not (Test-Path -LiteralPath $f.src)) { throw "the kit is incomplete: $($f.name) is missing" }
+      $dest = Join-Path (Get-AdminDir 'stage') $f.name
+      Copy-Item -LiteralPath $f.src -Destination $dest -Force
+      $h = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
+      if ($script:Manifest -and $script:Manifest.sha256 -and $script:Manifest.sha256[$f.name] -and ([string]$script:Manifest.sha256[$f.name]).ToUpperInvariant() -ne $h) {
+        throw "$($f.name) does not match kit-manifest.json: it was changed after the kit was built"
+      }
+      $script:StageHashes[$f.name] = $h
+      if ($f.installer) { $script:StagedInstaller = $f.name }
+    }
+    $script:AdminReady = $true
+  }
+  catch { $script:AdminSetupError = $_.Exception.Message; Write-Log "The administrator folder could not be prepared: $($script:AdminSetupError)" 'Red' }
+}
+
+# A staged file, only if it is still exactly what was staged.
+function Get-StagedFile([string]$Name) {
+  if (-not $script:StageHashes -or -not $script:StageHashes.ContainsKey($Name)) { throw "$Name was not staged for the administrator window" }
+  $p = Join-Path (Get-AdminDir 'stage') $Name
+  if (-not (Test-Path -LiteralPath $p) -or (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash -ne $script:StageHashes[$Name]) {
+    throw "the staged copy of $Name was changed after it was staged; refused"
+  }
+  return $p
+}
+
+# Children of the administrator window load modules from system folders only.
+function Set-SafeModulePath {
+  if (-not $script:IsWin) { return }
+  $paths = @((Join-Path $PSHOME 'Modules'), (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'), (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\Modules'))
+  $env:PSModulePath = (@($paths | Select-Object -Unique) -join ';')
+}
+
+function Test-AdminParams([string]$Op, [hashtable]$P) {
   switch ($Op) {
     'server-install' { if ($P.mirror -and $P.mirror -notmatch '^(?:[A-Za-z]:\\|\\\\[A-Za-z0-9._-]+\\)[A-Za-z0-9._\\-]{0,200}$') { return 'the mirror folder must be a drive or share path without spaces' } }
-    'soak-server' {
-      if (-not (Under $P.report $results)) { return 'the report must be in the kit results folder' }
-      $h = 0.0; if (-not [double]::TryParse([string]$P.hours, [ref]$h) -or $h -le 0 -or $h -gt 24) { return 'hours must be between 0 and 24' }
-    }
+    'soak-server' { $h = 0.0; if (-not [double]::TryParse([string]$P.hours, [ref]$h) -or $h -le 0 -or $h -gt 24) { return 'hours must be between 0 and 24' } }
     'network-capture' {
       if ([string]$P.server -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$') { return 'the server name may hold only letters, digits, dots and hyphens' }
       if ([string]$P.canary -notmatch '^[A-Z0-9-]{4,40}$') { return 'bad pairing label' }
-      if (-not (Under $P.report $results)) { return 'the report must be in the kit results folder' }
-      if (-not (Under $P.out $script:StateDirResolved)) { return 'the capture folder must be in the kit folder' }
     }
     'server-pairing-evidence' { $t = [datetime]::MinValue; if (-not [datetime]::TryParse([string]$P.since, [ref]$t)) { return 'bad time' } }
   }
   return $null
 }
 
+# Run a staged script for a report the agent names itself (old copies removed first).
+function Invoke-StagedReport([string]$Script, [string[]]$Arguments, [string]$ReportName) {
+  $report = Join-Path (Get-AdminResultsDir) $ReportName
+  $run = Invoke-ReportedScript $Script ($Arguments + @('-Report', $report)) @($report, "$report.json") -Staged
+  return @{ run = $run; report = $report; files = @($ReportName, "$ReportName.json") }
+}
+
 function Invoke-AdminOp([string]$Op, [hashtable]$P) {
   if ($AdminOps -notcontains $Op) { return New-Result 'INCONCLUSIVE' "unknown administrator step '$Op' refused" }
   $bad = Test-AdminParams $Op $P
   if ($bad) { return New-Result 'INCONCLUSIVE' "refused: $bad" }
-  if ($script:AdminStub) { return (& $script:AdminStub $Op $P) }
+  if ($script:AdminStub) { $s = & $script:AdminStub $Op $P; if ($s) { return $s } }
+  if ($Op -eq 'echo') { return New-Result 'PASS' "echo $($P.text)" }
+  if (-not $script:AdminReady) { return New-Result 'INCONCLUSIVE' "the administrator folder is not ready: $($script:AdminSetupError)" }
   $serverExe = if ($env:ProgramFiles) { Join-Path $env:ProgramFiles 'HealthierYou Server\hy-server.exe' } else { '' }
   switch ($Op) {
-    'echo' { return New-Result 'PASS' "echo $($P.text)" }
     'server-install' {
       $svc = Get-CimInstance Win32_Service -Filter "Name = 'HealthierYouServer'" -ErrorAction SilentlyContinue
       $notes = @()
@@ -450,14 +583,12 @@ function Invoke-AdminOp([string]$Op, [hashtable]$P) {
         $notes += "already installed (version $((Get-ItemProperty 'HKLM:\Software\HealthierYou\Server' -ErrorAction SilentlyContinue).Version)); not installed again"
       }
       else {
-        $inst = Get-Installer 'server'
-        if (-not $inst) { return New-Result 'INCONCLUSIVE' 'the server installer is not in the kit' }
-        $h = Test-InstallerHash $inst
-        if ($h.ok -eq $false) { return New-Result 'FAIL' $h.detail }
+        if (-not $script:StagedInstaller) { return New-Result 'INCONCLUSIVE' 'the server installer is not in the kit' }
+        $inst = Get-StagedFile $script:StagedInstaller
         $a = '/S'
         if ($P.mirror) { $a += " /MIRROR=$($P.mirror)" }
         Write-Log "Installing the server silently ($a)..." 'Cyan'
-        $proc = Start-Process -FilePath $inst -ArgumentList $a -PassThru
+        $proc = Start-Process -FilePath $inst -ArgumentList $a -WorkingDirectory (Get-AdminDir 'stage') -PassThru
         $null = $proc.Handle; $proc.WaitForExit()
         $code = [int]$proc.ExitCode
         $meaning = @{ 0 = 'done'; 2 = 'bad options or not an administrator'; 3 = 'refused (signature or version)'; 4 = 'new version did not start, previous put back'; 5 = 'the service did not start'; 6 = 'the mirror is not the data''s own'; 7 = 'not confirmed stopped or copies not verified'; 8 = 'data-folder rights could not be set'; 9 = 'rollback could not complete' }
@@ -533,34 +664,37 @@ function Invoke-AdminOp([string]$Op, [hashtable]$P) {
       return $r
     }
     'soak-server' {
-      $code = Invoke-KitScript 'Test-Soak.ps1' @('-Role', 'Server', '-Hours', [string]$P.hours, '-Report', [string]$P.report)
-      $v = Get-SoakVerdict ($P.report + '.json') $code
-      return New-Result $v.verdict $v.detail
+      $x = Invoke-StagedReport 'Test-Soak.ps1' @('-Role', 'Server', '-Hours', [string]$P.hours) 'hy-soak-server.txt'
+      $v = Limit-Verdict (Get-SoakVerdict ($x.report + '.json') $x.run.code) $x.run
+      $r = New-Result $v.verdict $v.detail; $r.files = $x.files
+      return $r
     }
     'network-capture' {
       Show-Banner 'Network capture with the pairing' @("When HealthierYou asks for a PC name while pairing, type:   $($P.canary)", 'The script below calls it the -Canary text. Follow its five phases; PC1 confirms in phase PairedOff.') 'Cyan'
-      $code = Invoke-KitScript 'Test-NetworkCapture.ps1' @('-Server', [string]$P.server, '-Canary', [string]$P.canary, '-Out', [string]$P.out, '-Report', [string]$P.report)
-      $v = Get-ExitVerdict $code ($P.report + '.json') 'Overall'
-      return New-Result $v.verdict $v.detail
+      $x = Invoke-StagedReport 'Test-NetworkCapture.ps1' @('-Server', [string]$P.server, '-Canary', [string]$P.canary, '-Out', (Get-AdminDir 'raw')) 'hy-network-capture.txt'
+      $v = Limit-Verdict (Get-ExitVerdict $x.run.code ($x.report + '.json') 'Overall') $x.run
+      $r = New-Result $v.verdict $v.detail; $r.files = $x.files
+      return $r
     }
   }
 }
 
-function Get-AgentDir { Join-Path $script:StateDirResolved 'agent' }
-
-# Process one waiting job (the agent's loop calls this; the self-test calls it directly).
+# Process one waiting request (the agent's loop calls this; the self-test calls it directly).
 function Invoke-AgentOnce {
-  $dir = Get-AgentDir
-  $job = @(Get-ChildItem -LiteralPath $dir -Filter 'job-*.json' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike '*.result.json' } | Sort-Object Name | Select-Object -First 1)
+  $q = Get-AdminDir 'queue'; $out = Get-AdminDir 'out'
+  $job = @(Get-ChildItem -LiteralPath $q -Filter 'job-*.json' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^job-\d{17}-[a-z-]{1,40}\.json$' } | Sort-Object Name | Select-Object -First 1)
   if (-not $job.Count) { return $false }
   $job = $job[0]
-  $base = $job.FullName.Substring(0, $job.FullName.Length - 5)
-  $running = "$base.running"
-  Move-Item -LiteralPath $job.FullName -Destination $running -Force
-  $j = Read-JsonFile $running
+  $base = $job.Name.Substring(0, $job.Name.Length - 5)
+  $text = $null
+  if ($job.Length -le 65536) { try { $text = [IO.File]::ReadAllText($job.FullName) } catch { } }
+  Remove-Item -LiteralPath $job.FullName -Force -ErrorAction SilentlyContinue
+  $running = Join-Path $out "$base.running"
+  Set-Content -LiteralPath $running -Value (Get-NowText)
   $r = $null
   try {
-    if (-not $j -or -not $j.op) { $r = New-Result 'INCONCLUSIVE' 'unreadable job' }
+    $j = $null; if ($text) { try { $j = ConvertTo-HashtableDeep ($text | ConvertFrom-Json) } catch { } }
+    if (-not $j -or -not $j.op) { $r = New-Result 'INCONCLUSIVE' 'unreadable request' }
     else {
       $params = if ($j.params -is [hashtable]) { $j.params } else { @{} }
       Write-Log "Administrator step: $($j.op)" 'Cyan'
@@ -568,50 +702,59 @@ function Invoke-AgentOnce {
     }
   }
   catch { $r = New-Result 'INCONCLUSIVE' "the administrator step stopped: $($_.Exception.Message)" }
-  Write-JsonFile "$base.result.json" $r
+  Write-JsonFile (Join-Path $out "$base.result.json") $r
   Remove-Item -LiteralPath $running -Force -ErrorAction SilentlyContinue
   Write-Log "Administrator step done: $($r.verdict)" 'Cyan'
   return $true
 }
 
-function Start-AgentLoop {
-  $dir = Get-AgentDir
-  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+function Start-AgentLoop([int]$Owner) {
   try { $Host.UI.RawUI.WindowTitle = "HealthierYou test kit - ADMINISTRATOR ($script:RoleName)" } catch { }
-  Set-Content -LiteralPath (Join-Path $dir 'agent.pid') -Value $PID
+  Set-SafeModulePath
+  Initialize-AdminArea
+  $out = Get-AdminDir 'out'; $q = Get-AdminDir 'queue'
+  if ($Owner -gt 0) { Set-Content -LiteralPath (Join-Path $q 'owner.pid') -Value $Owner }
+  Set-Content -LiteralPath (Join-Path $out 'agent.pid') -Value $PID
   Show-Banner 'HealthierYou test kit: administrator window' @('Keep this window open. The kit sends its administrator steps here.', 'Some of them ask you something: the kit window tells you when to look here.')
   $goneSince = $null
   while ($true) {
     $did = Invoke-AgentOnce
-    $owner = 0; try { $owner = [int](Get-Content -LiteralPath (Join-Path $dir 'owner.pid') -ErrorAction Stop) } catch { }
-    $alive = $owner -gt 0 -and [bool](Get-Process -Id $owner -ErrorAction SilentlyContinue)
+    $ownerPid = 0; try { $ownerPid = [int](Get-Content -LiteralPath (Join-Path $q 'owner.pid') -ErrorAction Stop) } catch { }
+    $alive = $ownerPid -gt 0 -and [bool](Get-Process -Id $ownerPid -ErrorAction SilentlyContinue)
     if ($alive) { $goneSince = $null } elseif (-not $goneSince) { $goneSince = Get-Date }
     if ($goneSince -and ((Get-Date) - $goneSince).TotalSeconds -gt 120 -and -not $did) { break }
     if (-not $did) { Start-Sleep -Seconds 1 }
   }
-  Remove-Item -LiteralPath (Join-Path $dir 'agent.pid') -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath (Join-Path $out 'agent.pid') -ErrorAction SilentlyContinue
 }
 
 function Test-AgentAlive {
   if ($script:AgentInline) { return $true }
-  $f = Join-Path (Get-AgentDir) 'agent.pid'
+  $f = Join-Path (Get-AdminDir 'out') 'agent.pid'
   if (-not (Test-Path -LiteralPath $f)) { return $false }
   try { $id = [int](Get-Content -LiteralPath $f) } catch { return $false }
   $p = Get-Process -Id $id -ErrorAction SilentlyContinue
   return [bool]($p -and $p.ProcessName -match '^(powershell|pwsh)$')
 }
 
+function Initialize-InlineAdmin {
+  if ($script:InlineAdminDone) { return }
+  Set-SafeModulePath
+  Initialize-AdminArea
+  $script:InlineAdminDone = $true
+}
+
 # Start the administrator window once (one UAC prompt), or reuse one still open.
 function Start-AdminAgent([string[]]$Why) {
   if ($script:AgentInline -or $script:AgentStarted) { return $true }
-  $dir = Get-AgentDir
-  New-Item -ItemType Directory -Force -Path $dir | Out-Null
-  Set-Content -LiteralPath (Join-Path $dir 'owner.pid') -Value $PID
   if ((Test-Elevated) -or $script:Unattended) { $script:AgentInline = $true; return $true }
-  if (Test-AgentAlive) { $script:AgentStarted = $true; Write-Log 'Using the administrator window that is still open.'; return $true }
+  if (Test-AgentAlive) {
+    try { Set-Content -LiteralPath (Join-Path (Get-AdminDir 'queue') 'owner.pid') -Value $PID } catch { }
+    $script:AgentStarted = $true; Write-Log 'Using the administrator window that is still open.'; return $true
+  }
   Show-Banner 'One administrator prompt' (@('Some steps need an administrator:') + @($Why | ForEach-Object { "  - $_" }) + @('', 'Windows will now ask once: "Do you want to allow this app to make changes?"', 'Click Yes (or type an administrator password if Windows asks for one).', 'A second window, "HealthierYou test kit - ADMINISTRATOR", opens: keep it open.', 'Every other step runs as you, without administrator rights.'))
   while ($true) {
-    $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Agent', '-Role', $script:RoleName, '-StateDir', $script:StateDirResolved, '-InstallersDir', $script:InstallersDirResolved, '-ScriptsDir', $script:ScriptsDirResolved)
+    $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Agent', '-Role', $script:RoleName, '-StateDir', $script:StateDirResolved, '-InstallersDir', $script:InstallersDirResolved, '-ScriptsDir', $script:ScriptsDirResolved, '-OwnerPid', [string]$PID)
     try { Start-Process -FilePath (Get-HostExe) -ArgumentList (ConvertTo-ArgString $a) -Verb RunAs | Out-Null }
     catch {
       Write-Log "The administrator window was not started: $($_.Exception.Message)" 'Red'
@@ -624,28 +767,47 @@ function Start-AdminAgent([string[]]$Why) {
   }
 }
 
+# Copy the reports an administrator step wrote (in <admin>\out\results, readable) into the
+# kit's results, fresh only: a report from before this step is never used.
+function Copy-AdminReports($Result, [datetime]$Since) {
+  if (-not ($Result -is [hashtable]) -or -not $Result.files) { return $Result }
+  $missing = @()
+  foreach ($n in @($Result.files)) {
+    $dest = Get-ResultPath ([string]$n)
+    Remove-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue
+    $src = Join-Path (Get-AdminResultsDir) ([IO.Path]::GetFileName([string]$n))
+    if ((Test-Path -LiteralPath $src) -and (Get-Item -LiteralPath $src).LastWriteTime -ge $Since) { Copy-Item -LiteralPath $src -Destination $dest -Force }
+    else { $missing += [string]$n }
+  }
+  if ($missing.Count -and $Result.verdict -eq 'PASS') { $Result.verdict = 'INCONCLUSIVE'; $Result.detail = "$($Result.detail); report not copied: $($missing -join ', ')" }
+  $Result.Remove('files')
+  return $Result
+}
+
 # Hand an operation to the administrator window and wait for it (or, with -NoWait, return
 # the job's name). A job still pending from an earlier run under the same key is waited
 # for instead of being sent again (for example the 8-hour server soak after the kit window
 # was closed).
 function Invoke-AdminJob([string]$Op, [hashtable]$Params, [string]$Key, [switch]$NoWait) {
+  $since = (Get-Date).AddSeconds(-2)
   if ($script:AgentInline) {
-    $r = Invoke-AdminOp $Op $Params
+    Initialize-InlineAdmin
+    $r = Copy-AdminReports (Invoke-AdminOp $Op $Params) $since
     if ($NoWait) { $script:InlineResults[$Key] = $r; return "inline:$Key" }
     return $r
   }
   if (-not (Test-AgentAlive)) { return New-Result 'INCONCLUSIVE' 'the administrator window is not open (the UAC prompt was declined or the window was closed)' }
-  $dir = Get-AgentDir
+  $q = Get-AdminDir 'queue'; $out = Get-AdminDir 'out'
   $jobs = $script:State.data['jobs']; if (-not ($jobs -is [hashtable])) { $jobs = @{}; $script:State.data['jobs'] = $jobs }
   $name = $null
   if ($Key -and $jobs[$Key]) {
-    $old = [string]$jobs[$Key]
-    if ((Test-Path -LiteralPath (Join-Path $dir "$old.result.json")) -or (Test-Path -LiteralPath (Join-Path $dir "$old.json")) -or (Test-Path -LiteralPath (Join-Path $dir "$old.running"))) { $name = $old; Write-Log "Waiting for the administrator step started earlier ($Op)." }
+    $old = [string]$jobs[$Key].name
+    if ($old -and ((Test-Path -LiteralPath (Join-Path $out "$old.result.json")) -or (Test-Path -LiteralPath (Join-Path $q "$old.json")) -or (Test-Path -LiteralPath (Join-Path $out "$old.running")))) { $name = $old; Write-Log "Waiting for the administrator step started earlier ($Op)." }
   }
   if (-not $name) {
     $name = 'job-{0}-{1}' -f (Get-Date).ToString('yyyyMMddHHmmssfff'), $Op
-    Write-JsonFile (Join-Path $dir "$name.json") @{ op = $Op; params = $Params }
-    if ($Key) { $jobs[$Key] = $name; Save-State }
+    Write-JsonFile (Join-Path $q "$name.json") @{ op = $Op; params = $Params }
+    if ($Key) { $jobs[$Key] = @{ name = $name; since = $since.ToString('o') }; Save-State }
   }
   if ($NoWait) { return $name }
   return (Wait-AdminJob $name $Key)
@@ -653,8 +815,7 @@ function Invoke-AdminJob([string]$Op, [hashtable]$Params, [string]$Key, [switch]
 
 function Wait-AdminJob([string]$Name, [string]$Key) {
   if ($Name -like 'inline:*') { return $script:InlineResults[$Name.Substring(7)] }
-  $dir = Get-AgentDir
-  $res = Join-Path $dir "$Name.result.json"
+  $res = Join-Path (Get-AdminDir 'out') "$Name.result.json"
   while (-not (Test-Path -LiteralPath $res)) {
     if (-not (Test-AgentAlive)) {
       Start-Sleep -Seconds 2
@@ -664,10 +825,14 @@ function Wait-AdminJob([string]$Name, [string]$Key) {
     Start-Sleep -Seconds 2
   }
   $r = Read-JsonFile $res
-  Remove-Item -LiteralPath $res -ErrorAction SilentlyContinue
-  if ($Key -and $script:State.data['jobs'] -is [hashtable]) { $script:State.data['jobs'].Remove($Key); Save-State }
+  $since = (Get-Date).AddDays(-2)
+  if ($Key -and $script:State.data['jobs'] -is [hashtable]) {
+    $j = $script:State.data['jobs'][$Key]
+    if ($j -is [hashtable] -and $j.since) { $since = [datetime]::Parse([string]$j.since) }
+    $script:State.data['jobs'].Remove($Key); Save-State
+  }
   if (-not $r) { return New-Result 'INCONCLUSIVE' 'the administrator step left no readable result' }
-  return $r
+  return (Copy-AdminReports $r $since)
 }
 
 # ===================================================================== zip and redaction
@@ -948,14 +1113,13 @@ function Invoke-ServerSoakStep([hashtable]$Ctx) {
   if (-not $running) { return New-Result 'INCONCLUSIVE' 'the HealthierYouServer service is not running, so the soaks did not start' @('S2', 'S1') }
   Show-Banner '8-hour soaks: server (S2) and this PC''s companion (S1)' @('Nothing to do: leave this PC on, this window and the ADMINISTRATOR window open.', 'This PC is kept awake while they run. Locking it is fine. Work on PC2 meanwhile.', 'They need 8 hours of awake time (at most about 16.5 hours in all).')
   if (-not (Read-YesNo 'Start the 8-hour soaks now?' $true)) { return New-Result 'SKIPPED' 'not started (run the kit again to start them)' @('S2', 'S1') }
-  $serverReport = Get-ResultPath 'hy-soak-server.txt'
   $companionReport = Get-ResultPath 'hy-soak-companion.txt'
   Start-KeepAwake
   try {
-    $job = Invoke-AdminJob 'soak-server' @{ hours = $hours; report = $serverReport } 'soak-server' -NoWait
+    $job = Invoke-AdminJob 'soak-server' @{ hours = $hours } 'soak-server' -NoWait
     if ($job -is [hashtable]) { $s2 = $job; $job = $null }
-    $code = Invoke-KitScript 'Test-Soak.ps1' @('-Role', 'Companion', '-Hours', $hours, '-Report', $companionReport)
-    $s1 = Get-SoakVerdict ($companionReport + '.json') $code
+    $run = Invoke-ReportedScript 'Test-Soak.ps1' @('-Role', 'Companion', '-Hours', $hours, '-Report', $companionReport) @($companionReport, "$companionReport.json")
+    $s1 = Limit-Verdict (Get-SoakVerdict ($companionReport + '.json') $run.code) $run
     if ($job) { Write-Log 'Companion soak finished; waiting for the server soak.'; $s2 = Wait-AdminJob $job 'soak-server' }
   }
   finally { Stop-KeepAwake }
@@ -979,11 +1143,11 @@ function Invoke-GuidedInstallStep([hashtable]$Ctx) {
   $a = @('-Phase', 'Install', '-Installer', $inst, '-Report', $report)
   $newer = Get-Installer 'companion-newer'
   if ($newer) { $a += @('-NewerInstaller', $newer) }
-  $code = Invoke-KitScript 'Test-HealthierYou-OfficePC.ps1' $a
-  $v = Get-GuidedVerdict $report
+  $run = Invoke-ReportedScript 'Test-HealthierYou-OfficePC.ps1' $a @($report)
+  $v = Limit-Verdict (Get-GuidedVerdict $report) $run
   $null = Start-CompanionIfNeeded
   $rows = @('I1', 'I2', 'I3', 'I4', 'A16'); if ($newer) { $rows += 'I6' }
-  return New-Result $v.verdict "$($v.detail) (exit code $code)" $rows
+  return New-Result $v.verdict "$($v.detail) (exit code $($run.code))" $rows
 }
 
 function Invoke-SignInStep([hashtable]$Ctx) {
@@ -997,10 +1161,10 @@ function Invoke-SignInStep([hashtable]$Ctx) {
     return @{ verdict = 'PAUSE'; detail = 'Sign out of Windows now. The kit carries on after you sign in again.' }
   }
   $report = Get-ResultPath 'hy-office-aftersignin.txt'
-  $code = Invoke-KitScript 'Test-HealthierYou-OfficePC.ps1' @('-Phase', 'AfterSignIn', '-Report', $report)
-  $v = Get-GuidedVerdict $report
+  $run = Invoke-ReportedScript 'Test-HealthierYou-OfficePC.ps1' @('-Phase', 'AfterSignIn', '-Report', $report) @($report)
+  $v = Limit-Verdict (Get-GuidedVerdict $report) $run
   $d.Remove('signout_asked')
-  return New-Result $v.verdict "$($v.detail) (exit code $code)" @('I5')
+  return New-Result $v.verdict "$($v.detail) (exit code $($run.code))" @('I5')
 }
 
 function Invoke-CaptureStep([hashtable]$Ctx) {
@@ -1032,9 +1196,8 @@ function Invoke-CaptureStep([hashtable]$Ctx) {
     'Phase "Pending": paste the slip from PC1 (Settings > Sharing & server > Pair), do NOT confirm yet.',
     'Phase "PairedOff": confirm on PC1 after comparing the six words and the check code.',
     'When it says "Report written", come back here.')
-  $out = Join-Path $script:StateDirResolved 'raw-capture'
-  $r = Invoke-AdminJob 'network-capture' @{ server = $d['server_name']; canary = $d['canary']; report = (Get-ResultPath 'hy-network-capture.txt'); out = $out } 'network-capture'
-  Show-Banner 'Capture step finished' @('Tell PC1: press Enter on its pairing screen now.', 'The raw capture files stay on this PC and are never put in the zip.') 'Green'
+  $r = Invoke-AdminJob 'network-capture' @{ server = $d['server_name']; canary = $d['canary'] } 'network-capture'
+  Show-Banner 'Capture step finished' @('Tell PC1: press Enter on its pairing screen now.', 'The raw capture files stay in an administrators-only folder on this PC and are never put in the zip.') 'Green'
   $r.rows = $rows
   return $r
 }
@@ -1053,10 +1216,10 @@ function Invoke-CameraSoakStep([hashtable]$Ctx, [string]$Kind, [string[]]$Rows, 
   Start-KeepAwake
   try {
     $hours = if ($script:Unattended) { '0.01' } else { '2' }
-    $code = Invoke-KitScript 'Test-CameraSoak.ps1' @('-Hours', $hours, '-Webcam', $Kind, '-Report', $report)
+    $run = Invoke-ReportedScript 'Test-CameraSoak.ps1' @('-Hours', $hours, '-Webcam', $Kind, '-Report', $report) @($report, "$report.json")
   }
   finally { Stop-KeepAwake }
-  $v = Get-ExitVerdict $code ($report + '.json') 'verdict'
+  $v = Limit-Verdict (Get-ExitVerdict $run.code ($report + '.json') 'verdict') $run
   return New-Result $v.verdict "$($v.detail); report $ReportName" $Rows
 }
 
@@ -1084,13 +1247,34 @@ function Invoke-SecondCameraSoakStep([hashtable]$Ctx) {
   return Invoke-CameraSoakStep $Ctx 'usb' @('CS3') 'hy-camera-soak-usb.txt'
 }
 
+# One desk session. It counts as done only with this run's own evidence: exit code 0, a
+# fresh report whose session line passed, and the fresh raw-count JSON HealthierYou wrote.
+function Invoke-DeskSession([string]$DeskDir, [string]$SetupNo, [string]$SessionNo) {
+  $base = Join-Path $DeskDir "hy-desk-$SetupNo-$SessionNo"
+  $txt = "$base.txt"; $json = "$base.json"
+  foreach ($old in "$base.csv", "$base.labels.csv", "$base.session.txt") { Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue }
+  $run = Invoke-ReportedScript 'Test-HealthierYou-Camera.ps1' @('-Phase', 'Desk', '-Setup', $SetupNo, '-Session', $SessionNo, '-Report', $txt) @($txt, $json)
+  $why = $null
+  if ($run.code -ne 0) { $why = "the session script exited with code $($run.code)" }
+  elseif (-not $run.fresh) { $why = "this run wrote no $(@($run.missing) -join ' or ')" }
+  elseif (-not @(Get-Content -LiteralPath $txt | Where-Object { $_ -like '`[PASS`] session-report*' }).Count) { $why = 'HealthierYou gave no session counts' }
+  if ($why) {
+    # A failed session's files must not reach the gate.
+    foreach ($old in $json, "$base.session.txt") { Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue }
+    return @{ ok = $false; why = $why }
+  }
+  return @{ ok = $true; why = '' }
+}
+
 function Invoke-DeskStep([hashtable]$Ctx) {
   $rows = $script:State.data['rows']
   if (-not $rows.camera_kind) { return New-Result 'SKIPPED' 'no webcam found on this PC' @('V2-3') }
   $d = $script:State.data
   $done = @($d['desk_done'] | Where-Object { $_ })
   $deskDir = Join-Path (Get-ResultsDir) 'desk'
+  New-Item -ItemType Directory -Force -Path $deskDir | Out-Null
   $all = @(); foreach ($s in 1..5) { foreach ($n in 1..2) { $all += "$s-$n" } }
+  $deskFails = 0
   while ($true) {
     $next = @($all | Where-Object { $done -notcontains $_ } | Select-Object -First 1)
     if (-not $next.Count) { break }
@@ -1099,20 +1283,28 @@ function Invoke-DeskStep([hashtable]$Ctx) {
     if ($parts[1] -eq '1' -and $done.Count) { $lines += "Setup $($parts[0]) is a NEW setup: change something (camera position, light, glasses, desk, another PC's webcam)." }
     $lines += 'y = start the next session now; l = later (the kit stops; it carries on here next time); d = done with desk sessions (make the report)'
     Show-Banner "Desk session: setup $($parts[0]), session $($parts[1])" $lines
-    $a = Read-Answer '  y / l / d' $(if ($script:Unattended -and $done.Count -ge 2) { 'd' } else { 'y' })
+    $a = Read-Answer '  y / l / d' $(if ($script:Unattended -and ($done.Count -ge 2 -or $deskFails -ge 3)) { 'd' } else { 'y' })
     if ($a -match '^[lL]') { return @{ verdict = 'PAUSE'; detail = "desk sessions paused after $($done.Count) of 10" } }
     if ($a -match '^[dD]') { break }
     if (-not (Start-CompanionIfNeeded)) { return New-Result 'INCONCLUSIVE' 'HealthierYou did not start' @('V2-3') }
-    $null = Invoke-KitScript 'Test-HealthierYou-Camera.ps1' @('-Phase', 'Desk', '-Setup', $parts[0], '-Session', $parts[1], '-Report', (Join-Path $deskDir "hy-desk-$($parts[0])-$($parts[1]).txt"))
-    $done += $next[0]
-    $d['desk_done'] = @($done)
-    Save-State
+    $ok = Invoke-DeskSession $deskDir $parts[0] $parts[1]
+    if ($ok.ok) {
+      $done += $next[0]
+      $d['desk_done'] = @($done)
+      Save-State
+    }
+    else {
+      Show-Banner "Session $($next[0]) was not recorded" @($ok.why, 'It stays to do: you can run it again now (y), later (l), or stop the desk sessions (d).') 'Red'
+      Write-Log "Desk session $($next[0]) not recorded: $($ok.why)" 'Red'
+      $deskFails++
+    }
   }
   if (-not $done.Count) { return New-Result 'SKIPPED' 'no desk session run' @('V2-3') }
   $gate = Join-Path $deskDir 'hy-desk-gate.txt'
-  $code = Invoke-KitScript 'Test-HealthierYou-Camera.ps1' @('-Phase', 'DeskReport', '-Report', $gate)
-  $v = Get-GateVerdict (Join-Path $deskDir 'hy-desk-gate.json')
-  return New-Result $v.verdict "$($done.Count) session(s) recorded; $($v.detail) (exit code $code)" @('V2-3')
+  $gateJson = Join-Path $deskDir 'hy-desk-gate.json'
+  $run = Invoke-ReportedScript 'Test-HealthierYou-Camera.ps1' @('-Phase', 'DeskReport', '-Report', $gate) @($gate, $gateJson)
+  $v = Limit-Verdict (Get-GateVerdict $gateJson) $run
+  return New-Result $v.verdict "$($done.Count) session(s) recorded; $($v.detail) (exit code $($run.code))" @('V2-3')
 }
 
 function Invoke-OvernightSoakStep([hashtable]$Ctx) {
@@ -1122,9 +1314,9 @@ function Invoke-OvernightSoakStep([hashtable]$Ctx) {
   if (-not (Read-YesNo 'Start the 8-hour companion soak now?' $true)) { return New-Result 'SKIPPED' 'not started' @('S1') }
   $report = Get-ResultPath 'hy-soak-companion-pc2.txt'
   Start-KeepAwake
-  try { $code = Invoke-KitScript 'Test-Soak.ps1' @('-Role', 'Companion', '-Hours', $(if ($script:Unattended) { '0.01' } else { '8' }), '-Report', $report) }
+  try { $run = Invoke-ReportedScript 'Test-Soak.ps1' @('-Role', 'Companion', '-Hours', $(if ($script:Unattended) { '0.01' } else { '8' }), '-Report', $report) @($report, "$report.json") }
   finally { Stop-KeepAwake }
-  $v = Get-SoakVerdict ($report + '.json') $code
+  $v = Limit-Verdict (Get-SoakVerdict ($report + '.json') $run.code) $run
   return New-Result $v.verdict $v.detail @('S1', 'A7')
 }
 
@@ -1141,8 +1333,9 @@ function Invoke-UninstallStep([hashtable]$Ctx) {
   Show-Banner 'Uninstall check (I7, I9b), about 10 minutes' @('First use HealthierYou a little if you have not today (open Settings from the tray, answer a reminder).', 'The script then asks you to uninstall it from Windows Settings > Apps > Installed apps,', 'leaving "Also delete my data" UNTICKED. Do it signed in as you, not as an administrator.')
   if (-not (Read-YesNo 'Do the uninstall check now?' $true)) { return New-Result 'SKIPPED' 'not run' @('I7', 'I9b') }
   $report = Get-ResultPath 'hy-office-uninstall.txt'
-  $code = Invoke-KitScript 'Test-HealthierYou-OfficePC.ps1' @('-Phase', 'Uninstall', '-Report', $report)
-  $i7 = Get-GuidedVerdict $report
+  $run = Invoke-ReportedScript 'Test-HealthierYou-OfficePC.ps1' @('-Phase', 'Uninstall', '-Report', $report) @($report)
+  $code = $run.code
+  $i7 = Limit-Verdict (Get-GuidedVerdict $report) $run
   # I9b: wait for HealthierYou's WebView2 processes to end, then look for the cache folder.
   $waited = 0
   if (-not $script:Sim) {
@@ -1338,20 +1531,140 @@ function Invoke-SelfTest {
     $null = Invoke-Steps $stubs 'B'
     Check '-Redo runs that one step again' ((($script:Calls) -join '') -eq 'ABBCCDB')
 
-    # --- administrator jobs through files
+    # --- administrator window: protected staging, requests, tampering
     $script:AgentInline = $false
-    New-Item -ItemType Directory -Force -Path (Get-AgentDir) | Out-Null
-    Write-JsonFile (Join-Path (Get-AgentDir) 'job-1-echo.json') @{ op = 'echo'; params = @{ text = 'hi' } }
-    Write-JsonFile (Join-Path (Get-AgentDir) 'job-2-format.json') @{ op = 'format-disk'; params = @{} }
-    Write-JsonFile (Join-Path (Get-AgentDir) 'job-3-network-capture.json') @{ op = 'network-capture'; params = @{ server = 'srv; rm -rf'; canary = 'KITPC2-AB12'; report = (Join-Path $tmp 'x.txt'); out = (Join-Path $tmp 'y') } }
+    $kitScripts = Join-Path $tmp 'kit-scripts'
+    $kitInst = Join-Path $tmp 'kit-installers'
+    New-Item -ItemType Directory -Force -Path $kitScripts, $kitInst | Out-Null
+    Set-Content -LiteralPath (Join-Path $kitScripts 'Test-Soak.ps1') -Value '# soak v1'
+    Set-Content -LiteralPath (Join-Path $kitScripts 'Test-NetworkCapture.ps1') -Value '# capture v1'
+    Set-Content -LiteralPath (Join-Path $kitInst 'HealthierYou-Server_0.1.0_x64-setup.exe') -Value 'server v1'
+    $saveScripts = $script:ScriptsDirResolved; $saveInst = $script:InstallersDirResolved; $saveManifest = $script:Manifest
+    $script:ScriptsDirResolved = $kitScripts; $script:InstallersDirResolved = $kitInst
+    $script:Manifest = @{ sha256 = @{ 'Test-Soak.ps1' = (Get-FileHash -LiteralPath (Join-Path $kitScripts 'Test-Soak.ps1') -Algorithm SHA256).Hash; 'HealthierYou-Server_0.1.0_x64-setup.exe' = (Get-FileHash -LiteralPath (Join-Path $kitInst 'HealthierYou-Server_0.1.0_x64-setup.exe') -Algorithm SHA256).Hash } }
+    $script:RoleName = 'Server'
+    $script:AdminRootOverride = Join-Path $tmp 'admin'
+    Initialize-AdminArea
+    Check 'staging: the role''s script and the server installer are staged' ($script:AdminReady -and $script:StageHashes.ContainsKey('Test-Soak.ps1') -and $script:StagedInstaller -eq 'HealthierYou-Server_0.1.0_x64-setup.exe')
+    $q = Get-AdminDir 'queue'; $out = Get-AdminDir 'out'
+    Write-JsonFile (Join-Path $q 'job-20260101000000001-echo.json') @{ op = 'echo'; params = @{ text = 'hi' } }
+    Write-JsonFile (Join-Path $q 'job-20260101000000002-format-disk.json') @{ op = 'format-disk'; params = @{} }
+    Write-JsonFile (Join-Path $q 'job-20260101000000003-network-capture.json') @{ op = 'network-capture'; params = @{ server = 'srv; rm -rf'; canary = 'KITPC2-AB12' } }
     $null = Invoke-AgentOnce; $null = Invoke-AgentOnce; $null = Invoke-AgentOnce
-    $r1 = Read-JsonFile (Join-Path (Get-AgentDir) 'job-1-echo.result.json')
-    $r2 = Read-JsonFile (Join-Path (Get-AgentDir) 'job-2-format.result.json')
-    $r3 = Read-JsonFile (Join-Path (Get-AgentDir) 'job-3-network-capture.result.json')
+    $r1 = Read-JsonFile (Join-Path $out 'job-20260101000000001-echo.result.json')
+    $r2 = Read-JsonFile (Join-Path $out 'job-20260101000000002-format-disk.result.json')
+    $r3 = Read-JsonFile (Join-Path $out 'job-20260101000000003-network-capture.result.json')
     Check 'agent runs a listed step' ($r1.verdict -eq 'PASS' -and $r1.detail -eq 'echo hi')
     Check 'agent refuses an unlisted step' ($r2.verdict -eq 'INCONCLUSIVE' -and $r2.detail -like '*refused*')
     Check 'agent refuses bad parameters' ($r3.verdict -eq 'INCONCLUSIVE' -and $r3.detail -like 'refused*')
-    Check 'agent leaves no job behind' (@(Get-ChildItem -LiteralPath (Get-AgentDir) -Filter 'job-*' | Where-Object { $_.Name -notlike '*.result.json' }).Count -eq 0)
+    Check 'agent leaves no request behind' (@(Get-ChildItem -LiteralPath $q -Filter 'job-*').Count -eq 0 -and @(Get-ChildItem -LiteralPath $out -Filter '*.running').Count -eq 0)
+
+    # Tampering: after staging, the user's copy is replaced and a request names its own report path.
+    Set-Content -LiteralPath (Join-Path $kitScripts 'Test-Soak.ps1') -Value '# EVIL'
+    $script:Seen = @{}
+    $script:ScriptStub = {
+      param($Name, $A, $Path)
+      $script:Seen.path = $Path; $script:Seen.content = (Get-Content -LiteralPath $Path -Raw).Trim()
+      $rep = $null; for ($i = 0; $i -lt $A.Count - 1; $i++) { if ($A[$i] -eq '-Report') { $rep = $A[$i + 1] } }
+      $script:Seen.report = $rep
+      Set-Content $rep 'Overall: PASS'; Write-JsonFile ($rep + '.json') @{ ok = $true; checks = @() }
+      return 0
+    }
+    $evilReport = Join-Path $tmp 'elsewhere.txt'
+    $rs = Invoke-AdminOp 'soak-server' @{ hours = '0.01'; report = $evilReport }
+    $stageFull = [IO.Path]::GetFullPath((Get-AdminDir 'stage'))
+    Check 'tamper: the elevated side runs the staged copy, not the user''s replaced file' ($script:Seen.path -and [IO.Path]::GetFullPath($script:Seen.path).StartsWith($stageFull) -and $script:Seen.content -eq '# soak v1')
+    Check 'tamper: the report path comes from the agent, never the request' ($script:Seen.report -and [IO.Path]::GetFullPath($script:Seen.report).StartsWith([IO.Path]::GetFullPath((Get-AdminResultsDir))) -and -not (Test-Path -LiteralPath $evilReport))
+    Check 'tamper: the staged run gives its verdict and names its reports' ($rs.verdict -eq 'PASS' -and @($rs.files) -contains 'hy-soak-server.txt')
+    Set-Content -LiteralPath (Join-Path (Get-AdminDir 'stage') 'Test-Soak.ps1') -Value '# EVIL'
+    $script:Seen = @{}
+    $rt = $null; try { $rt = Invoke-AdminOp 'soak-server' @{ hours = '0.01' } } catch { $rt = New-Result 'INCONCLUSIVE' $_.Exception.Message }
+    Check 'tamper: a changed staged copy is refused, nothing runs' ($rt.verdict -ne 'PASS' -and $rt.detail -like '*changed after it was staged*' -and -not $script:Seen.path)
+    # A user's copy changed before staging (it no longer matches kit-manifest.json) is never staged.
+    Initialize-AdminArea
+    Check 'tamper: a script that does not match the manifest is not staged' (-not $script:AdminReady -and $script:AdminSetupError -like '*Test-Soak.ps1*manifest*')
+    $rn = Invoke-AdminOp 'soak-server' @{ hours = '0.01' }
+    Check 'tamper: with staging refused, every administrator step is refused' ($rn.verdict -eq 'INCONCLUSIVE' -and $rn.detail -like '*not ready*')
+    # Results are copied back only when written by this step.
+    Set-Content -LiteralPath (Join-Path $kitScripts 'Test-Soak.ps1') -Value '# soak v1'
+    Initialize-AdminArea
+    $old = Join-Path (Get-AdminResultsDir) 'stale.txt'; Set-Content $old 'old PASS'
+    (Get-Item -LiteralPath $old).LastWriteTime = (Get-Date).AddHours(-3)
+    $cp = Copy-AdminReports (New-Result 'PASS' 'x') (Get-Date).AddMinutes(-1)
+    $cp2 = @{ verdict = 'PASS'; detail = 'x'; files = @('stale.txt') }
+    $cp2 = Copy-AdminReports $cp2 (Get-Date).AddMinutes(-1)
+    Check 'a stale administrator report is not copied, and the step is not PASS' ($cp2.verdict -eq 'INCONCLUSIVE' -and -not (Test-Path -LiteralPath (Get-ResultPath 'stale.txt')))
+    # Folder rights on Windows (an elevated run only: CI's Windows runner).
+    if ($script:IsWin -and (Test-Elevated)) {
+      $script:TestAcl = $true
+      $script:AdminRootOverride = Join-Path $tmp 'admin-acl'
+      Initialize-AdminArea
+      $writeBits = [Security.AccessControl.FileSystemRights]'WriteData, AppendData, WriteExtendedAttributes, WriteAttributes, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
+      function Get-UserWrite([string]$Path) {
+        @((Get-Acl -LiteralPath $Path).Access | Where-Object { $_.AccessControlType -eq 'Allow' -and @('S-1-5-32-545', 'S-1-1-0', 'S-1-5-11') -contains $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -and ($_.FileSystemRights -band $writeBits) })
+      }
+      Check 'rights: users cannot write the staged files' (@(Get-UserWrite (Get-AdminDir 'stage')).Count -eq 0 -and @(Get-UserWrite (Join-Path (Get-AdminDir 'stage') 'Test-Soak.ps1')).Count -eq 0)
+      Check 'rights: users cannot write results' (@(Get-UserWrite (Get-AdminResultsDir)).Count -eq 0)
+      Check 'rights: users may write requests' (@(Get-UserWrite (Get-AdminDir 'queue')).Count -ge 1)
+      $rawUsers = @((Get-Acl -LiteralPath (Get-AdminDir 'raw')).Access | Where-Object { @('S-1-5-32-545', 'S-1-1-0', 'S-1-5-11') -contains $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value })
+      Check 'rights: raw captures are administrators only' ($rawUsers.Count -eq 0)
+      Check 'rights: the folders belong to Administrators' ((Get-Acl -LiteralPath (Get-AdminDir 'stage')).GetOwner([Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-32-544')
+      $script:TestAcl = $false
+    }
+    else { Write-Host '[SKIP] folder rights (needs an elevated Windows run; CI runs it)' }
+    $script:ScriptStub = $null
+    $script:AdminRootOverride = $null
+    $script:ScriptsDirResolved = $saveScripts; $script:InstallersDirResolved = $saveInst; $script:Manifest = $saveManifest
+
+    # --- reruns never inherit an old report (guided steps) and failed desk sessions stay to do
+    $script:RoleName = 'Camera'
+    $script:InstallersDirResolved = $kitInst
+    Set-Content -LiteralPath (Join-Path $kitInst 'HealthierYou_0.1.0_x64-setup.exe') -Value 'companion v1'
+    $script:Manifest = @{ companion = 'HealthierYou_0.1.0_x64-setup.exe' }
+    $ins = Get-ResultPath 'hy-office-install.txt'
+    @('[PASS] a', '[PASS] b') | Set-Content $ins
+    $script:StubMode = 'fail-no-report'
+    $script:ScriptStub = {
+      param($Name, $A, $Path)
+      $rep = $null; for ($i = 0; $i -lt $A.Count - 1; $i++) { if ($A[$i] -eq '-Report') { $rep = $A[$i + 1] } }
+      switch ($script:StubMode) {
+        'fail-no-report' { return 1 }
+        'fail-with-pass-report' { @('[PASS] a') | Set-Content $rep; return 1 }
+        'desk-fail-once' {
+          if ($A -contains 'Desk') {
+            $script:DeskCalls++
+            if ($script:DeskCalls -eq 1) { @('[FAIL] session-report - exited 3') | Set-Content $rep; return 0 }
+            @('[PASS] session-report') | Set-Content $rep
+            Write-JsonFile ([IO.Path]::ChangeExtension($rep, '.json')) @{ setup = 1 }
+            return 0
+          }
+          Write-JsonFile ([IO.Path]::ChangeExtension($rep, '.json')) @{ pass = $false; setups = @() }; Set-Content $rep 'gate'; return 0
+        }
+      }
+      return 0
+    }
+    $g1 = Invoke-GuidedInstallStep @{}
+    Check 'redo: a failed guided install with no new report does not inherit the old PASS' ($g1.verdict -eq 'INCONCLUSIVE' -and -not (Test-Path -LiteralPath $ins))
+    $script:StubMode = 'fail-with-pass-report'
+    $g2 = Invoke-GuidedInstallStep @{}
+    Check 'redo: a guided script that exits with an error is never PASS' ($g2.verdict -eq 'INCONCLUSIVE' -and $g2.detail -like '*exited with code 1*')
+    $si = Get-ResultPath 'hy-office-aftersignin.txt'
+    @('[PASS] a') | Set-Content $si
+    $script:State.data['signout_asked'] = $true
+    $script:StubMode = 'fail-no-report'
+    $g3 = Invoke-SignInStep @{}
+    Check 'redo: a failed sign-in check does not inherit the old PASS' ($g3.verdict -eq 'INCONCLUSIVE')
+    $script:State.data['rows'] = @{ camera_kind = 'built-in' }
+    $script:State.data['desk_done'] = @()
+    $script:StubMode = 'desk-fail-once'; $script:DeskCalls = 0
+    $script:Answers.Clear(); foreach ($x in 'y', 'y', 'd') { $script:Answers.Enqueue($x) }
+    $dr = Invoke-DeskStep @{}
+    $dd = @($script:State.data['desk_done'])
+    Check 'desk: a failed session is not recorded and is offered again; the retry is recorded' ($script:DeskCalls -eq 2 -and $dd.Count -eq 1 -and $dd[0] -eq '1-1')
+    Check 'desk: a failed session leaves no counts for the gate' ($dr.verdict -ne 'PASS')
+    $script:ScriptStub = $null; $script:StubMode = $null
+    $script:Answers.Clear()
+    $script:InstallersDirResolved = $saveInst; $script:Manifest = $saveManifest
 
     # --- zip and redaction
     $res = Join-Path $script:StateDirResolved 'results'
@@ -1423,6 +1736,8 @@ function Invoke-DryRun([string]$RoleName, [string]$Dir) {
   $script:LogFile = Join-Path $Dir 'kit-log.txt'
   $script:OutDirResolved = $Dir
   $script:AgentInline = $true
+  $script:InlineAdminDone = $false
+  $script:AdminRootOverride = Join-Path $Dir 'admin'
   $script:InlineResults = @{}
   $script:State = $null
   New-Item -ItemType Directory -Force -Path (Join-Path $Dir 'results') | Out-Null
@@ -1449,8 +1764,8 @@ function Invoke-DryRun([string]$RoleName, [string]$Dir) {
       'Test-NetworkCapture.ps1' { Set-Content $rep 'Overall: PASS'; Write-JsonFile ($rep + '.json') @{ Overall = 'PASS' }; return 0 }
       'Test-HealthierYou-OfficePC.ps1' { @('[PASS] a', '[SKIP] b') | Set-Content $rep; return 0 }
       'Test-HealthierYou-Camera.ps1' {
-        if ($A -contains 'DeskReport') { Write-JsonFile ([IO.Path]::ChangeExtension($rep, '.json')) @{ pass = $false; setups = @(@{ setup = 1; sessions = 2; pass = $true }) } }
-        else { @('[PASS] session-report') | Set-Content $rep }
+        if ($A -contains 'DeskReport') { Set-Content $rep 'gate'; Write-JsonFile ([IO.Path]::ChangeExtension($rep, '.json')) @{ pass = $false; setups = @(@{ setup = 1; sessions = 2; pass = $true }) } }
+        else { @('[PASS] session-report') | Set-Content $rep; Write-JsonFile ([IO.Path]::ChangeExtension($rep, '.json')) @{ setup = 1 } }
         return 0
       }
     }
@@ -1459,8 +1774,9 @@ function Invoke-DryRun([string]$RoleName, [string]$Dir) {
   $script:AdminStub = {
     param($Op, $P)
     switch ($Op) {
-      'soak-server' { Set-Content $P.report 'Overall: PASS'; Write-JsonFile ($P.report + '.json') @{ ok = $true; checks = @() }; return (New-Result 'PASS' 'stub soak') }
-      'network-capture' { $code = & $script:ScriptStub 'Test-NetworkCapture.ps1' @('-Report', $P.report); $v = Get-ExitVerdict $code ($P.report + '.json') 'Overall'; return (New-Result $v.verdict $v.detail) }
+      # The soak and the capture go through the real staged path (with the script stub).
+      'soak-server' { return $null }
+      'network-capture' { return $null }
       'server-passphrase' { $r = New-Result 'PASS' 'stub'; $r.words = 'alpha bravo charlie delta echo foxtrot'; return $r }
       'server-pairing-evidence' { return (New-Result 'PASS' 'stub evidence') }
       default { return (New-Result 'PASS' "stub $Op") }
@@ -1471,7 +1787,7 @@ function Invoke-DryRun([string]$RoleName, [string]$Dir) {
   while ($outcome -eq 'paused' -and $guard -lt 10) { $outcome = Invoke-Steps $steps ''; $guard++ }
   $z = Complete-Run $steps
   $notRun = @($steps | Where-Object { $script:State.steps[$_.Id].status -ne 'done' }).Count
-  $script:ScriptStub = $null; $script:AdminStub = $null
+  $script:ScriptStub = $null; $script:AdminStub = $null; $script:AdminRootOverride = $null
   return @{ complete = ($outcome -eq 'complete'); notRun = $notRun; zipOk = (Test-Path -LiteralPath $z.zip) -and $z.included.Count -ge 2; check = $script:State.steps[$steps[0].Id].verdict }
 }
 
@@ -1504,7 +1820,7 @@ $script:StatePath = Join-Path $script:StateDirResolved 'state.json'
 $script:LogFile = Join-Path $script:StateDirResolved 'kit-log.txt'
 $script:OutDirResolved = $OutDir
 
-if ($Agent) { Start-AgentLoop; return }
+if ($Agent) { Start-AgentLoop $OwnerPid; return }
 
 try { $Host.UI.RawUI.WindowTitle = "HealthierYou test kit - $script:PcLabel ($Role)" } catch { }
 $script:State = Read-State

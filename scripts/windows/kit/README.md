@@ -85,6 +85,7 @@ makes **`HealthierYou-results-PC1-<date>.zip`** (or `-PC2-`) on the Desktop.
 
 - To remove the test builds: go to Windows Settings > Apps > Installed apps, and uninstall
   **HealthierYou Server** (PC1) and **HealthierYou**.
-- The kit keeps its notes in `%LOCALAPPDATA%\HealthierYou-TestKit`. On PC2 that folder also
-  holds the raw network capture files. Never share those. Delete the folder when the
-  results are uploaded.
+- The kit keeps its notes in `%LOCALAPPDATA%\HealthierYou-TestKit`. Its administrator steps
+  use `C:\ProgramData\HealthierYou-TestKit-Admin`, which only administrators can change. On
+  PC2 that folder also holds the raw network capture files, and only administrators can
+  open them. Never share those. Delete both folders when the results are uploaded.
