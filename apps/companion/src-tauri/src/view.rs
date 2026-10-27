@@ -300,6 +300,12 @@ pub struct MenuView {
     pub size_pct: u16,
     /// S, M, L, XL.
     pub presets: [SizePreset; 4],
+    /// Slider limits (the panel's size slider and mouse wheel).
+    pub size_min: u16,
+    /// See above.
+    pub size_max: u16,
+    /// See above.
+    pub size_step: u16,
     /// Footer hint.
     pub hint: String,
     /// The panel hotkey label, if one is registered.
@@ -357,6 +363,9 @@ pub fn menu_view(
         actions: actions.to_vec(),
         size_pct: profile.scale_pct,
         presets: SIZE_PRESETS,
+        size_min: SCALE_MIN,
+        size_max: SCALE_MAX,
+        size_step: SCALE_STEP,
         hint: message(MessageId::MenuHint, profile.tone, &profile.display_name),
         hotkey,
         camera,

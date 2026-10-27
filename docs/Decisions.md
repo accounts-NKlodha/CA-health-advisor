@@ -15,5 +15,6 @@
 | DEC09 | Individual summaries; admin service status only | Planner proposal | Default audience while manager analytics not requested |
 | DEC10 | Use public accounts-NKlodha/CA-health-advisor | User supplied repository; visibility verified | Planning/source shared there; no private transcript or employee data upload |
 | DEC11 | Three-person pilot | User confirmed 18 October | Server and total rollout sizing still unknown |
+| DEC12 | Pet size range 50% to 150% in steps of 5 (was 75% to 150%); slider and mouse wheel in the keyboard panel, S/M/L/XL kept as quick picks | Owner request 27 October, after an office-PC review | The smallest size was still too big on screen. The `pet_profile` column keeps its frozen 75 floor; sizes below 75 are stored in the `pet_scale_small` setting |
 
 PRD.md is the consolidated proposal. Research notes may discuss alternatives; they do not override the approved requirement baseline.

@@ -25,8 +25,10 @@ pub const BUBBLE_MAX_WIDTH_LOGICAL: f64 = 380.0;
 /// Tallest bubble as a share of the work-area height (wireframe section 6).
 pub const BUBBLE_MAX_HEIGHT_SHARE: f64 = 0.6;
 
-/// Smallest pet size, percent (owner item 6; architecture 4.2).
-pub const SCALE_MIN: u16 = 75;
+/// Smallest pet size, percent (owner item 6; architecture 4.2). The approved floor was
+/// 75%; the owner asked for smaller sizes after seeing the pet on an office PC, so it is
+/// now 50% (the art is then 64 logical pixels, still above a 44 px touch-target minimum).
+pub const SCALE_MIN: u16 = 50;
 /// Largest pet size, percent.
 pub const SCALE_MAX: u16 = 150;
 /// The slider step, percent.
@@ -34,7 +36,8 @@ pub const SCALE_STEP: u16 = 5;
 /// The default size, percent.
 pub const SCALE_DEFAULT: u16 = 100;
 
-/// A named size preset shown as S, M, L and XL beside the slider.
+/// A named size preset shown as S, M, L and XL beside the slider (quick picks; the
+/// slider and the mouse wheel reach every size from [`SCALE_MIN`] to [`SCALE_MAX`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SizePreset {
     /// Percent.
@@ -69,7 +72,7 @@ pub const SIZE_PRESETS: [SizePreset; 4] = [
     },
 ];
 
-/// Whether `pct` is an offered size: 75 to 150 in steps of 5.
+/// Whether `pct` is an offered size: 50 to 150 in steps of 5.
 #[must_use]
 pub const fn is_offered_scale(pct: u16) -> bool {
     pct >= SCALE_MIN && pct <= SCALE_MAX && pct.is_multiple_of(SCALE_STEP)

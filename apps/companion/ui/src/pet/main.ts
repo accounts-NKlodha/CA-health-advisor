@@ -54,6 +54,17 @@ function px(n: number): string {
 
 // ------------------------------------------------------------------- pet drawing
 
+/** The smallest click target, CSS pixels: at small sizes (down to 50%) the pack's hitbox
+ * can shrink below this, so it grows around its centre, staying inside the art box. */
+const MIN_HIT_PX = 44;
+
+function hitSpan(start: number, len: number, box: number): [number, number] {
+  if (len >= MIN_HIT_PX) return [start, len];
+  const want = Math.min(MIN_HIT_PX, box);
+  const from = Math.min(Math.max(0, start + len / 2 - want / 2), box - want);
+  return [from, want];
+}
+
 function drawPet(v: PetView): void {
   if (v.pack_key !== packKey) {
     insertArt(art, v.art_svg);
@@ -66,10 +77,12 @@ function drawPet(v: PetView): void {
   pet.style.height = px(v.pet_px);
 
   const unit = v.pet_px / VIEW_BOX;
-  hit.style.left = px(v.hitbox.x * unit);
-  hit.style.top = px(v.hitbox.y * unit);
-  hit.style.width = px(v.hitbox.width * unit);
-  hit.style.height = px(v.hitbox.height * unit);
+  const [hx, hw] = hitSpan(v.hitbox.x * unit, v.hitbox.width * unit, v.pet_px);
+  const [hy, hh] = hitSpan(v.hitbox.y * unit, v.hitbox.height * unit, v.pet_px);
+  hit.style.left = px(hx);
+  hit.style.top = px(hy);
+  hit.style.width = px(hw);
+  hit.style.height = px(hh);
 
   const anim = v.motion ? v.pose.animation : 'none';
   pet.className = [

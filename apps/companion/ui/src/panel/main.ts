@@ -1,5 +1,6 @@
 // The keyboard pet panel (wireframe K1). The hotkey opens it and it takes focus on
-// purpose; Tab moves between actions, Escape closes it and the shell hands focus back to
+// purpose; Tab moves between actions (grouped under short section headings; the size
+// slider takes the arrow keys and the mouse wheel), Escape closes it and the shell hands focus back to
 // the window that had it. Actions that open another window (Settings, Weekly review)
 // leave focus there.
 // When the engine's bubble is open beside the pet (a reminder, a Pomodoro card, the
@@ -106,7 +107,11 @@ function draw(v: PanelView, keepFocus: boolean): void {
   // Remember which control had focus so a redraw (after a size change) keeps it.
   const active = document.activeElement;
   const focusLabel = active instanceof HTMLButtonElement ? active.getAttribute('aria-label') ?? active.textContent : null;
-  const focusKey = active instanceof HTMLButtonElement ? active.dataset.key ?? null : null;
+  // Buttons and the size slider carry a key so focus comes back to the same control.
+  const focusKey =
+    active instanceof HTMLButtonElement || active instanceof HTMLInputElement
+      ? active.dataset.key ?? null
+      : null;
 
   const state = document.createElement('p');
   state.className = 'panel-state';
@@ -167,8 +172,9 @@ function draw(v: PanelView, keepFocus: boolean): void {
   }
 
   const buttons = Array.from(root.querySelectorAll<HTMLButtonElement>('button'));
+  const keyed = Array.from(root.querySelectorAll<HTMLElement>('button, input'));
   const byKey =
-    keepFocus && focusKey ? buttons.find((b) => b.dataset.key === focusKey) : undefined;
+    keepFocus && focusKey ? keyed.find((b) => b.dataset.key === focusKey) : undefined;
   const again =
     byKey ??
     (keepFocus && focusLabel
