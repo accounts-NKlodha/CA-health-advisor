@@ -249,7 +249,7 @@ fn pet_profile_rules() {
     let ok = PetProfile::defaults("cat", "Mittens");
     for bad in [
         PetProfile {
-            scale_pct: 74,
+            scale_pct: 49,
             ..ok.clone()
         },
         PetProfile {
@@ -283,6 +283,46 @@ fn pet_profile_rules() {
         );
     }
     assert_eq!(s.pet_profile().unwrap(), None);
+}
+
+#[test]
+fn pet_sizes_below_the_table_floor_round_trip_through_settings() {
+    let (s, _) = store();
+    let mut p = PetProfile::defaults("turtle", "Tortuga");
+    // Every size from 50 to 150 reads back as saved.
+    for pct in (50..=150).step_by(5) {
+        p.scale_pct = pct;
+        s.save_pet_profile(&p).unwrap();
+        assert_eq!(s.pet_profile().unwrap().unwrap().scale_pct, pct);
+        let small: Option<u16> = s.setting(keys::PET_SCALE_SMALL).unwrap();
+        assert_eq!(small, (pct < 75).then_some(pct), "{pct}%");
+        let column: u16 = s
+            .conn
+            .query_row("SELECT scale_pct FROM pet_profile WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(column, pct.max(75), "{pct}%");
+    }
+    // A stored 75 to 150 with no small size loads unchanged.
+    p.scale_pct = 75;
+    s.save_pet_profile(&p).unwrap();
+    assert_eq!(s.pet_profile().unwrap().unwrap().scale_pct, 75);
+    // An older build that only writes the column (to 120) wins over a stale small size.
+    p.scale_pct = 55;
+    s.save_pet_profile(&p).unwrap();
+    s.conn
+        .execute("UPDATE pet_profile SET scale_pct = 120 WHERE id = 1", [])
+        .unwrap();
+    assert_eq!(s.pet_profile().unwrap().unwrap().scale_pct, 120);
+    // A malformed or out-of-range small size is ignored.
+    s.conn
+        .execute("UPDATE pet_profile SET scale_pct = 75 WHERE id = 1", [])
+        .unwrap();
+    s.put_setting(keys::PET_SCALE_SMALL, &"tiny").unwrap();
+    assert_eq!(s.pet_profile().unwrap().unwrap().scale_pct, 75);
+    s.put_setting(keys::PET_SCALE_SMALL, &30).unwrap();
+    assert_eq!(s.pet_profile().unwrap().unwrap().scale_pct, 75);
 }
 
 // ------------------------------------------------------------------- events

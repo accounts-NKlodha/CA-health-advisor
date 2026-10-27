@@ -46,7 +46,7 @@ fn defaults_before_anything_is_saved() {
 #[test]
 fn every_offered_size_is_saved_and_read_back() {
     let (s, l) = (store(), lib());
-    for pct in (75..=150).step_by(5) {
+    for pct in (50..=150).step_by(5) {
         let p = edit(&s, &l, PetEdit::Size { pct });
         assert_eq!(p.scale_pct, pct);
         assert_eq!(current_profile(&s, &l).expect("read").scale_pct, pct);
@@ -58,11 +58,24 @@ fn every_offered_size_is_saved_and_read_back() {
 fn sizes_outside_the_range_or_off_step_are_refused_and_not_saved() {
     let (s, l) = (store(), lib());
     edit(&s, &l, PetEdit::Size { pct: 125 });
-    for pct in [0, 70, 74, 76, 151, 155, 200, 101] {
+    for pct in [0, 45, 49, 52, 74, 76, 151, 155, 200, 101] {
         let m = refused(&s, &l, PetEdit::Size { pct });
-        assert!(m.contains("75% to 150%"), "{m}");
+        assert!(m.contains("50% to 150%"), "{m}");
         assert_eq!(current_profile(&s, &l).expect("read").scale_pct, 125);
     }
+}
+
+#[test]
+fn a_size_below_75_survives_a_restart() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("hy.db");
+    let l = lib();
+    {
+        let s = Store::open(&path, Arc::new(SystemClock::new())).expect("open");
+        edit(&s, &l, PetEdit::Size { pct: 50 });
+    }
+    let s = Store::open(&path, Arc::new(SystemClock::new())).expect("reopen");
+    assert_eq!(current_profile(&s, &l).expect("read").scale_pct, 50);
 }
 
 #[test]

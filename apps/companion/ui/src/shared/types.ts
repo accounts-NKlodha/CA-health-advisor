@@ -71,6 +71,10 @@ export interface MenuView {
   actions: MenuAction[];
   size_pct: number;
   presets: SizePreset[];
+  /** Slider limits: 50 to 150 in steps of 5. */
+  size_min: number;
+  size_max: number;
+  size_step: number;
   hint: string;
   hotkey: string | null;
   /** The posture check's entry (V2). */

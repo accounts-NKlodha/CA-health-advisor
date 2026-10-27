@@ -354,7 +354,7 @@ fn run(shell: &Arc<Shell>) -> Report {
         "every_size_inside_work_area",
         size_failures.is_empty(),
         if size_failures.is_empty() {
-            "75% to 150% in steps of 5".to_owned()
+            format!("{SCALE_MIN}% to {SCALE_MAX}% in steps of {SCALE_STEP}")
         } else {
             size_failures.join("; ")
         },

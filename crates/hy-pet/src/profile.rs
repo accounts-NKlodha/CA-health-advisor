@@ -38,7 +38,7 @@ pub enum PetEdit {
     },
     /// Change the size.
     Size {
-        /// 75 to 150 in steps of 5.
+        /// 50 to 150 in steps of 5.
         pct: u16,
     },
     /// Choose a colour variant.
@@ -168,7 +168,7 @@ pub fn apply_edit(store: &Store, lib: &Library, edit: &PetEdit) -> Result<PetPro
         PetEdit::Rename { name } => p.display_name = check_name(name)?,
         PetEdit::Size { pct } => {
             if !is_offered_scale(*pct) {
-                return Err(invalid("The size must be 75% to 150% in steps of 5."));
+                return Err(invalid("The size must be 50% to 150% in steps of 5."));
             }
             p.scale_pct = *pct;
         }

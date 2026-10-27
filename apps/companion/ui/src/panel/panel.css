@@ -41,15 +41,24 @@ body {
   line-height: 1.4;
 }
 
-#panel .panel-bubble .row,
-#panel .menu .row {
+#panel .panel-bubble .row {
   flex-direction: column;
   align-items: stretch;
 }
 
-#panel .btn {
+#panel .panel-bubble .btn {
   justify-content: flex-start;
   padding: 8px 12px;
+}
+
+/* The menu's sections wrap their buttons in rows instead of one tall column. */
+#panel .menu .btn {
+  padding: 5px 10px;
+}
+
+#panel .menu h2 {
+  font-size: calc(15px * var(--ts, 1));
+  font-weight: 600;
 }
 
 #panel .entry-actions .btn {

@@ -474,6 +474,9 @@ mod tests {
         let json = serde_json::to_value(&m).unwrap();
         assert_eq!(json["greeting"], "Hi, I'm Shelly.");
         assert_eq!(json["presets"][3]["short"], "XL");
+        assert_eq!(json["size_min"], 50);
+        assert_eq!(json["size_max"], 150);
+        assert_eq!(json["size_step"], 5);
         assert_eq!(json["camera"]["label"], "Posture check");
         assert_eq!(json["camera"]["on"], false);
     }

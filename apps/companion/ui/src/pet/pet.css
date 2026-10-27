@@ -399,11 +399,77 @@ body {
   margin: 0 0 4px;
 }
 
+/* Menu sections (owner review): a subtle divider and a small heading per group. */
+.menu-section {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.menu-section:first-of-type {
+  margin-top: 6px;
+}
+
+.menu-heading {
+  margin: 0 0 2px;
+  color: var(--muted);
+  font-size: calc(11px * var(--ts, 1));
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.menu-section .row {
+  margin-top: 6px;
+}
+
+.seg-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 6px;
+}
+
+.seg-label {
+  min-width: 4.5em;
+  font-size: calc(13px * var(--ts, 1));
+}
+
+.seg-line .seg-btn {
+  padding: 4px 8px;
+  font-size: calc(13px * var(--ts, 1));
+}
+
+.seg-btn:hover {
+  background: var(--chip);
+}
+
+.seg-btn[aria-pressed='true']:hover {
+  background: var(--accent);
+}
+
 .size-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 8px;
+  margin-top: 6px;
+}
+
+.size-slider {
+  flex: 1 1 auto;
+  min-width: 90px;
+  accent-color: var(--accent);
+}
+
+.size-pct {
+  min-width: 3.2em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.size-presets {
+  margin-top: 6px;
 }
 
 .seg {

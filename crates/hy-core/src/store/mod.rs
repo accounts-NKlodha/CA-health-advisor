@@ -54,7 +54,18 @@ pub mod keys {
     pub const TIME_ZONE: &str = "time_zone";
     /// The user's [`crate::time::WorkSchedule`].
     pub const WORK_SCHEDULE: &str = "work_schedule";
+    /// The pet size when it is below [`super::PET_SCALE_TABLE_FLOOR`] (a JSON number,
+    /// 50 to 70). The `pet_profile` table's frozen check keeps its column at 75 or more,
+    /// so a smaller size is stored here and the column holds the floor.
+    pub const PET_SCALE_SMALL: &str = "pet_scale_small";
 }
+
+/// Smallest pet size, percent (lowered from 75 to 50 at the owner's request).
+pub const PET_SCALE_MIN: u16 = 50;
+/// Largest pet size, percent.
+pub const PET_SCALE_MAX: u16 = 150;
+/// The lowest size the `pet_profile.scale_pct` column accepts (migration 0001's check).
+pub const PET_SCALE_TABLE_FLOOR: u16 = 75;
 
 /// Detailed events and daily summaries are kept for this many days (P).
 pub const EVENT_RETENTION_DAYS: u64 = 90;
@@ -278,7 +289,7 @@ pub struct PetProfile {
     pub pet_id: String,
     /// Display name, 1 to 20 characters.
     pub display_name: String,
-    /// Size, 75 to 150 percent.
+    /// Size, 50 to 150 percent.
     pub scale_pct: u16,
     /// Colour variant, 0 to 2.
     pub colour_variant: u8,
@@ -320,8 +331,8 @@ impl PetProfile {
         if self.pet_id.is_empty() || self.pet_id.len() > 64 {
             return Err(Error::invalid("bad pet id"));
         }
-        if !(75..=150).contains(&self.scale_pct) {
-            return Err(Error::invalid("pet size must be 75 to 150 percent"));
+        if !(PET_SCALE_MIN..=PET_SCALE_MAX).contains(&self.scale_pct) {
+            return Err(Error::invalid("pet size must be 50 to 150 percent"));
         }
         if self.colour_variant > 2 {
             return Err(Error::invalid("pet colour variant must be 0 to 2"));
@@ -888,6 +899,23 @@ impl Store {
     /// # Errors
     /// [`Error::Sqlite`] on a read failure.
     pub fn pet_profile(&self) -> Result<Option<PetProfile>> {
+        let Some(mut p) = self.pet_profile_row()? else {
+            return Ok(None);
+        };
+        // A size below the column's floor lives in settings; it only counts while the
+        // column still holds the floor (an older build that saved another size wins).
+        if p.scale_pct == PET_SCALE_TABLE_FLOOR {
+            let small = read_setting::<u16>(&self.conn, keys::PET_SCALE_SMALL)
+                .ok()
+                .flatten();
+            if let Some(v) = small.filter(|v| (PET_SCALE_MIN..PET_SCALE_TABLE_FLOOR).contains(v)) {
+                p.scale_pct = v;
+            }
+        }
+        Ok(Some(p))
+    }
+
+    fn pet_profile_row(&self) -> Result<Option<PetProfile>> {
         Ok(self
             .conn
             .query_row(
@@ -918,7 +946,9 @@ impl Store {
     /// [`Error::Invalid`] if the profile breaks its rules.
     pub fn save_pet_profile(&self, p: &PetProfile) -> Result<()> {
         p.validate()?;
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let column = p.scale_pct.max(PET_SCALE_TABLE_FLOOR);
+        tx.execute(
             "INSERT INTO pet_profile (id, pet_id, display_name, scale_pct, colour_variant, edge, pos_x, pos_y, motion, tone, updated_at)
              VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT (id) DO UPDATE SET pet_id = excluded.pet_id, display_name = excluded.display_name,
@@ -928,7 +958,7 @@ impl Store {
             params![
                 p.pet_id,
                 p.display_name,
-                p.scale_pct,
+                column,
                 p.colour_variant,
                 p.edge,
                 p.position.map(|(x, _)| x),
@@ -938,6 +968,23 @@ impl Store {
                 to_ms(self.clock.now()),
             ],
         )?;
+        if p.scale_pct < PET_SCALE_TABLE_FLOOR {
+            tx.execute(
+                "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                params![
+                    keys::PET_SCALE_SMALL,
+                    p.scale_pct.to_string(),
+                    to_ms(self.clock.now())
+                ],
+            )?;
+        } else {
+            tx.execute(
+                "DELETE FROM settings WHERE key = ?1",
+                [keys::PET_SCALE_SMALL],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 

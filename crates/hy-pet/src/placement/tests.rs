@@ -62,10 +62,20 @@ fn assert_inside(monitors: &[Monitor], p: &Placement) {
 }
 
 #[test]
-fn offered_sizes_are_75_to_150_in_steps_of_5() {
-    assert!(is_offered_scale(75) && is_offered_scale(100) && is_offered_scale(150));
-    assert!(!is_offered_scale(70) && !is_offered_scale(155) && !is_offered_scale(101));
-    assert_eq!(sizes().count(), 16);
+fn offered_sizes_are_50_to_150_in_steps_of_5() {
+    assert!(
+        is_offered_scale(50)
+            && is_offered_scale(75)
+            && is_offered_scale(100)
+            && is_offered_scale(150)
+    );
+    assert!(
+        !is_offered_scale(45)
+            && !is_offered_scale(72)
+            && !is_offered_scale(155)
+            && !is_offered_scale(101)
+    );
+    assert_eq!(sizes().count(), 21);
     assert!(SIZE_PRESETS.iter().all(|p| is_offered_scale(p.pct)));
     assert_eq!(
         SIZE_PRESETS.map(|p| p.short),
@@ -78,6 +88,7 @@ fn offered_sizes_are_75_to_150_in_steps_of_5() {
 fn pet_window_size_follows_size_and_dpi() {
     assert!((pet_window_logical(100) - 144.0).abs() < f64::EPSILON);
     assert!((pet_window_logical(75) - 112.0).abs() < f64::EPSILON);
+    assert!((pet_window_logical(50) - 80.0).abs() < f64::EPSILON);
     assert!((pet_window_logical(150) - 208.0).abs() < f64::EPSILON);
     let m = |s| monitor("m", (0, 0), (1920, 1080), s, TaskbarEdge::Bottom, true);
     assert_eq!(pet_window_physical(100, &m(1.0)), 144);
@@ -519,7 +530,7 @@ fn arb_edge() -> impl Strategy<Value = PetEdge> {
 }
 
 fn arb_pct() -> impl Strategy<Value = u16> {
-    (0u16..=15).prop_map(|k| SCALE_MIN + k * SCALE_STEP)
+    (0u16..=(SCALE_MAX - SCALE_MIN) / SCALE_STEP).prop_map(|k| SCALE_MIN + k * SCALE_STEP)
 }
 
 proptest! {
