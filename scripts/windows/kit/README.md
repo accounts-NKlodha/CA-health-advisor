@@ -81,11 +81,37 @@ makes **`HealthierYou-results-PC1-<date>.zip`** (or `-PC2-`) on the Desktop.
   and the pairing label are replaced before the zip is made. A file that still holds one is
   left out, and so are pictures and raw network captures.
 
+## Pairing retest
+
+Use this if the pairing could not be done in your first run (PC1 step P1-05, PC2 step
+P2-03). It redoes only the pairing, with the programs in this kit. Your first run's notes
+and results stay as they are.
+
+1. Get this kit as in part 1 and extract it to a new folder on both PCs.
+2. Wait until any long test from the first run has finished on that PC (the 8-hour soaks,
+   a camera soak or a desk session). The retest checks this and stops if one still runs.
+3. On **PC1**, double-click **`Run-PC1-Pairing-Retest.cmd`**. Click **Yes** at the one
+   Windows prompt. If the office server or HealthierYou on PC1 is not this kit's version,
+   it replaces it. The server keeps its data, so your admin passphrase and the server's
+   six words stay the same. It asks for a new passphrase only if the data could not be
+   kept.
+4. When PC1 shows **Pair PC2**, go to PC2 and double-click
+   **`Run-PC2-Pairing-Retest.cmd`**. It installs this kit's HealthierYou (or replaces an
+   older one, keeping its data), then runs the network capture with the pairing. If asked,
+   type the server name PC1 shows, paste the slip, compare the six words and the code, and click
+   **Confirm** on PC1. PC2 also asks once for an administrator password, for the capture.
+5. At the end, each PC makes **`HealthierYou-results-PC1-pairing-retest-<date>.zip`** (or
+   `-PC2-`) on the Desktop. **Upload both in the project thread.**
+
+If you have forgotten the admin passphrase, type **R1-03** at the end on PC1 to set a new
+one.
+
 ## 6. Afterwards
 
 - To remove the test builds: go to Windows Settings > Apps > Installed apps, and uninstall
   **HealthierYou Server** (PC1) and **HealthierYou**.
-- The kit keeps its notes in `%LOCALAPPDATA%\HealthierYou-TestKit`. Its administrator steps
-  use `C:\ProgramData\HealthierYou-TestKit-Admin`, which only administrators can change. On
+- The kit keeps its notes in `%LOCALAPPDATA%\HealthierYou-TestKit` (the pairing retest in
+  its own `-retest-pairing` folders there). Its administrator steps use
+  `C:\ProgramData\HealthierYou-TestKit-Admin`, which only administrators can change. On
   PC2 that folder also holds the raw network capture files, and only administrators can
   open them. Never share those. Delete both folders when the results are uploaded.

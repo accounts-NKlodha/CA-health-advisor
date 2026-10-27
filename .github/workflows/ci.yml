@@ -223,6 +223,16 @@ jobs:
         timeout-minutes: 10
         run: ./scripts/windows/Test-CompanionLifecycle.ps1 -Phase Install -Installers (Join-Path $env:RUNNER_TEMP 'hy-installers') -Work (Join-Path $env:RUNNER_TEMP 'hy-lifecycle')
 
+      # The office test kit's pairing retest compares an installed hy-companion.exe with the
+      # one installer A installs, byte for byte: record it as A installed it.
+      - name: Record the program installer A installs (for the office test kit)
+        run: |
+          $exe = Join-Path $env:LOCALAPPDATA 'HealthierYou\hy-companion.exe'
+          if (-not (Test-Path $exe)) { throw 'installer A left no hy-companion.exe' }
+          $h = (Get-FileHash $exe -Algorithm SHA256).Hash
+          Set-Content -Encoding ascii (Join-Path $env:RUNNER_TEMP 'hy-companion-a-exe.sha256') $h
+          "hy-companion.exe from installer A: sha256=$h"
+
       - name: Pet shell self-test of the installed app (idle memory sampled, informational; camera on a synthetic device)
         run: |
           $report = Join-Path $env:RUNNER_TEMP 'hy-selftest.json'
@@ -382,8 +392,9 @@ jobs:
       # and server installer S1 exactly as built and tested above (CI test builds: no
       # Authenticode signature; update keys made for this run only, A trusts B's key so the
       # owner can try the update from file), the kit's launchers and orchestrator, the test
-      # scripts it calls, and a manifest with each installer's SHA-256. The kit's self-test
-      # and both roles' dry runs run from the assembled folder under Windows PowerShell 5.1.
+      # scripts it calls, and a manifest with each installer's SHA-256 (and of the programs in
+      # A and S1, for the pairing retest). The kit's self-test and both roles' dry runs (first
+      # run and pairing retest) run from the assembled folder under Windows PowerShell 5.1.
       # GitHub serves the artifact as office-test-kit.zip, holding HealthierYou-office-test-kit/.
       - name: Assemble the office test kit
         run: |
@@ -404,10 +415,16 @@ jobs:
           $sha = [ordered]@{}
           # The installers and the scripts the administrator window stages: it refuses any that differ.
           foreach ($f in @(Get-ChildItem $inst -Filter *.exe) + @(Get-ChildItem (Join-Path $kit 'scripts') -Filter *.ps1) | Sort-Object Name) { $sha[$f.Name] = (Get-FileHash $f.FullName -Algorithm SHA256).Hash }
+          # The programs inside installers A and S1, for the pairing retest's "is the installed
+          # build the kit's" check (versions are equal between CI runs, so they are not used).
+          $serverExe = (Get-FileHash (Join-Path $env:RUNNER_TEMP 'hy-server-bin\hy-server.exe') -Algorithm SHA256).Hash
+          $companionExe = (Get-Content (Join-Path $env:RUNNER_TEMP 'hy-companion-a-exe.sha256') -Raw).Trim()
+          if ($companionExe -notmatch '^[0-9A-F]{64}$') { throw "no recorded hy-companion.exe SHA-256 for installer A: '$companionExe'" }
           $commit = '${{ github.event.pull_request.head.sha || github.sha }}'
           [ordered]@{
             commit = $commit.Substring(0, 12); run_id = '${{ github.run_id }}'; built_utc = (Get-Date).ToUniversalTime().ToString('o')
             companion = $companion; companion_newer = $newer; server = $server; sha256 = $sha
+            server_exe_sha256 = $serverExe; companion_exe_sha256 = $companionExe
             note = 'CI test builds: no Authenticode signature; update keys made for this CI run only'
           } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $kit 'kit-manifest.json')
           Get-Content (Join-Path $kit 'kit-manifest.json')
@@ -417,6 +434,11 @@ jobs:
           foreach ($role in 'Server', 'Camera') {
             powershell.exe -NoProfile -ExecutionPolicy Bypass -File $orch -Role $role -DryRun
             if ($LASTEXITCODE -ne 0) { throw "the kit dry run ($role) failed from the assembled folder" }
+            powershell.exe -NoProfile -ExecutionPolicy Bypass -File $orch -Role $role -Retest Pairing -DryRun
+            if ($LASTEXITCODE -ne 0) { throw "the kit pairing retest dry run ($role) failed from the assembled folder" }
+          }
+          foreach ($f in 'Run-PC1-Server.cmd', 'Run-PC2-Camera.cmd', 'Run-PC1-Pairing-Retest.cmd', 'Run-PC2-Pairing-Retest.cmd') {
+            if (-not (Test-Path (Join-Path $kit $f))) { throw "the kit is missing its launcher $f" }
           }
           Get-ChildItem -Recurse $kit | Select-Object @{ n = 'file'; e = { $_.FullName.Substring($kit.Length + 1) } }, Length | Format-Table -AutoSize | Out-String -Width 200
 

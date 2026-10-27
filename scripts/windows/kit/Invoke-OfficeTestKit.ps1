@@ -43,6 +43,21 @@
   replaced by placeholders; a file that still holds one after that is left out, and so is
   any image or binary file. Raw captures (.etl, .pcapng) are never put in it.
 
+  Pairing retest (-Retest Pairing; Run-PC1-Pairing-Retest.cmd, Run-PC2-Pairing-Retest.cmd):
+  redoes only the pairing evidence with this kit's own builds, after a first run whose
+  pairing could not work. It keeps its own state, results and zip
+  (%LOCALAPPDATA%\HealthierYou-TestKit\<role>-retest-pairing, and
+  HealthierYou-results-<PC1|PC2>-pairing-retest-<date>.zip), so the first run's are left as
+  they are. PC1: check the PC and the kit; replace the office server with the kit's build
+  when the installed hy-server.exe is not byte for byte the one the kit's installer holds
+  (an installed server refuses the same version over itself, by design, so it is
+  uninstalled keeping its data, then installed again: keys, database and admin passphrase
+  stay; the passphrase is asked for only if they did not); the same for HealthierYou on
+  this PC (per user, keeping its data); then the pairing. PC2: check the PC; install
+  HealthierYou, or replace it when it is not the kit's build; then the network capture with
+  the pairing. The administrator steps run in their own window and protected folder
+  (HealthierYou-TestKit-Admin\<role>-Retest), never in a first run's window still open.
+
   -DryRun runs the whole sequence of a role with every test script and administrator step
   replaced by a stub and every question answered with its default, in a temporary folder.
   -SelfTest checks the step sequencing, resume after an interruption, the administrator
@@ -54,11 +69,15 @@
 .EXAMPLE
   .\Invoke-OfficeTestKit.ps1 -Role Camera -DryRun
 .EXAMPLE
+  .\Invoke-OfficeTestKit.ps1 -Role Server -Retest Pairing
+.EXAMPLE
   .\Invoke-OfficeTestKit.ps1 -SelfTest
 #>
 [CmdletBinding()]
 param(
   [ValidateSet('Server', 'Camera')][string]$Role,
+  # Redo only one part with this kit's builds, in its own state (Pairing: the pairing).
+  [ValidateSet('Pairing')][string]$Retest,
   [switch]$SelfTest,
   [switch]$DryRun,
   # Internal: the administrator window.
@@ -423,17 +442,19 @@ function Start-CompanionIfNeeded {
   return (Test-CompanionRunning)
 }
 
+# A retest has its own entry, so a first run's entry (and its resume) is left as it is.
+function Get-AutoResumeName { if ($script:RetestName) { return "HealthierYouTestKit$($script:RetestName)Retest" } return 'HealthierYouTestKit' }
 function Set-AutoResume([bool]$On) {
   if ($script:Unattended -or -not $script:IsWin) { return }
   $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
   try {
     if ($On) {
       $launcher = $env:HYKIT_LAUNCHER
-      $cmd = if ($launcher -and (Test-Path -LiteralPath $launcher)) { "`"$launcher`"" } else { "`"$(Get-HostExe)`" -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Role $script:RoleName" }
+      $cmd = if ($launcher -and (Test-Path -LiteralPath $launcher)) { "`"$launcher`"" } else { "`"$(Get-HostExe)`" -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Role $script:RoleName$(if ($script:RetestName) { " -Retest $($script:RetestName)" })" }
       if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
-      Set-ItemProperty -Path $key -Name 'HealthierYouTestKit' -Value $cmd
+      Set-ItemProperty -Path $key -Name (Get-AutoResumeName) -Value $cmd
     }
-    else { Remove-ItemProperty -Path $key -Name 'HealthierYouTestKit' -ErrorAction SilentlyContinue }
+    else { Remove-ItemProperty -Path $key -Name (Get-AutoResumeName) -ErrorAction SilentlyContinue }
   } catch { }
 }
 
@@ -460,12 +481,25 @@ function Set-AutoResume([bool]$On) {
 # the agent, never taken from a request. Child PowerShell processes get a module path
 # without the user's own module folders.
 
-$AdminOps = @('server-install', 'server-passphrase', 'server-pairing-evidence', 'soak-server', 'network-capture', 'echo')
+$AdminOps = @('server-install', 'server-replace', 'server-passphrase', 'server-pairing-evidence', 'soak-server', 'network-capture', 'echo')
+
+# The steps the administrator window takes in this mode: a first run never replaces the
+# server; a pairing retest runs only what the pairing needs.
+function Get-AllowedAdminOps {
+  if ($script:RetestName -eq 'Pairing') {
+    if ($script:RoleName -eq 'Server') { return @('server-replace', 'server-passphrase', 'server-pairing-evidence', 'echo') }
+    return @('network-capture', 'echo')
+  }
+  return @($AdminOps | Where-Object { $_ -ne 'server-replace' })
+}
+
+# The protected folder's name: a retest never shares a first run's folder (or its window).
+function Get-AdminSubName { if ($script:RetestName) { return "$($script:RoleName)-Retest" } return $script:RoleName }
 
 function Get-AdminRoot {
   if ($script:AdminRootOverride) { return $script:AdminRootOverride }
   # The known folder, not %ProgramData% (a user may set that variable for their own account).
-  return (Join-Path (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'HealthierYou-TestKit-Admin') $script:RoleName)
+  return (Join-Path (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'HealthierYou-TestKit-Admin') (Get-AdminSubName))
 }
 function Get-AdminDir([string]$Part) { Join-Path (Get-AdminRoot) $Part }
 function Get-AdminResultsDir { Join-Path (Get-AdminDir 'out') 'results' }
@@ -510,7 +544,8 @@ function Initialize-SafeDir([string]$Path, [string]$Mode, [switch]$Fresh) {
 function Get-StageList {
   $list = @()
   if ($script:RoleName -eq 'Server') {
-    $list += @{ name = 'Test-Soak.ps1'; src = (Join-Path $script:ScriptsDirResolved 'Test-Soak.ps1') }
+    # A pairing retest runs no soak: only the server installer is staged.
+    if (-not $script:RetestName) { $list += @{ name = 'Test-Soak.ps1'; src = (Join-Path $script:ScriptsDirResolved 'Test-Soak.ps1') } }
     $inst = Get-Installer 'server'
     if ($inst) { $list += @{ name = (Split-Path -Leaf $inst); src = $inst; installer = $true } }
   }
@@ -588,12 +623,19 @@ $script:ServerNameRule = 'Letters, digits, dots, hyphens and underscores only (n
 # sending the owner into a flow that cannot work. $null means the name is usable.
 function Get-ServerNameProblem([string]$ComputerName) {
   if ($ComputerName -and (Test-ServerName $ComputerName)) { return $null }
-  return 'this PC''s computer name has characters a pairing slip cannot hold, so the admin page cannot issue a slip. Rename the PC (Settings > System > About > Rename this PC) using only letters, digits, dots, hyphens and underscores, restart, then run this step again with: Run-PC1-Server.cmd -Redo P1-05'
+  return "this PC's computer name has characters a pairing slip cannot hold, so the admin page cannot issue a slip. Rename the PC (Settings > System > About > Rename this PC) using only letters, digits, dots, hyphens and underscores, restart, then run this step again with: $(Get-Launcher 'Server') -Redo $(if ($script:RetestName) { 'R1-05' } else { 'P1-05' })"
 }
+
+$MirrorPattern = '^(?:[A-Za-z]:\\|\\\\[A-Za-z0-9._-]+\\)[A-Za-z0-9._\\-]{0,200}$'
 
 function Test-AdminParams([string]$Op, [hashtable]$P) {
   switch ($Op) {
-    'server-install' { if ($P.mirror -and $P.mirror -notmatch '^(?:[A-Za-z]:\\|\\\\[A-Za-z0-9._-]+\\)[A-Za-z0-9._\\-]{0,200}$') { return 'the mirror folder must be a drive or share path without spaces' } }
+    'server-install' { if ($P.mirror -and $P.mirror -notmatch $MirrorPattern) { return 'the mirror folder must be a drive or share path without spaces' } }
+    'server-replace' {
+      if ($P.mirror -and $P.mirror -notmatch $MirrorPattern) { return 'the mirror folder must be a drive or share path without spaces' }
+      if ($P.exe_sha256 -and [string]$P.exe_sha256 -cnotmatch '^[0-9A-F]{64}\z') { return 'bad program SHA-256' }
+      foreach ($k in @($P.Keys)) { if (@('mirror', 'exe_sha256') -notcontains $k) { return "unexpected parameter $k" } }
+    }
     'soak-server' { $h = 0.0; if (-not [double]::TryParse([string]$P.hours, [ref]$h) -or $h -le 0 -or $h -gt 24) { return 'hours must be between 0 and 24' } }
     'network-capture' {
       if (-not (Test-ServerName ([string]$P.server))) { return 'the server name may hold only letters, digits, dots, hyphens and underscores' }
@@ -602,6 +644,202 @@ function Test-AdminParams([string]$Op, [hashtable]$P) {
     'server-pairing-evidence' { $t = [datetime]::MinValue; if (-not [datetime]::TryParse([string]$P.since, [ref]$t)) { return 'bad time' } }
   }
   return $null
+}
+
+# ------------------------------------------------- the kit's own builds (pairing retest)
+
+# What to do with an installed program, from its SHA-256 and the SHA-256 of the program the
+# kit's installer holds (kit-manifest.json): install (none installed), keep (byte for byte
+# the kit's build), replace (anything else; also when the kit records no SHA-256, since an
+# unknown build is never taken for the kit's). Version numbers are not compared: a first
+# run's build and this kit's can carry the same one.
+function Get-ReplaceDecision([string]$InstalledHash, [string]$KitHash) {
+  if (-not $InstalledHash) { return 'install' }
+  if ($KitHash -and ($InstalledHash.ToUpperInvariant() -ceq $KitHash.ToUpperInvariant())) { return 'keep' }
+  return 'replace'
+}
+
+# The SHA-256 of the program inside a kit installer, as CI recorded it ('' when absent).
+function Get-KitBuildHash([string]$Kind) {
+  if (-not $script:Manifest) { return '' }
+  $v = [string]$script:Manifest["$($Kind)_exe_sha256"]
+  if ($v -cmatch '^[0-9A-Fa-f]{64}\z') { return $v.ToUpperInvariant() }
+  return ''
+}
+
+function Get-FileSha256OrEmpty([string]$Path) {
+  if ($Path -and (Test-Path -LiteralPath $Path -PathType Leaf)) { return (Get-FileSha256 $Path) }
+  return ''
+}
+
+# A first run's soak or camera session still running would break if its program were
+# replaced under it.
+function Get-RunningKitTests {
+  if ($script:Sim) { return @($script:Sim.running_tests | Where-Object { $_ }) }
+  $found = @()
+  try {
+    foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'pwsh.exe'" -ErrorAction Stop)) {
+      foreach ($n in 'Test-Soak.ps1', 'Test-CameraSoak.ps1', 'Test-HealthierYou-Camera.ps1') { if ([string]$p.CommandLine -match [regex]::Escape($n)) { $found += $n } }
+    }
+  } catch { }
+  return @($found | Sort-Object -Unique)
+}
+
+# The office server's folders: known folders, never environment variables a user may set.
+function Get-ServerProgramDir { Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'HealthierYou Server' }
+function Get-ServerDataDir { Join-Path (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'HealthierYou') 'Server' }
+
+# In -SelfTest and -DryRun $script:SimServer stands for the installed server.
+function Get-InstalledServerHash {
+  if ($script:SimServer) { return [string]$script:SimServer.exe }
+  return (Get-FileSha256OrEmpty (Join-Path (Get-ServerProgramDir) 'hy-server.exe'))
+}
+
+function Get-InstalledServerMirror {
+  if ($script:SimServer) { return [string]$script:SimServer.mirror }
+  try { return [string](Get-ItemProperty -Path 'HKLM:\Software\HealthierYou\Server' -ErrorAction Stop).MirrorFolder } catch { return '' }
+}
+
+# What a reinstall must keep: the server's identity (its TLS certificate, so the six words
+# stay), its database (users, devices, the admin passphrase) and its remembered mirror.
+function Get-ServerDataMark {
+  if ($script:SimServer) { return @{ cert = [string]$script:SimServer.cert; db = [bool]$script:SimServer.db; mirror_known = [bool]$script:SimServer.mirror_known } }
+  $d = Get-ServerDataDir
+  return @{ cert = (Get-FileSha256OrEmpty (Join-Path $d 'keys\tls.cert.der')); db = (Test-Path -LiteralPath (Join-Path $d 'server.db')); mirror_known = (Test-Path -LiteralPath (Join-Path $d 'mirror-location.txt')) }
+}
+
+# The installed server's own uninstaller (Program Files, which only administrators can
+# change), silent and without /DELETEDATA, so keys, database, backups and the mirror stay
+# (server-installer.nsi, Section "Uninstall"). NSIS runs it from a temporary copy and
+# returns at once, so wait for the service, the entry and the program to go. $null = done.
+function Invoke-ServerUninstall {
+  if ($script:SimServer) {
+    $script:SimServer.calls += 'server-uninstall'
+    if ($script:SimServer.uninstall_fails) { return 'the old server was not fully removed (simulated)' }
+    $script:SimServer.exe = ''
+    if ($script:SimServer.uninstall_loses_data) { $script:SimServer.cert = ''; $script:SimServer.db = $false }
+    return $null
+  }
+  $u = Join-Path (Get-ServerProgramDir) 'uninstall.exe'
+  if (-not (Test-Path -LiteralPath $u)) { return 'the installed server has no uninstall.exe' }
+  Write-Log 'Removing the installed server, keeping its data (silent)...' 'Cyan'
+  $p = Start-Process -FilePath $u -ArgumentList '/S' -PassThru
+  $null = $p.Handle
+  if (-not $p.WaitForExit(600000)) { return 'the uninstaller did not finish within 10 minutes' }
+  $key = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\HealthierYouServer'
+  $deadline = (Get-Date).AddMinutes(3)
+  while ((Get-Date) -lt $deadline) {
+    $left = [bool](Get-Service -Name 'HealthierYouServer' -ErrorAction SilentlyContinue) -or (Test-Path $key) -or (Test-Path -LiteralPath (Join-Path (Get-ServerProgramDir) 'hy-server.exe')) -or (@(Get-Process -Name 'Au_' -ErrorAction SilentlyContinue).Count -gt 0)
+    if (-not $left) { return $null }
+    Start-Sleep -Milliseconds 500
+  }
+  return 'the old server was not fully removed within 3 minutes (its service, entry or program is still there)'
+}
+
+$SetupMeaning = @{ 0 = 'done'; 2 = 'bad options or not an administrator'; 3 = 'refused (signature or version)'; 4 = 'new version did not start, previous put back'; 5 = 'the service did not start'; 6 = 'the mirror is not the data''s own'; 7 = 'not confirmed stopped or copies not verified'; 8 = 'data-folder rights could not be set'; 9 = 'rollback could not complete' }
+
+# The staged (hash-checked) server installer, silent. Returns its exit code.
+function Invoke-ServerSetup([string]$Mirror) {
+  $inst = Get-StagedFile $script:StagedInstaller
+  $a = '/S'
+  if ($Mirror) { $a += " /MIRROR=$Mirror" }
+  if ($script:SimServer) {
+    $script:SimServer.calls += "server-setup $a"
+    $code = [int]$script:SimServer.setup_code
+    if ($code -eq 0) { $script:SimServer.exe = [string]$script:SimServer.kit_exe; if (-not $script:SimServer.cert) { $script:SimServer.cert = 'NEW'; $script:SimServer.db = $true } }
+    return $code
+  }
+  Write-Log "Installing the server silently ($a)..." 'Cyan'
+  $proc = Start-Process -FilePath $inst -ArgumentList $a -WorkingDirectory (Get-AdminDir 'stage') -PassThru
+  $null = $proc.Handle; $proc.WaitForExit()
+  return [int]$proc.ExitCode
+}
+
+# The service running, its firewall rule and TCP 8443 listening.
+function Get-ServerHealth {
+  if ($script:SimServer) { return @{ ok = [bool]$script:SimServer.healthy; notes = @("service $(if ($script:SimServer.healthy) { 'running' } else { 'NOT running' }) (simulated)") } }
+  $notes = @()
+  $running = $false; $svc = $null
+  for ($i = 0; $i -lt 60; $i++) {
+    $svc = Get-CimInstance Win32_Service -Filter "Name = 'HealthierYouServer'" -ErrorAction SilentlyContinue
+    if ($svc -and $svc.State -eq 'Running') { $running = $true; break }
+    Start-Sleep -Seconds 2
+  }
+  $notes += "service $(if ($running) { 'running' } else { 'NOT running' }) ($(if ($svc) { $svc.StartName -replace '^.*\\', '' } else { 'missing' }))"
+  $rule = @(Get-NetFirewallRule -DisplayName 'HealthierYou Server' -ErrorAction SilentlyContinue)
+  $ruleOk = $rule.Count -gt 0 -and @($rule | Where-Object { $_.Enabled -eq 'True' -or $_.Enabled -eq $true }).Count -gt 0
+  $profiles = @(); try { $profiles = @($rule | ForEach-Object { [string]$_.Profile }) } catch { }
+  $notes += "firewall rule $(if ($ruleOk) { "present ($($profiles -join ','))" } else { 'MISSING' })"
+  $listen = @(Get-NetTCPConnection -LocalPort 8443 -State Listen -ErrorAction SilentlyContinue).Count -gt 0
+  $notes += "TCP 8443 $(if ($listen) { 'listening' } else { 'NOT listening' })"
+  return @{ ok = ($running -and $ruleOk -and $listen); notes = $notes }
+}
+
+# The server's six words (hy-server fingerprint reads the administrators-only keys).
+function Get-ServerWords {
+  if ($script:SimServer) { return [string]$script:SimServer.words }
+  $exe = Join-Path (Get-ServerProgramDir) 'hy-server.exe'
+  if (-not (Test-Path -LiteralPath $exe)) { return '' }
+  $fp = @(& $exe fingerprint 2>&1 | ForEach-Object { [string]$_ })
+  return ((@($fp | Where-Object { $_ -like 'six words*' }) -replace '^six words\s+', '') -join '')
+}
+
+# The pairing retest's server step, elevated. An installed server refuses the same version
+# over itself and any installer signed with another CI run's key (verify-release; by
+# design), so a server that is not the kit's build is uninstalled keeping its data and
+# installed again from the staged installer. The installer finds the data's remembered
+# mirror (mirror-location.txt) and the service starts on the kept keys and database.
+function Invoke-ServerReplace([hashtable]$P) {
+  $kitExe = [string]$P.exe_sha256
+  $decision = Get-ReplaceDecision (Get-InstalledServerHash) $kitExe
+  $before = Get-ServerDataMark
+  $notes = @()
+  if ($decision -eq 'keep') { $notes += 'the installed server is already the kit''s build (hy-server.exe SHA-256 matches); not installed again' }
+  else {
+    if (-not $script:StagedInstaller) { return New-Result 'INCONCLUSIVE' 'the server installer is not in the kit' }
+    $busy = @(Get-RunningKitTests)
+    if ($busy.Count) { return New-Result 'INCONCLUSIVE' "not replaced: $($busy -join ', ') is still running (a first-run soak or session). Start the retest again when it has finished." }
+    # The staged installer is checked before the old server is removed: a changed copy
+    # stops here, with the old server still in place.
+    $null = Get-StagedFile $script:StagedInstaller
+    # The data's own mirror is remembered with the data (mirror-location.txt) and the
+    # installer finds it. Without that file: the installed server's mirror, or for a fresh
+    # install the one the kit window chose. Known before anything is removed, or refused.
+    $mirror = ''
+    if (-not $before.mirror_known) {
+      $mirror = if ($decision -eq 'replace') { Get-InstalledServerMirror } else { [string]$P.mirror }
+      if (-not $mirror -or $mirror -notmatch $MirrorPattern) { return New-Result 'INCONCLUSIVE' (($notes + 'not replaced: the server data''s mirror folder is not known, so nothing was changed') -join '; ') }
+    }
+    if ($decision -eq 'replace') {
+      $notes += "the installed server is not the kit's build ($(if ($kitExe) { 'its hy-server.exe SHA-256 differs' } else { 'the kit records no program SHA-256' })): uninstalled keeping its data, then installed from the kit"
+      $why = Invoke-ServerUninstall
+      if ($why) { return New-Result 'FAIL' (($notes + "uninstall: $why") -join '; ') }
+      $mid = Get-ServerDataMark
+      if ($before.cert -and ($mid.cert -cne $before.cert -or ($before.db -and -not $mid.db))) { return New-Result 'FAIL' (($notes + 'the server data (keys or database) did not survive the uninstall, so nothing was installed') -join '; ') }
+    }
+    else { $notes += 'no server was installed: installed from the kit' }
+    $code = Invoke-ServerSetup $mirror
+    $notes += "setup exit code $code ($($SetupMeaning[$code]))"
+    if ($code -ne 0) { return New-Result 'FAIL' ($notes -join '; ') }
+  }
+  $h = Get-ServerHealth
+  $notes += $h.notes
+  $after = Get-InstalledServerHash
+  $isKit = [bool]($kitExe -and $after -and ($after -ceq $kitExe))
+  $notes += "installed hy-server.exe $(if ($isKit) { 'is the kit''s build' } elseif ($kitExe) { 'is NOT the kit''s build' } else { 'not compared (the kit records no program SHA-256)' })"
+  $now = Get-ServerDataMark
+  $kept = [bool]($before.cert -and $before.db -and ($now.cert -ceq $before.cert) -and $now.db)
+  $lost = [bool]($before.cert -and -not $kept)
+  if ($decision -ne 'keep') { $notes += "server data (keys, and the database with the admin passphrase) $(if ($kept) { 'kept: the six words and the passphrase are the same as before' } elseif ($lost) { 'NOT kept' } else { 'new (there was none)' })" }
+  $words = Get-ServerWords
+  if (-not $words) { $notes += 'six words not read' }
+  $v = if (-not $h.ok -or $lost -or ($kitExe -and -not $isKit)) { 'FAIL' } elseif (-not $kitExe -or -not $words) { 'INCONCLUSIVE' } else { 'PASS' }
+  $r = New-Result $v ($notes -join '; ')
+  # Back to the kit window only (not written to the results).
+  $r.words = $words
+  $r.passphrase_needed = -not ($now.db -and ($kept -or $decision -eq 'keep'))
+  $r.data_kept = $kept
+  return $r
 }
 
 # Run a staged script for a report the agent names itself (old copies removed first).
@@ -613,6 +851,7 @@ function Invoke-StagedReport([string]$Script, [string[]]$Arguments, [string]$Rep
 
 function Invoke-AdminOp([string]$Op, [hashtable]$P) {
   if ($AdminOps -notcontains $Op) { return New-Result 'INCONCLUSIVE' "unknown administrator step '$Op' refused" }
+  if ((Get-AllowedAdminOps) -notcontains $Op) { return New-Result 'INCONCLUSIVE' "administrator step '$Op' refused: not part of this $(if ($script:RetestName) { 'retest' } else { 'run' })" }
   $bad = Test-AdminParams $Op $P
   if ($bad) { return New-Result 'INCONCLUSIVE' "refused: $bad" }
   if ($script:AdminStub) { $s = & $script:AdminStub $Op $P; if ($s) { return $s } }
@@ -635,25 +874,12 @@ function Invoke-AdminOp([string]$Op, [hashtable]$P) {
         $proc = Start-Process -FilePath $inst -ArgumentList $a -WorkingDirectory (Get-AdminDir 'stage') -PassThru
         $null = $proc.Handle; $proc.WaitForExit()
         $code = [int]$proc.ExitCode
-        $meaning = @{ 0 = 'done'; 2 = 'bad options or not an administrator'; 3 = 'refused (signature or version)'; 4 = 'new version did not start, previous put back'; 5 = 'the service did not start'; 6 = 'the mirror is not the data''s own'; 7 = 'not confirmed stopped or copies not verified'; 8 = 'data-folder rights could not be set'; 9 = 'rollback could not complete' }
-        $notes += "setup exit code $code ($($meaning[$code]))"
+        $notes += "setup exit code $code ($($SetupMeaning[$code]))"
         if ($code -ne 0) { return New-Result 'FAIL' ($notes -join '; ') }
       }
-      $running = $false
-      for ($i = 0; $i -lt 60; $i++) {
-        $svc = Get-CimInstance Win32_Service -Filter "Name = 'HealthierYouServer'" -ErrorAction SilentlyContinue
-        if ($svc -and $svc.State -eq 'Running') { $running = $true; break }
-        Start-Sleep -Seconds 2
-      }
-      $notes += "service $(if ($running) { 'running' } else { 'NOT running' }) ($(if ($svc) { $svc.StartName -replace '^.*\\', '' } else { 'missing' }))"
-      $rule = @(Get-NetFirewallRule -DisplayName 'HealthierYou Server' -ErrorAction SilentlyContinue)
-      $ruleOk = $rule.Count -gt 0 -and @($rule | Where-Object { $_.Enabled -eq 'True' -or $_.Enabled -eq $true }).Count -gt 0
-      $profiles = @(); try { $profiles = @($rule | ForEach-Object { [string]$_.Profile }) } catch { }
-      $notes += "firewall rule $(if ($ruleOk) { "present ($($profiles -join ','))" } else { 'MISSING' })"
-      $listen = @(Get-NetTCPConnection -LocalPort 8443 -State Listen -ErrorAction SilentlyContinue).Count -gt 0
-      $notes += "TCP 8443 $(if ($listen) { 'listening' } else { 'NOT listening' })"
-      $verdict = if ($running -and $ruleOk -and $listen) { 'PASS' } else { 'FAIL' }
-      return New-Result $verdict ($notes -join '; ')
+      $h = Get-ServerHealth
+      $notes += $h.notes
+      return New-Result $(if ($h.ok) { 'PASS' } else { 'FAIL' }) ($notes -join '; ')
     }
     'server-passphrase' {
       if (-not $serverExe -or -not (Test-Path -LiteralPath $serverExe)) { return New-Result 'INCONCLUSIVE' 'the server is not installed' }
@@ -685,6 +911,7 @@ function Invoke-AdminOp([string]$Op, [hashtable]$P) {
       $r.words = $words
       return $r
     }
+    'server-replace' { return (Invoke-ServerReplace $P) }
     'server-pairing-evidence' {
       $since = ([datetime]::Parse([string]$P.since)).ToUniversalTime()
       $logs = Join-Path $env:ProgramData 'HealthierYou\Server\logs'
@@ -813,9 +1040,9 @@ $AgentBootstrapTemplate = @'
 $ErrorActionPreference = 'Stop'
 $env:PSModulePath = (@([IO.Path]::Combine($PSHOME, 'Modules'), [IO.Path]::Combine([Environment]::GetFolderPath('ProgramFiles'), 'WindowsPowerShell\Modules'), [IO.Path]::Combine([Environment]::SystemDirectory, 'WindowsPowerShell\v1.0\Modules')) -join [IO.Path]::PathSeparator)
 function D([string]$s) { [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) }
-$role = '@ROLE@'; $want = '@SHA@'; $src = D '@SRC@'; $root = D '@ROOT@'; $acl = @ACL@; $pause = @PAUSE@
+$role = '@ROLE@'; $retest = '@RETEST@'; $want = '@SHA@'; $src = D '@SRC@'; $root = D '@ROOT@'; $acl = @ACL@; $pause = @PAUSE@
 $run = @{ Agent = $true; Role = $role; StateDir = (D '@STATE@'); InstallersDir = (D '@INST@'); ScriptsDir = (D '@SCRIPTS@'); OwnerPid = @OWNER@; StagePins = '@PINS@' }
-if ($root) { $run.AdminRoot = $root }; if (@ONCE@) { $run.AgentOnce = $true }
+if ($root) { $run.AdminRoot = $root }; if (@ONCE@) { $run.AgentOnce = $true }; if ($retest) { $run.Retest = $retest }
 function Fail([int]$Code, [string]$Msg) { Write-Host $Msg -ForegroundColor Red; if ($pause) { try { $null = Read-Host 'Press Enter to close this window' } catch { } }; exit $Code }
 function Hash([byte[]]$b) { $h = [Security.Cryptography.SHA256]::Create(); try { ([BitConverter]::ToString($h.ComputeHash($b))) -replace '-', '' } finally { $h.Dispose() } }
 function Safe([string]$p, [bool]$fresh) {
@@ -836,7 +1063,7 @@ function Safe([string]$p, [bool]$fresh) {
 try {
   $bytes = [IO.File]::ReadAllBytes($src)
   if ((Hash $bytes) -ne $want) { Fail 3 'Refused: the kit script changed after the kit window started. Nothing was run as administrator. Close the kit and start it again from a fresh copy.' }
-  if (-not $root) { $top = [IO.Path]::Combine([Environment]::GetFolderPath('CommonApplicationData'), 'HealthierYou-TestKit-Admin'); Safe $top $false; $root = [IO.Path]::Combine($top, $role) }
+  if (-not $root) { $top = [IO.Path]::Combine([Environment]::GetFolderPath('CommonApplicationData'), 'HealthierYou-TestKit-Admin'); Safe $top $false; $sub = $role; if ($retest) { $sub = "$role-Retest" }; $root = [IO.Path]::Combine($top, $sub) }
   Safe $root $false
   $boot = [IO.Path]::Combine($root, 'boot')
   Safe $boot $true
@@ -880,12 +1107,13 @@ function ConvertFrom-PinText([string]$Text) {
 # The bootstrap text with its literals checked first (a bad value is never embedded).
 function New-AgentBootstrap([hashtable]$B) {
   if ([string]$B.role -cnotmatch '^(Server|Camera)$') { throw 'refused: bad role for the administrator window' }
+  if ([string]$B.retest -cnotmatch '^(Pairing)?$') { throw 'refused: bad retest for the administrator window' }
   if ([string]$B.sha256 -cnotmatch '^[0-9A-F]{64}$') { throw 'refused: bad SHA-256 for the administrator window' }
   if ([string]$B.ownerPid -notmatch '^[0-9]{1,10}$') { throw 'refused: bad owner process id' }
   if (-not $B.src) { throw 'refused: no kit script path' }
   if ([string]$B.pins -cnotmatch $PinPattern) { throw 'refused: bad or missing SHA-256 pins for the files to stage' }
   $t = $AgentBootstrapTemplate
-  $lit = @{ '@ROLE@' = [string]$B.role; '@SHA@' = [string]$B.sha256; '@OWNER@' = [string][int64]$B.ownerPid
+  $lit = @{ '@ROLE@' = [string]$B.role; '@RETEST@' = [string]$B.retest; '@SHA@' = [string]$B.sha256; '@OWNER@' = [string][int64]$B.ownerPid
     '@ACL@' = $(if ($B.acl) { '$true' } else { '$false' }); '@PAUSE@' = $(if ($B.pause) { '$true' } else { '$false' })
     '@ONCE@' = $(if ($B.once) { '$true' } else { '$false' }); '@PINS@' = [string]$B.pins }
   foreach ($k in 'src', 'root', 'state', 'inst', 'scripts') {
@@ -901,7 +1129,7 @@ function ConvertTo-EncodedCommand([string]$Text) { [Convert]::ToBase64String([Te
 
 # The command line of the elevated window: the bootstrap only, never a script file.
 function New-AgentLaunchBootstrap([string]$Root = '', [bool]$Acl = $true, [bool]$Pause = $true, [bool]$Once = $false) {
-  return (New-AgentBootstrap @{ role = $script:RoleName; sha256 = $script:KitSha256; src = $script:KitScriptPath; root = $Root; acl = $Acl; pause = $Pause; once = $Once
+  return (New-AgentBootstrap @{ role = $script:RoleName; retest = [string]$script:RetestName; sha256 = $script:KitSha256; src = $script:KitScriptPath; root = $Root; acl = $Acl; pause = $Pause; once = $Once
     pins = (ConvertTo-PinText (Get-StagePins)); state = $script:StateDirResolved; inst = $script:InstallersDirResolved; scripts = $script:ScriptsDirResolved; ownerPid = $PID })
 }
 function Get-AgentLaunchArgs {
@@ -1115,7 +1343,7 @@ function Write-Summary([object[]]$Steps) {
   New-Item -ItemType Directory -Force -Path $res | Out-Null
   $rows = New-Object System.Collections.Generic.List[object]
   $lines = New-Object System.Collections.Generic.List[string]
-  $lines.Add("HealthierYou office test kit $KitVersion - $($script:PcLabel) ($script:RoleName) - summary written $(Get-NowText)")
+  $lines.Add("HealthierYou office test kit $KitVersion - $($script:PcLabel) ($script:RoleName)$(if ($script:RetestName) { " - $($script:RetestName.ToLowerInvariant()) retest" }) - summary written $(Get-NowText)")
   if ($script:Manifest) { $lines.Add("Kit build: commit $($script:Manifest.commit), CI run $($script:Manifest.run_id); installers are CI test builds (update keys made for that run only; no Authenticode signature)") }
   $e = $script:State.env
   if ($e.Count) { $lines.Add(("This PC: {0} build {1}; {2} GB memory; {3} logical processors; laptop {4}; webcams found {5}; pktmon {6}; account in Administrators {7}; kit window elevated {8}; PowerShell {9}" -f $e.windows, $e.build, $e.ram_gb, $e.cores, $e.laptop, $e.webcams, $e.pktmon, $e.admin_member, $e.elevated, $e.powershell)) }
@@ -1135,7 +1363,7 @@ function Write-Summary([object[]]$Steps) {
   $lines.Add('Verdicts come from each test script''s own report: PASS only with its evidence; INCONCLUSIVE means evidence is missing (the detail says what); SKIPPED means not run.')
   $lines.Add('Rows are the docs/V1_Acceptance.md ids this run covers. Filing them there is a separate step: nothing is marked passed by the kit.')
   $lines | Set-Content -LiteralPath (Join-Path $res 'kit-summary.txt') -Encoding UTF8
-  Write-JsonFile (Join-Path $res 'kit-summary.json') @{ kit = $KitVersion; pc = $script:PcLabel; role = $script:RoleName; manifest = $script:Manifest; env = $script:State.env; row_notes = @($script:State.data['row_notes']); steps = $rows.ToArray() }
+  Write-JsonFile (Join-Path $res 'kit-summary.json') @{ kit = $KitVersion; pc = $script:PcLabel; role = $script:RoleName; retest = [string]$script:RetestName; manifest = $script:Manifest; env = $script:State.env; row_notes = @($script:State.data['row_notes']); steps = $rows.ToArray() }
   return $lines
 }
 
@@ -1160,6 +1388,7 @@ function Invoke-CheckStep([hashtable]$Ctx) {
     $notes += $h.detail
     $verdicts += $(if ($h.ok -eq $true) { 'PASS' } elseif ($h.ok -eq $false) { 'FAIL' } else { 'INCONCLUSIVE' })
   }
+  if ($script:RetestName) { foreach ($k in $need) { if (-not (Get-KitBuildHash $k)) { $notes += "kit-manifest.json records no SHA-256 for the $k program, so an installed one cannot be compared (it is replaced)" } } }
   if ($script:RoleName -eq 'Camera' -and -not $e.pktmon) { $notes += 'pktmon is missing (Windows 10 2004 or later is needed for the capture)' }
   Show-Banner 'This PC' @("Windows: $($e.windows) build $($e.build)", "Memory: $($e.ram_gb) GB; webcams found: $($e.webcams); laptop: $($e.laptop)", "Rows chosen: $((@($rows.capture) + @($rows.camera_row) + @($rows.soak) | Where-Object { $_ }) -join ', ')") 'Cyan'
   return New-Result (Join-Verdicts $verdicts) ($notes -join '; ')
@@ -1167,23 +1396,29 @@ function Invoke-CheckStep([hashtable]$Ctx) {
 
 # ---------------------------------------------------------------- PC1 (server)
 
+# The mirror folder for a fresh server install: a second drive, else a USB stick or a share
+# the person gives. '' when they skip.
+function Select-MirrorFolder {
+  while ($true) {
+    $sys = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd(':').ToUpperInvariant() } else { 'C' }
+    $drive = $null
+    if ($script:Sim) { $drive = 'D:' }
+    else { $drive = @(Get-CimInstance Win32_LogicalDisk -ErrorAction SilentlyContinue | Where-Object { @(2, 3) -contains [int]$_.DriveType -and $_.DeviceID.TrimEnd(':').ToUpperInvariant() -ne $sys -and [double]$_.FreeSpace -gt 1GB } | Sort-Object DriveType -Descending | Select-Object -First 1 | ForEach-Object { $_.DeviceID }) }
+    if ($drive) { Write-Log 'Mirror folder chosen on a second drive or share.'; return "$drive\HealthierYou-Mirror" }
+    Show-Banner 'The server needs a second drive' @('The server keeps a copy of its control log (the mirror) on ANOTHER drive than C:.', 'No second drive was found. Plug in a USB stick (leave it plugged in from now on),', 'then press Enter. Or type a network share path (\\server\share\folder), or s to skip.')
+    $a = Read-Answer '  Enter = look again, a \\share\path, or s' ''
+    if ($a -match '^[sS]$') { return '' }
+    if ($a -like '\\*') { Write-Log 'Mirror folder chosen on a second drive or share.'; return $a }
+  }
+}
+
 function Invoke-ServerInstallStep([hashtable]$Ctx) {
   $mirror = $null
   $already = $false
   if (-not $script:Sim) { $already = [bool](Get-Service -Name 'HealthierYouServer' -ErrorAction SilentlyContinue) }
   if (-not $already) {
-    while (-not $mirror) {
-      $sys = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd(':').ToUpperInvariant() } else { 'C' }
-      $drive = $null
-      if ($script:Sim) { $drive = 'D:' }
-      else { $drive = @(Get-CimInstance Win32_LogicalDisk -ErrorAction SilentlyContinue | Where-Object { @(2, 3) -contains [int]$_.DriveType -and $_.DeviceID.TrimEnd(':').ToUpperInvariant() -ne $sys -and [double]$_.FreeSpace -gt 1GB } | Sort-Object DriveType -Descending | Select-Object -First 1 | ForEach-Object { $_.DeviceID }) }
-      if ($drive) { $mirror = "$drive\HealthierYou-Mirror"; break }
-      Show-Banner 'The server needs a second drive' @('The server keeps a copy of its control log (the mirror) on ANOTHER drive than C:.', 'No second drive was found. Plug in a USB stick (leave it plugged in from now on),', 'then press Enter. Or type a network share path (\\server\share\folder), or s to skip.')
-      $a = Read-Answer '  Enter = look again, a \\share\path, or s' ''
-      if ($a -match '^[sS]$') { return New-Result 'SKIPPED' 'no second drive for the mirror' @('SV1') }
-      if ($a -like '\\*') { $mirror = $a }
-    }
-    Write-Log 'Mirror folder chosen on a second drive or share.'
+    $mirror = Select-MirrorFolder
+    if (-not $mirror) { return New-Result 'SKIPPED' 'no second drive for the mirror' @('SV1') }
   }
   $r = Invoke-AdminJob 'server-install' @{ mirror = $mirror } 'server-install'
   $r.rows = @('SV1')
@@ -1250,7 +1485,7 @@ function Invoke-PairingStep([hashtable]$Ctx) {
     '',
     '1. In the browser page that just opened (http://127.0.0.1:8444), sign in with the passphrase.',
     '2. Add a user named  kit-pc2  (never a real name). Click New slip. Leave the slip on screen.',
-    '3. Go to PC2 and start Run-PC2-Camera.cmd there. Its network capture step asks, in order,',
+    "3. Go to PC2 and start $(Get-Launcher 'Camera') there. Its network capture step asks, in order,",
     '   to pair (phase "Pending": paste the slip there; send it by internal chat or a USB stick, or',
     '   type it) and then to have it confirmed (phase "PairedOff"):',
     '4. To confirm: on PC2 read the six words and the check code; compare them with this admin',
@@ -1352,6 +1587,16 @@ function Invoke-CaptureStep([hashtable]$Ctx) {
     $rnd = New-Object Random
     $d['canary'] = 'KITPC2-' + (-join (1..4 | ForEach-Object { $chars[$rnd.Next($chars.Length)] }))
     Save-State
+  }
+  # A retest takes the server name the first run was given, when it is still usable.
+  if ($script:RetestName -and -not $d['server_name']) {
+    $first = Read-JsonFile (Join-Path (Join-Path (Split-Path -Parent $script:StateDirResolved) $script:RoleName) 'state.json')
+    $n = if ($first -and $first.data) { [string]$first.data['server_name'] } else { '' }
+    if ($n -and (Test-ServerName $n)) {
+      $ok = $script:Sim
+      if (-not $ok) { try { $ok = @([Net.Dns]::GetHostAddresses($n)).Count -gt 0 } catch { $ok = $false } }
+      if ($ok) { $d['server_name'] = $n; Save-State; Write-Log 'Using the server name given in the first run.' }
+    }
   }
   while (-not $d['server_name']) {
     Show-Banner 'The server''s name' @('PC1''s kit shows "SERVER NAME" on its pairing screen. Type it here.')
@@ -1539,7 +1784,146 @@ function Invoke-UninstallStep([hashtable]$Ctx) {
   return New-Result (Join-Verdicts @($i7.verdict, $i9)) "$detail (exit code $code)" @('I7', 'I9b') $sub
 }
 
+# ---------------------------------------------------------------- pairing retest
+
+# R1-02 (PC1): the office server replaced by the kit's build when it is not that build, in
+# the administrator window (Invoke-ServerReplace). The six words come back to this window.
+function Invoke-ServerReplaceStep([hashtable]$Ctx) {
+  $installed = if ($script:Sim) { [bool]($script:SimServer -and $script:SimServer.exe) } else { [bool](Get-Service -Name 'HealthierYouServer' -ErrorAction SilentlyContinue) }
+  $p = @{}
+  if (-not $installed) {
+    # Only a fresh install needs a mirror; kept data brings its own.
+    $m = Select-MirrorFolder
+    if (-not $m) { return New-Result 'SKIPPED' 'no server installed and no second drive for the mirror' @('SV1') }
+    $p.mirror = $m
+  }
+  $kit = Get-KitBuildHash 'server'
+  if ($kit) { $p.exe_sha256 = $kit }
+  $r = Invoke-AdminJob 'server-replace' $p 'server-replace'
+  if ($r.words) { $script:State.data['six_words'] = [string]$r.words }
+  $script:State.data['passphrase_needed'] = ($r.passphrase_needed -eq $true)
+  foreach ($k in 'words', 'passphrase_needed', 'data_kept') { $r.Remove($k) }
+  return $r
+}
+
+# R1-03 (PC1): the admin passphrase, only when the server's data did not survive (or when
+# run again with -Redo R1-03, for a forgotten passphrase).
+function Invoke-RetestPassphraseStep([hashtable]$Ctx) {
+  if (-not $script:State.data['passphrase_needed'] -and -not $Ctx.redo) {
+    return New-Result 'SKIPPED' "not needed: the server's data (its keys, and the database that holds the admin passphrase) was kept, so the passphrase from the first run still works. Forgotten? Run $(Get-Launcher 'Server') -Redo R1-03"
+  }
+  return (Invoke-PassphraseStep $Ctx)
+}
+
+function Test-CompanionData {
+  if ($script:Sim) { return [bool]$script:Sim.companion_data }
+  return (Test-Path -LiteralPath (Join-Path (Join-Path $env:LOCALAPPDATA 'HealthierYou') 'data'))
+}
+function Get-InstalledCompanionHash {
+  if ($script:Sim) { return [string]$script:Sim.companion_exe }
+  return (Get-FileSha256OrEmpty (Get-CompanionExe))
+}
+function Stop-CompanionForReplace {
+  if ($script:Sim) { return }
+  Get-Process -Name 'hy-companion', 'hy-update-helper' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  # The WebView2 processes of the bundled runtime end shortly after the app.
+  $root = Join-Path $env:LOCALAPPDATA 'HealthierYou'
+  $deadline = (Get-Date).AddSeconds(30)
+  while ((Get-Date) -lt $deadline) {
+    $left = @(Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) })
+    if (-not $left.Count) { return }
+    Start-Sleep -Milliseconds 500
+  }
+}
+# HealthierYou's own uninstaller, silent and without /DELETEDATA: the data folder stays
+# (installer-hooks.nsh). It runs from a temporary copy; wait for it and the program to go.
+function Invoke-CompanionUninstall {
+  if ($script:Sim) {
+    $script:Sim.calls += 'companion-uninstall'
+    $script:Sim.companion_exe = ''
+    if ($script:Sim.companion_uninstall_loses_data) { $script:Sim.companion_data = $false }
+    return $null
+  }
+  $root = Join-Path $env:LOCALAPPDATA 'HealthierYou'
+  $u = Join-Path $root 'uninstall.exe'
+  if (-not (Test-Path -LiteralPath $u)) { return 'the installed HealthierYou has no uninstall.exe' }
+  Write-Log 'Removing the installed HealthierYou, keeping its data (silent)...'
+  $p = Start-Process -FilePath $u -ArgumentList '/S' -PassThru
+  $null = $p.Handle
+  if (-not $p.WaitForExit(600000)) { return 'the uninstaller did not finish within 10 minutes' }
+  $deadline = (Get-Date).AddMinutes(3)
+  while ((Get-Date) -lt $deadline) {
+    if (-not (Test-Path -LiteralPath (Get-CompanionExe)) -and -not @(Get-Process -Name 'Au_' -ErrorAction SilentlyContinue).Count) { return $null }
+    Start-Sleep -Milliseconds 500
+  }
+  return 'the old HealthierYou was not removed within 3 minutes'
+}
+function Invoke-CompanionSetup([string]$Installer) {
+  if ($script:Sim) { $script:Sim.calls += 'companion-setup'; $script:Sim.companion_exe = [string]$script:Sim.companion_kit_exe; return 0 }
+  Write-Log 'Installing HealthierYou for this user (silent, no administrator)...'
+  $p = Start-Process -FilePath $Installer -ArgumentList '/S' -PassThru
+  $null = $p.Handle; $p.WaitForExit()
+  return [int]$p.ExitCode
+}
+
+# R1-04 (PC1) and R2-02 (PC2): HealthierYou for this user is the kit's build: installed
+# when absent, kept when byte for byte the kit's, otherwise uninstalled keeping its data and
+# installed from the kit (a same-version silent install over the old one is not relied on).
+function Invoke-CompanionReplaceStep([hashtable]$Ctx) {
+  $inst = Get-Installer 'companion'
+  if (-not $inst) { return New-Result 'INCONCLUSIVE' 'the companion installer is not in the kit' }
+  $hc = Test-InstallerHash $inst
+  if ($hc.ok -ne $true) { return New-Result 'INCONCLUSIVE' "not installed: $($hc.detail)" }
+  $kit = Get-KitBuildHash 'companion'
+  $decision = Get-ReplaceDecision (Get-InstalledCompanionHash) $kit
+  $notes = @()
+  if ($decision -eq 'keep') { $notes += 'HealthierYou is already the kit''s build (hy-companion.exe SHA-256 matches); not installed again' }
+  else {
+    $busy = @(Get-RunningKitTests)
+    if ($busy.Count) { return New-Result 'INCONCLUSIVE' "not replaced: $($busy -join ', ') is still running (a first-run soak or session). Start the retest again when it has finished." }
+    Write-Host '  If Windows asks "Do you want to run this file?", click Run.' -ForegroundColor Yellow
+    $dataBefore = Test-CompanionData
+    if ($decision -eq 'replace') {
+      $notes += "the installed HealthierYou is not the kit's build ($(if ($kit) { 'its hy-companion.exe SHA-256 differs' } else { 'the kit records no program SHA-256' })): uninstalled keeping its data, then installed from the kit"
+      Stop-CompanionForReplace
+      $why = Invoke-CompanionUninstall
+      if ($why) { return New-Result 'FAIL' (($notes + "uninstall: $why") -join '; ') }
+      if ($dataBefore -and -not (Test-CompanionData)) { return New-Result 'FAIL' (($notes + 'its data folder did not survive the uninstall, so nothing was installed') -join '; ') }
+    }
+    else { $notes += 'HealthierYou was not installed: installed from the kit (per user, silent)' }
+    $code = Invoke-CompanionSetup $inst
+    $notes += "setup exit code $code"
+    if ($code -ne 0) { return New-Result 'FAIL' ($notes -join '; ') }
+    if ($dataBefore) { $notes += "its data folder $(if (Test-CompanionData) { 'kept' } else { 'MISSING' })" }
+  }
+  $after = Get-InstalledCompanionHash
+  $isKit = [bool]($kit -and $after -and ($after -ceq $kit))
+  $notes += "installed hy-companion.exe $(if ($isKit) { 'is the kit''s build' } elseif (-not $after) { 'is MISSING' } elseif ($kit) { 'is NOT the kit''s build' } else { 'not compared (the kit records no program SHA-256)' })"
+  $ok = Start-CompanionIfNeeded
+  $notes += $(if ($ok) { 'running' } else { 'did not start' })
+  $v = if (-not $after -or ($kit -and -not $isKit) -or -not $ok) { 'FAIL' } elseif (-not $kit) { 'INCONCLUSIVE' } else { 'PASS' }
+  return New-Result $v ($notes -join '; ')
+}
+
+function Get-RetestSteps([string]$RoleName) {
+  if ($RoleName -eq 'Server') {
+    return @(
+      @{ Id = 'R1-01'; Name = 'Check this PC and the kit'; Minutes = '1'; Human = 'no'; Admin = $false; Run = { param($c) Invoke-CheckStep $c } },
+      @{ Id = 'R1-02'; Name = 'Office server: the kit''s build (replaced if needed, data kept)'; Minutes = '3'; Human = 'no'; Admin = $true; Why = 'replace the office server with this kit''s build, keeping its data'; Run = { param($c) Invoke-ServerReplaceStep $c } },
+      @{ Id = 'R1-03'; Name = 'Admin passphrase (only if the server data was not kept)'; Minutes = '0-2'; Human = 'only if asked: type a passphrase'; Admin = $true; Why = 'set the admin passphrase, only if the server data was not kept'; Run = { param($c) Invoke-RetestPassphraseStep $c } },
+      @{ Id = 'R1-04'; Name = 'HealthierYou on this PC: the kit''s build (per user, data kept)'; Minutes = '2'; Human = 'no'; Admin = $false; Run = { param($c) Invoke-CompanionReplaceStep $c } },
+      @{ Id = 'R1-05'; Name = 'Pair PC2 (and this PC) with the server'; Minutes = '30-45 (with PC2)'; Human = 'yes: admin page, slip, compare six words, Confirm'; Admin = $true; Why = 'read the server log for pairing evidence'; Run = { param($c) Invoke-PairingStep $c } }
+    )
+  }
+  return @(
+    @{ Id = 'R2-01'; Name = 'Check this PC and the kit'; Minutes = '1'; Human = 'no'; Admin = $false; Run = { param($c) Invoke-CheckStep $c } },
+    @{ Id = 'R2-02'; Name = 'HealthierYou: the kit''s build (installed or replaced, data kept)'; Minutes = '2'; Human = 'no'; Admin = $false; Run = { param($c) Invoke-CompanionReplaceStep $c } },
+    @{ Id = 'R2-03'; Name = 'Network capture with the pairing'; Minutes = '30-40 (with PC1)'; Human = 'yes: paste the slip, read six words to the admin'; Admin = $true; Why = 'the network capture (pktmon and the connection audit)'; Run = { param($c) Invoke-CaptureStep $c } }
+  )
+}
+
 function Get-Steps([string]$RoleName) {
+  if ($script:RetestName) { return (Get-RetestSteps $RoleName) }
   if ($RoleName -eq 'Server') {
     return @(
       @{ Id = 'P1-01'; Name = 'Check this PC and the kit'; Minutes = '1'; Human = 'no'; Admin = $false; Run = { param($c) Invoke-CheckStep $c } },
@@ -1579,6 +1963,7 @@ function Invoke-Steps([object[]]$Steps, [string]$RedoId) {
     Save-State
     Show-Banner "Step $i of $n ($($st.Id)): $($st.Name)" @("About $($st.Minutes) min. Needs you: $($st.Human)") 'Cyan'
     $r = $null
+    $script:Ctx.redo = ($RedoId -eq $st.Id)
     try { $r = & $st.Run $script:Ctx }
     catch {
       if ($_.Exception.Message -like 'KIT-SIMULATED-CLOSE*') { throw }
@@ -1600,6 +1985,21 @@ function Invoke-Steps([object[]]$Steps, [string]$RedoId) {
   return 'complete'
 }
 
+# The zip's name: a retest's never takes a first run's.
+function Get-ResultsZipBase {
+  $b = "HealthierYou-results-$($script:PcLabel)"
+  if ($script:RetestName) { $b += "-$($script:RetestName.ToLowerInvariant())-retest" }
+  return $b
+}
+# A retest keeps its own state, results and log, apart from the first run's.
+function Get-StateDirName([string]$RoleName) { if ($script:RetestName) { return "$RoleName-retest-$($script:RetestName.ToLowerInvariant())" } return $RoleName }
+function Get-StateFileName { if ($script:RetestName) { return "state-retest-$($script:RetestName.ToLowerInvariant()).json" } return 'state.json' }
+function Get-Launcher([string]$RoleName) {
+  $pc = if ($RoleName -eq 'Server') { 'PC1' } else { 'PC2' }
+  if ($script:RetestName) { return "Run-$pc-$($script:RetestName)-Retest.cmd" }
+  if ($RoleName -eq 'Server') { return 'Run-PC1-Server.cmd' } return 'Run-PC2-Camera.cmd'
+}
+
 function Complete-Run([object[]]$Steps) {
   $lines = Write-Summary $Steps
   Write-Host ''
@@ -1612,7 +2012,7 @@ function Complete-Run([object[]]$Steps) {
   $dir = $script:OutDirResolved
   if (-not $dir) { $dir = [Environment]::GetFolderPath('Desktop') }
   if (-not $dir) { $dir = $script:StateDirResolved }
-  $name = "HealthierYou-results-$($script:PcLabel)-$((Get-Date).ToString('yyyy-MM-dd'))"
+  $name = "$(Get-ResultsZipBase)-$((Get-Date).ToString('yyyy-MM-dd'))"
   $zip = Join-Path $dir "$name.zip"
   $z = New-ResultsZip $res $zip $name
   Show-Banner 'Results zip' (@("File: $zip", "Reports in it: $($z.included.Count)") + @($z.excluded | ForEach-Object { "Left out: $_" }) + @('', 'UPLOAD THIS FILE IN THE PROJECT THREAD.')) 'Green'
@@ -1623,6 +2023,7 @@ function Complete-Run([object[]]$Steps) {
 
 function Invoke-SelfTest {
   $script:Fails = 0
+  $script:RetestName = ''
   function Check([string]$Name, [bool]$Ok) { if ($Ok) { Write-Host "[PASS] $Name" -ForegroundColor Green } else { Write-Host "[FAIL] $Name" -ForegroundColor Red; $script:Fails++ } }
   $tmp = Join-Path ([IO.Path]::GetTempPath()) ('hykit-selftest-' + [guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Force -Path $tmp | Out-Null
@@ -1922,7 +2323,7 @@ function Invoke-SelfTest {
     $script:RoleName = $saveRole; $script:KitSha256 = $saveSha; $script:KitScriptPath = $savePath
     $script:ScriptsDirResolved = $saveScripts2; $script:InstallersDirResolved = $saveInst2; $script:Manifest = $saveMan2
     # (d) bad literals are refused before anything is embedded.
-    foreach ($bad in @(@{ role = "Server'; calc; '" }, @{ role = 'server' }, @{ sha256 = 'abc' }, @{ sha256 = ($v1Hash.Substring(0, 63) + "'") }, @{ sha256 = $v1Hash.ToLowerInvariant() }, @{ ownerPid = '1; calc' }, @{ pins = '' }, @{ pins = "Test-Soak.ps1=$v1Hash'; calc; '" }, @{ pins = "..\x=$v1Hash" + 'x' })) {
+    foreach ($bad in @(@{ role = "Server'; calc; '" }, @{ role = 'server' }, @{ sha256 = 'abc' }, @{ sha256 = ($v1Hash.Substring(0, 63) + "'") }, @{ sha256 = $v1Hash.ToLowerInvariant() }, @{ ownerPid = '1; calc' }, @{ pins = '' }, @{ pins = "Test-Soak.ps1=$v1Hash'; calc; '" }, @{ pins = "..\x=$v1Hash" + 'x' }, @{ retest = "Pairing'; calc; '" }, @{ retest = 'pairing' }, @{ retest = 'Soak' })) {
       $x = $bootArgs.Clone(); foreach ($k in $bad.Keys) { $x[$k] = $bad[$k] }
       $refused = $false; try { $null = New-AgentBootstrap $x } catch { $refused = $_.Exception.Message -like 'refused*' }
       Check "elevation bootstrap: bad $(@($bad.Keys)[0]) '$(@($bad.Values)[0])' refused" $refused
@@ -2032,6 +2433,153 @@ function Invoke-SelfTest {
     Check 'the desk labels are kept' ($names -contains 'HealthierYou-results-PC2-test/desk/hy-desk-1-1.labels.csv')
     Check 'leftover scan finds nothing in redacted text' ($null -eq (Find-Leftover (Protect-Text $planted (Get-RedactionTokens)) (Get-RedactionTokens)))
 
+    # --- pairing retest: decisions, names, the administrator steps it may take, the server
+    # and companion replace with simulated installs, tampering
+    Check 'retest decision: nothing installed is install' ((Get-ReplaceDecision '' ('A' * 64)) -eq 'install')
+    Check 'retest decision: the same SHA-256 is keep (any letter case)' ((Get-ReplaceDecision ('ab' * 32) ('AB' * 32)) -eq 'keep')
+    Check 'retest decision: another SHA-256 is replace' ((Get-ReplaceDecision ('C' * 64) ('A' * 64)) -eq 'replace')
+    Check 'retest decision: no SHA-256 in the kit is replace, never keep' ((Get-ReplaceDecision ('C' * 64) '') -eq 'replace')
+    $script:RoleName = 'Server'; $script:PcLabel = 'PC1'; $script:RetestName = ''
+    $mainNames = @((Get-ResultsZipBase), (Get-StateFileName), (Get-StateDirName 'Server'), (Get-AdminSubName), (Get-AutoResumeName), (Get-Launcher 'Server'))
+    Check 'first run: names as before' (($mainNames -join '|') -eq 'HealthierYou-results-PC1|state.json|Server|Server|HealthierYouTestKit|Run-PC1-Server.cmd')
+    $script:RetestName = 'Pairing'
+    $rtNames = @((Get-ResultsZipBase), (Get-StateFileName), (Get-StateDirName 'Server'), (Get-AdminSubName), (Get-AutoResumeName), (Get-Launcher 'Server'), (Get-Launcher 'Camera'))
+    Check 'retest: its own zip, state file, state folder, administrator folder, resume entry and launchers' (($rtNames -join '|') -eq 'HealthierYou-results-PC1-pairing-retest|state-retest-pairing.json|Server-retest-pairing|Server-Retest|HealthierYouTestKitPairingRetest|Run-PC1-Pairing-Retest.cmd|Run-PC2-Pairing-Retest.cmd')
+    Check 'retest: steps R1-01 to R1-05 on PC1, R2-01 to R2-03 on PC2' (((@(Get-Steps 'Server') | ForEach-Object { $_.Id }) -join ',') -eq 'R1-01,R1-02,R1-03,R1-04,R1-05' -and ((@(Get-Steps 'Camera') | ForEach-Object { $_.Id }) -join ',') -eq 'R2-01,R2-02,R2-03')
+    Check 'retest: a slip-refused PC name points at the retest launcher' ((Get-ServerNameProblem 'MY PC') -match 'Run-PC1-Pairing-Retest\.cmd -Redo R1-05')
+    $ro = Invoke-AdminOp 'soak-server' @{ hours = '1' }
+    Check 'retest: the administrator window refuses a step the retest does not take' ($ro.verdict -eq 'INCONCLUSIVE' -and $ro.detail -like '*not part of this retest*')
+    $script:RoleName = 'Camera'
+    $ro = Invoke-AdminOp 'server-replace' @{}
+    Check 'retest: PC2''s administrator window refuses the server replace' ($ro.verdict -eq 'INCONCLUSIVE' -and $ro.detail -like '*not part of this retest*')
+    $script:RetestName = ''; $script:RoleName = 'Server'
+    $ro = Invoke-AdminOp 'server-replace' @{}
+    Check 'first run: the administrator window refuses the server replace' ($ro.verdict -eq 'INCONCLUSIVE' -and $ro.detail -like '*not part of this run*')
+    Check 'first run: the administrator steps it takes are unchanged' (((Get-AllowedAdminOps) -join ',') -eq 'server-install,server-passphrase,server-pairing-evidence,soak-server,network-capture,echo')
+    $script:RetestName = 'Pairing'
+    Check 'server replace parameters: a good request passes' ($null -eq (Test-AdminParams 'server-replace' @{ exe_sha256 = ('A' * 64); mirror = 'D:\HealthierYou-Mirror' }))
+    Check 'server replace parameters: a bad SHA-256 is refused' ($null -ne (Test-AdminParams 'server-replace' @{ exe_sha256 = 'abc' }) -and $null -ne (Test-AdminParams 'server-replace' @{ exe_sha256 = ('a' * 64) }) -and $null -ne (Test-AdminParams 'server-replace' @{ exe_sha256 = (('A' * 64) + "`n") }))
+    Check 'server replace parameters: a mirror with spaces or other characters is refused' ($null -ne (Test-AdminParams 'server-replace' @{ mirror = 'D:\a b' }) -and $null -ne (Test-AdminParams 'server-replace' @{ mirror = 'D:\x;calc' }))
+    Check 'server replace parameters: an unexpected parameter is refused' ($null -ne (Test-AdminParams 'server-replace' @{ installer = 'C:\evil.exe' }))
+    $rq = Join-Path $tmp 'rq'; New-Item -ItemType Directory -Force -Path $rq | Out-Null
+    $saveR = @{ s = $script:ScriptsDirResolved; i = $script:InstallersDirResolved; m = $script:Manifest; ao = $script:AdminRootOverride; pd = $script:PinnedDigests }
+    $script:ScriptsDirResolved = $kitScripts; $script:InstallersDirResolved = $kitInst
+    $srvName = 'HealthierYou-Server_0.1.0_x64-setup.exe'; $cmpName = 'HealthierYou_0.1.0_x64-setup.exe'
+    $script:Manifest = @{ companion = $cmpName; server_exe_sha256 = ('A' * 64); companion_exe_sha256 = ('B' * 64); sha256 = @{ 'Test-Soak.ps1' = (Get-FileSha256 (Join-Path $kitScripts 'Test-Soak.ps1')); $srvName = (Get-FileSha256 (Join-Path $kitInst $srvName)); $cmpName = (Get-FileSha256 (Join-Path $kitInst $cmpName)) } }
+    $script:AdminRootOverride = Join-Path $tmp 'admin-retest'
+    $script:PinnedDigests = Get-StagePins
+    Check 'retest pins: only the server installer is staged on PC1 (no soak script)' ($script:PinnedDigests.Count -eq 1 -and $script:PinnedDigests.Contains($srvName))
+    Initialize-AdminArea
+    Check 'retest staging: the server installer is staged' ($script:AdminReady -and $script:StagedInstaller -eq $srvName -and -not $script:StageHashes.ContainsKey('Test-Soak.ps1'))
+    function New-SimServer([hashtable]$Over = @{}) {
+      $h = @{ exe = ('D' * 64); kit_exe = ('A' * 64); cert = 'CERT1'; db = $true; mirror_known = $true; healthy = $true; words = 'alpha bravo charlie delta echo foxtrot'; setup_code = 0; calls = @() }
+      foreach ($k in $Over.Keys) { $h[$k] = $Over[$k] }
+      return $h
+    }
+    $good = @{ exe_sha256 = ('A' * 64) }
+    $script:SimServer = New-SimServer
+    $x = Invoke-AdminOp 'server-replace' $good
+    Check 'server replace: another build is uninstalled keeping its data, then the staged installer runs (no /MIRROR: the data''s own)' ((($script:SimServer.calls) -join '|') -eq 'server-uninstall|server-setup /S' -and $x.verdict -eq 'PASS')
+    Check 'server replace: the data is kept, so no passphrase is asked for, and the six words come back' ($x.data_kept -eq $true -and $x.passphrase_needed -eq $false -and $x.words -eq 'alpha bravo charlie delta echo foxtrot' -and $x.detail -like '*kept*')
+    $script:SimServer = New-SimServer @{ exe = ('A' * 64) }
+    $x = Invoke-AdminOp 'server-replace' $good
+    Check 'server replace: the kit''s build already installed is kept, nothing runs' ($script:SimServer.calls.Count -eq 0 -and $x.verdict -eq 'PASS' -and $x.passphrase_needed -eq $false -and $x.detail -like '*already the kit*')
+    $script:SimServer = New-SimServer @{ exe = ''; cert = ''; db = $false; mirror_known = $false }
+    $x = Invoke-AdminOp 'server-replace' @{ exe_sha256 = ('A' * 64); mirror = 'D:\HealthierYou-Mirror' }
+    Check 'server replace: no server installed is a fresh install with the mirror, and the passphrase is asked for' ((($script:SimServer.calls) -join '|') -eq 'server-setup /S /MIRROR=D:\HealthierYou-Mirror' -and $x.verdict -eq 'PASS' -and $x.passphrase_needed -eq $true)
+    $script:SimServer = New-SimServer @{ mirror_known = $false; mirror = 'E:\HY-Mirror' }
+    $x = Invoke-AdminOp 'server-replace' $good
+    Check 'server replace: data without its remembered mirror reinstalls on the installed server''s mirror' ((($script:SimServer.calls) -join '|') -eq 'server-uninstall|server-setup /S /MIRROR=E:\HY-Mirror' -and $x.verdict -eq 'PASS')
+    $script:SimServer = New-SimServer @{ mirror_known = $false; mirror = '' }
+    $x = Invoke-AdminOp 'server-replace' $good
+    Check 'server replace: no known mirror is refused before the old server is removed' ($x.verdict -eq 'INCONCLUSIVE' -and $x.detail -like '*mirror folder is not known*' -and $script:SimServer.calls.Count -eq 0)
+    $script:SimServer = New-SimServer @{ uninstall_loses_data = $true }
+    $x = Invoke-AdminOp 'server-replace' $good
+    Check 'server replace: data lost in the uninstall is FAIL and nothing is installed' ($x.verdict -eq 'FAIL' -and (($script:SimServer.calls) -join '|') -eq 'server-uninstall')
+    $script:SimServer = New-SimServer @{ uninstall_fails = $true }
+    $x = Invoke-AdminOp 'server-replace' $good
+    Check 'server replace: an uninstall that does not finish is FAIL and nothing is installed' ($x.verdict -eq 'FAIL' -and (($script:SimServer.calls) -join '|') -eq 'server-uninstall')
+    $script:SimServer = New-SimServer @{ kit_exe = ('E' * 64) }
+    $x = Invoke-AdminOp 'server-replace' $good
+    Check 'server replace: a result that is not the kit''s build is FAIL' ($x.verdict -eq 'FAIL' -and $x.detail -like '*NOT the kit*')
+    $script:SimServer = New-SimServer @{ setup_code = 3 }
+    $x = Invoke-AdminOp 'server-replace' $good
+    Check 'server replace: a setup error is FAIL with its meaning' ($x.verdict -eq 'FAIL' -and $x.detail -like '*exit code 3 (refused*')
+    $script:SimServer = New-SimServer
+    $x = Invoke-AdminOp 'server-replace' @{}
+    Check 'server replace: with no SHA-256 from the kit it replaces, and is never PASS' ((($script:SimServer.calls) -join '|') -eq 'server-uninstall|server-setup /S' -and $x.verdict -eq 'INCONCLUSIVE')
+    $script:Sim.running_tests = @('Test-Soak.ps1')
+    $script:SimServer = New-SimServer
+    $x = Invoke-AdminOp 'server-replace' $good
+    Check 'server replace: refused while a first-run soak runs, nothing touched' ($x.verdict -eq 'INCONCLUSIVE' -and $x.detail -like '*Test-Soak.ps1 is still running*' -and $script:SimServer.calls.Count -eq 0)
+    $script:Sim.running_tests = @()
+    Write-JsonFile (Join-Path (Get-AdminDir 'queue') 'job-20260101000000009-server-replace.json') @{ op = 'server-replace'; params = @{ exe_sha256 = ('A' * 64); installer = 'C:\evil.exe' } }
+    $script:SimServer = New-SimServer
+    $null = Invoke-AgentOnce
+    $xq = Read-JsonFile (Join-Path (Get-AdminDir 'out') 'job-20260101000000009-server-replace.result.json')
+    Check 'server replace: a request with a parameter of its own is refused, nothing touched' ($xq.verdict -eq 'INCONCLUSIVE' -and $xq.detail -like 'refused*' -and $script:SimServer.calls.Count -eq 0)
+    Set-Content -LiteralPath (Join-Path (Get-AdminDir 'stage') $srvName) -Value 'EVIL installer'
+    $script:SimServer = New-SimServer
+    $x = $null; try { $x = Invoke-AdminOp 'server-replace' $good } catch { $x = New-Result 'INCONCLUSIVE' $_.Exception.Message }
+    Check 'tamper: a changed staged server installer is refused before the old server is removed' ($x.verdict -ne 'PASS' -and $x.detail -like '*changed after it was staged*' -and $script:SimServer.calls.Count -eq 0)
+    Set-Content -LiteralPath (Join-Path $kitInst $srvName) -Value 'EVIL installer'
+    $pinErr = ''; try { $null = Get-StagePins } catch { $pinErr = $_.Exception.Message }
+    Check 'tamper: a server installer that does not match kit-manifest.json is refused before the UAC prompt (retest)' ($pinErr -like "*$srvName does not match kit-manifest.json*")
+    Set-Content -LiteralPath (Join-Path $kitInst $srvName) -Value 'server v1'
+    $script:SimServer = $null
+    # The kit window's steps: the companion replace (per user), the passphrase only when needed.
+    $script:Sim.calls = @(); $script:Sim.companion_kit_exe = ('B' * 64); $script:Sim.companion_data = $true
+    $script:Sim.companion_exe = ('C' * 64)
+    $c1 = Invoke-CompanionReplaceStep @{}
+    Check 'companion replace: another build is uninstalled keeping its data, then installed from the kit' ((($script:Sim.calls) -join '|') -eq 'companion-uninstall|companion-setup' -and $c1.verdict -eq 'PASS' -and $c1.detail -like '*data folder kept*')
+    $script:Sim.calls = @()
+    $c2 = Invoke-CompanionReplaceStep @{}
+    Check 'companion replace: the kit''s build already installed is kept, nothing runs' ($script:Sim.calls.Count -eq 0 -and $c2.verdict -eq 'PASS' -and $c2.detail -like '*already the kit*')
+    $script:Sim.companion_exe = ''
+    $c3 = Invoke-CompanionReplaceStep @{}
+    Check 'companion replace: not installed (PC2 after the uninstall check) is installed from the kit' ((($script:Sim.calls) -join '|') -eq 'companion-setup' -and $c3.verdict -eq 'PASS')
+    $script:Sim.calls = @(); $script:Sim.companion_exe = ('C' * 64); $script:Sim.companion_uninstall_loses_data = $true
+    $c4 = Invoke-CompanionReplaceStep @{}
+    Check 'companion replace: data lost in the uninstall is FAIL and nothing is installed' ($c4.verdict -eq 'FAIL' -and (($script:Sim.calls) -join '|') -eq 'companion-uninstall')
+    $script:Sim.companion_uninstall_loses_data = $false
+    $script:Sim.calls = @(); $script:Sim.companion_exe = ('C' * 64); $script:Sim.running_tests = @('Test-CameraSoak.ps1')
+    $c5 = Invoke-CompanionReplaceStep @{}
+    Check 'companion replace: refused while a first-run camera soak runs, nothing touched' ($c5.verdict -eq 'INCONCLUSIVE' -and $script:Sim.calls.Count -eq 0)
+    $script:Sim.running_tests = @()
+    Set-Content -LiteralPath (Join-Path $kitInst $cmpName) -Value 'EVIL companion'
+    $c6 = Invoke-CompanionReplaceStep @{}
+    Check 'companion replace: an installer that does not match kit-manifest.json is never run' ($c6.verdict -eq 'INCONCLUSIVE' -and $c6.detail -like '*does NOT match*' -and $script:Sim.calls.Count -eq 0)
+    Set-Content -LiteralPath (Join-Path $kitInst $cmpName) -Value 'companion v1'
+    $script:Sim.calls = @(); $script:Sim.companion_exe = ('C' * 64); $script:Sim.companion_kit_exe = ('F' * 64)
+    $c7 = Invoke-CompanionReplaceStep @{}
+    Check 'companion replace: a result that is not the kit''s build is FAIL' ($c7.verdict -eq 'FAIL' -and $c7.detail -like '*NOT the kit*')
+    $script:Sim.companion_exe = $null; $script:Sim.companion_kit_exe = $null; $script:Sim.calls = $null; $script:Sim.companion_data = $null
+    $script:State.data['passphrase_needed'] = $false
+    $pp = Invoke-RetestPassphraseStep @{}
+    Check 'retest passphrase: not asked for when the server data was kept' ($pp.verdict -eq 'SKIPPED' -and $pp.detail -like '*-Redo R1-03*')
+    $saveInline = @{ a = $script:AgentInline; d = $script:InlineAdminDone; s = $script:AdminStub }
+    $script:AgentInline = $true; $script:InlineAdminDone = $true
+    $script:AdminStub = { param($Op, $P) if ($Op -eq 'server-passphrase') { $r = New-Result 'PASS' 'stub passphrase'; $r.words = 'w1 w2 w3 w4 w5 w6'; return $r } }
+    $script:State.data['passphrase_needed'] = $true
+    $pp = Invoke-RetestPassphraseStep @{}
+    Check 'retest passphrase: asked for when the server data was not kept' ($pp.verdict -eq 'PASS' -and $script:State.data['six_words'] -eq 'w1 w2 w3 w4 w5 w6')
+    $script:State.data['passphrase_needed'] = $false; $script:State.data['six_words'] = $null
+    $pp = Invoke-RetestPassphraseStep @{ redo = $true }
+    Check 'retest passphrase: -Redo R1-03 asks for it (a forgotten passphrase)' ($pp.verdict -eq 'PASS' -and $script:State.data['six_words'] -eq 'w1 w2 w3 w4 w5 w6')
+    $script:AgentInline = $saveInline.a; $script:InlineAdminDone = $saveInline.d; $script:AdminStub = $saveInline.s
+    # The elevated entry carries the retest to the agent; a bad value is refused.
+    $rtBoot = $bootArgs.Clone(); $rtBoot.retest = 'Pairing'
+    Check 'elevation bootstrap: the retest is embedded as a checked literal' ((New-AgentBootstrap $rtBoot).Contains("`$retest = 'Pairing'") -and (New-AgentBootstrap $bootArgs).Contains("`$retest = ''"))
+    $fakeRt = "param([switch]`$Agent, [string]`$Role, [string]`$Retest, [string]`$StateDir, [string]`$InstallersDir, [string]`$ScriptsDir, [int]`$OwnerPid, [string]`$StagePins, [string]`$AdminRoot, [switch]`$AgentOnce)`nSet-Content -LiteralPath (Join-Path `$StateDir 'ran-rt.txt') -Value @(`$Role, `$Retest)`n"
+    [IO.File]::WriteAllText($btSrc, $fakeRt)
+    $rtBoot.sha256 = Get-FileSha256 $btSrc; $rtBoot.root = Join-Path $bt 'admin-rt'
+    $rr = Invoke-BootForTest $rtBoot
+    $ranRt = @(); if (Test-Path -LiteralPath (Join-Path $btState 'ran-rt.txt')) { $ranRt = @(Get-Content -LiteralPath (Join-Path $btState 'ran-rt.txt')) }
+    Check 'elevation bootstrap: the agent starts as the retest' ($rr.code -eq 0 -and $ranRt.Count -ge 2 -and $ranRt[0] -eq 'Camera' -and $ranRt[1] -eq 'Pairing')
+    [IO.File]::WriteAllText($btSrc, $fakeV1)
+    $script:RetestName = ''; $script:RoleName = 'Camera'; $script:PcLabel = 'PC2'
+    $script:ScriptsDirResolved = $saveR.s; $script:InstallersDirResolved = $saveR.i; $script:Manifest = $saveR.m; $script:AdminRootOverride = $saveR.ao; $script:PinnedDigests = $saveR.pd
+
     # --- the summary and the dry runs of both roles
     $script:Manifest = @{ commit = 'abc1234'; run_id = '1' }
     $sum = Write-Summary $stubs
@@ -2041,7 +2589,26 @@ function Invoke-SelfTest {
       Check "dry run ($role): every step finished, none PASS without its stubbed evidence" ($d.complete -and $d.notRun -eq 0)
       Check "dry run ($role): the results zip is made" ($d.zipOk)
       Check "dry run ($role): the kit check verifies the installers against the manifest" ($d.check -eq 'PASS')
+      Check "dry run ($role): the first run's state file and zip keep their names" ((Split-Path -Leaf $d.statePath) -eq 'state.json' -and (Split-Path -Leaf $d.zip) -like "HealthierYou-results-PC?-20*.zip")
     }
+    $script:RetestName = 'Pairing'
+    # The first run's PC2 state, beside the retest's own folder: its server name is reused.
+    Write-JsonFile (Join-Path (Join-Path $tmp 'Camera') 'state.json') @{ steps = @{}; data = @{ server_name = 'FIRST_RUN-PC' } }
+    foreach ($role in 'Server', 'Camera') {
+      $pc = if ($role -eq 'Server') { 'PC1' } else { 'PC2' }
+      $d = Invoke-DryRun $role (Join-Path $tmp "dry-retest-$role")
+      Check "retest dry run ($role): every step finished, the zip is made" ($d.complete -and $d.notRun -eq 0 -and $d.zipOk -and $d.check -eq 'PASS')
+      Check "retest dry run ($role): its own state file and zip name" ((Split-Path -Leaf $d.statePath) -eq 'state-retest-pairing.json' -and (Split-Path -Leaf $d.zip) -like "HealthierYou-results-$pc-pairing-retest-20*.zip" -and -not (Test-Path -LiteralPath (Join-Path (Join-Path $tmp "dry-retest-$role") 'state.json')))
+      if ($role -eq 'Server') {
+        Check 'retest dry run (Server): the server and the companion both replaced with data kept, no passphrase asked, then the pairing' ((($d.calls) -join '|') -eq 'companion-uninstall|companion-setup|server-uninstall|server-setup /S' -and (($d.ids) -join ',') -eq 'R1-01,R1-02,R1-03,R1-04,R1-05' -and $d.verdicts['R1-02'] -eq 'PASS' -and $d.verdicts['R1-03'] -eq 'SKIPPED' -and $d.verdicts['R1-04'] -eq 'PASS')
+      }
+      else {
+        Check 'retest dry run (Camera): the companion replaced, then the capture with the pairing passes on its stubbed evidence' ((($d.calls) -join '|') -eq 'companion-uninstall|companion-setup' -and (($d.ids) -join ',') -eq 'R2-01,R2-02,R2-03' -and $d.verdicts['R2-02'] -eq 'PASS' -and $d.verdicts['R2-03'] -eq 'PASS')
+        Check 'retest dry run (Camera): the server name given in the first run is used, not asked again' ($script:State.data['server_name'] -eq 'FIRST_RUN-PC')
+        Check 'retest dry run (Camera): the first run''s state is left as it was' (((Read-JsonFile (Join-Path (Join-Path $tmp 'Camera') 'state.json')).steps.Count -eq 0))
+      }
+    }
+    $script:RetestName = ''
   }
   finally {
     $script:Sim = $null
@@ -2058,7 +2625,7 @@ function Invoke-DryRun([string]$RoleName, [string]$Dir) {
   $script:RoleName = $RoleName
   $script:PcLabel = if ($RoleName -eq 'Server') { 'PC1' } else { 'PC2' }
   $script:StateDirResolved = $Dir
-  $script:StatePath = Join-Path $Dir 'state.json'
+  $script:StatePath = Join-Path $Dir (Get-StateFileName)
   $script:LogFile = Join-Path $Dir 'kit-log.txt'
   $script:OutDirResolved = $Dir
   $script:AgentInline = $true
@@ -2080,7 +2647,13 @@ function Invoke-DryRun([string]$RoleName, [string]$Dir) {
     if (Test-Path -LiteralPath $p) { $sha[$f] = Get-FileSha256 $p }
   }
   $script:InstallersDirResolved = $inst
-  $script:Manifest = @{ commit = 'dry-run'; run_id = '0'; companion = 'HealthierYou_0.1.0_x64-setup.exe'; companion_newer = 'HealthierYou_0.1.1_x64-setup.exe'; server = 'HealthierYou-Server_0.1.0_x64-setup.exe'; sha256 = $sha }
+  $kitServerExe = 'A' * 64; $kitCompanionExe = 'B' * 64
+  $script:Manifest = @{ commit = 'dry-run'; run_id = '0'; companion = 'HealthierYou_0.1.0_x64-setup.exe'; companion_newer = 'HealthierYou_0.1.1_x64-setup.exe'; server = 'HealthierYou-Server_0.1.0_x64-setup.exe'; sha256 = $sha; server_exe_sha256 = $kitServerExe; companion_exe_sha256 = $kitCompanionExe }
+  # A pairing retest starts from a first run's builds: same version, other bytes.
+  if ($script:RetestName) {
+    $script:Sim.companion_exe = 'C' * 64; $script:Sim.companion_kit_exe = $kitCompanionExe; $script:Sim.companion_data = $true; $script:Sim.calls = @()
+    $script:SimServer = @{ exe = ('D' * 64); kit_exe = $kitServerExe; cert = 'CERT1'; db = $true; mirror_known = $true; healthy = $true; words = 'alpha bravo charlie delta echo foxtrot'; setup_code = 0; calls = @() }
+  }
   $script:State = Read-State
   $script:Answers.Clear()
   # Each stub writes the report its script would write, with a verdict.
@@ -2107,6 +2680,7 @@ function Invoke-DryRun([string]$RoleName, [string]$Dir) {
       # The soak and the capture go through the real staged path (with the script stub).
       'soak-server' { return $null }
       'network-capture' { return $null }
+      'server-replace' { return $null }
       'server-passphrase' { $r = New-Result 'PASS' 'stub'; $r.words = 'alpha bravo charlie delta echo foxtrot'; return $r }
       'server-pairing-evidence' { return (New-Result 'PASS' 'stub evidence') }
       default { return (New-Result 'PASS' "stub $Op") }
@@ -2117,8 +2691,10 @@ function Invoke-DryRun([string]$RoleName, [string]$Dir) {
   while ($outcome -eq 'paused' -and $guard -lt 10) { $outcome = Invoke-Steps $steps ''; $guard++ }
   $z = Complete-Run $steps
   $notRun = @($steps | Where-Object { $script:State.steps[$_.Id].status -ne 'done' }).Count
-  $script:ScriptStub = $null; $script:AdminStub = $null; $script:AdminRootOverride = $null
-  return @{ complete = ($outcome -eq 'complete'); notRun = $notRun; zipOk = (Test-Path -LiteralPath $z.zip) -and $z.included.Count -ge 2; check = $script:State.steps[$steps[0].Id].verdict }
+  $calls = @(@($script:Sim.calls) + @($(if ($script:SimServer) { $script:SimServer.calls } else { @() })) | Where-Object { $_ })
+  $verdicts = @{}; foreach ($st in $steps) { $verdicts[$st.Id] = [string]$script:State.steps[$st.Id].verdict }
+  $script:ScriptStub = $null; $script:AdminStub = $null; $script:AdminRootOverride = $null; $script:SimServer = $null
+  return @{ complete = ($outcome -eq 'complete'); notRun = $notRun; zipOk = (Test-Path -LiteralPath $z.zip) -and $z.included.Count -ge 2; check = $script:State.steps[$steps[0].Id].verdict; zip = $z.zip; statePath = $script:StatePath; ids = @($steps | ForEach-Object { $_.Id }); verdicts = $verdicts; calls = $calls }
 }
 
 # ===================================================================== entry
@@ -2127,6 +2703,8 @@ $script:InlineResults = @{}
 $script:ExtraTokens = @()
 $script:Ctx = @{}
 $script:Sim = $null
+$script:SimServer = $null
+$script:RetestName = [string]$Retest
 
 if ($SelfTest) { Initialize-KitPaths; Invoke-SelfTest; return }
 
@@ -2134,7 +2712,7 @@ if ($SelfTest) { Initialize-KitPaths; Invoke-SelfTest; return }
 $script:KitScriptPath = $PSCommandPath
 $script:KitSha256 = Get-FileSha256 $PSCommandPath
 
-if (-not $Role) { throw 'Give -Role Server or -Role Camera (or -SelfTest).' }
+if (-not $Role) { throw 'Give -Role Server or -Role Camera (or -SelfTest), and -Retest Pairing for the pairing retest.' }
 $script:RoleName = $Role
 $script:PcLabel = if ($Role -eq 'Server') { 'PC1' } else { 'PC2' }
 Initialize-KitPaths
@@ -2142,15 +2720,15 @@ Initialize-KitPaths
 if ($DryRun) {
   $dir = if ($StateDir) { $StateDir } else { Join-Path ([IO.Path]::GetTempPath()) ('hykit-dryrun-' + [guid]::NewGuid().ToString('N')) }
   $d = Invoke-DryRun $Role $dir
-  Write-Host "Dry run finished: complete $($d.complete); zip made $($d.zipOk). Folder: $dir"
+  Write-Host "Dry run$(if ($Retest) { " ($($Retest.ToLowerInvariant()) retest)" }) finished: complete $($d.complete); zip made $($d.zipOk) ($(Split-Path -Leaf $d.zip)). Steps: $(@($d.ids | ForEach-Object { "$_ $($d.verdicts[$_])" }) -join ', '). Folder: $dir"
   if (-not ($d.complete -and $d.zipOk)) { exit 1 }
   return
 }
 
 if (-not $script:IsWin -and -not ($Agent -and $AgentOnce)) { throw 'The office test kit runs on Windows (use -DryRun or -SelfTest elsewhere).' }
-$script:StateDirResolved = if ($StateDir) { $StateDir } else { Join-Path (Join-Path $env:LOCALAPPDATA 'HealthierYou-TestKit') $Role }
+$script:StateDirResolved = if ($StateDir) { $StateDir } else { Join-Path (Join-Path $env:LOCALAPPDATA 'HealthierYou-TestKit') (Get-StateDirName $Role) }
 New-Item -ItemType Directory -Force -Path (Join-Path $script:StateDirResolved 'results') | Out-Null
-$script:StatePath = Join-Path $script:StateDirResolved 'state.json'
+$script:StatePath = Join-Path $script:StateDirResolved (Get-StateFileName)
 $script:LogFile = Join-Path $script:StateDirResolved 'kit-log.txt'
 $script:OutDirResolved = $OutDir
 
@@ -2161,7 +2739,7 @@ if ($Agent) {
   Start-AgentLoop $OwnerPid; return
 }
 
-try { $Host.UI.RawUI.WindowTitle = "HealthierYou test kit - $script:PcLabel ($Role)" } catch { }
+try { $Host.UI.RawUI.WindowTitle = "HealthierYou test kit - $script:PcLabel ($Role)$(if ($Retest) { " - $($Retest.ToLowerInvariant()) retest" })" } catch { }
 $script:State = Read-State
 $steps = Get-Steps $Role
 if (Test-Elevated) {
@@ -2170,7 +2748,7 @@ if (Test-Elevated) {
   $script:AgentInline = $true
 }
 $todo = @($steps | Where-Object { $s = $script:State.steps[$_.Id]; -not ($s -is [hashtable] -and $s.status -eq 'done') -or $Redo -eq $_.Id })
-Show-Banner "HealthierYou office test kit - $script:PcLabel" (@("Started $(Get-NowText). Steps to do: $($todo.Count) of $($steps.Count).", 'You can close this window at any time: start it again and it carries on where it stopped.', '') + @($steps | ForEach-Object { $s = $script:State.steps[$_.Id]; '{0}  {1,-13} {2}' -f $_.Id, $(if ($s -is [hashtable] -and $s.status -eq 'done') { $s.verdict } else { 'to do' }), $_.Name })) 'Cyan'
+Show-Banner "HealthierYou office test kit - $script:PcLabel$(if ($Retest) { " - $($Retest.ToLowerInvariant()) retest" })" (@("Started $(Get-NowText). Steps to do: $($todo.Count) of $($steps.Count).", 'You can close this window at any time: start it again and it carries on where it stopped.', '') + @($steps | ForEach-Object { $s = $script:State.steps[$_.Id]; '{0}  {1,-13} {2}' -f $_.Id, $(if ($s -is [hashtable] -and $s.status -eq 'done') { $s.verdict } else { 'to do' }), $_.Name })) 'Cyan'
 Set-AutoResume $true
 $adminTodo = @($todo | Where-Object { $_.Admin })
 if ($adminTodo.Count) { $null = Start-AdminAgent @($adminTodo | ForEach-Object { $_.Why }) }
@@ -2179,7 +2757,7 @@ $outcome = Invoke-Steps $steps $Redo
 if ($outcome -eq 'paused') { return }
 while ($true) {
   $null = Complete-Run $steps
-  $again = Read-Answer 'To run a step again type its id (for example P2-05); press Enter to finish' ''
+  $again = Read-Answer "To run a step again type its id (for example $($steps[-1].Id)); press Enter to finish" ''
   if (-not $again) { break }
   $match = @($steps | Where-Object { $_.Id -eq $again.ToUpperInvariant() })
   if (-not $match.Count) { Write-Host "  No step $again." -ForegroundColor Red; continue }
@@ -2189,3 +2767,4 @@ while ($true) {
 }
 Set-AutoResume $false
 Show-Banner 'All done' @('Upload the zip named above in the project thread.', 'HealthierYou and (on PC1) the server stay installed: see README.md to remove them.') 'Green'
+if ($Retest) { Write-Host '  The first run''s state and results are unchanged: its own launcher carries on with it as before.' }
