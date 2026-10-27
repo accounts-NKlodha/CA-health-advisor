@@ -676,3 +676,26 @@ async fn a_server_named_with_an_underscore_issues_slips_that_parse() {
         assert_eq!(back.fingerprint, h.pin());
     }
 }
+
+/// The office test kit's pairing step (`Get-ServerNameProblem`) stops before pairing when
+/// the server PC's computer name would fail the slip host rule, because the server
+/// cannot issue a slip for it. This pins that premise: such a server refuses to issue
+/// a slip rather than handing out one that no companion could parse.
+#[tokio::test]
+async fn a_server_whose_name_a_slip_refuses_issues_no_slip() {
+    for name in ["PC$1", "MY PC"] {
+        let config = hy_server::Config {
+            host_name: name.into(),
+            ..test_config()
+        };
+        let h = Harness::start_with(config, test_limits()).await;
+        let user = h.server.create_user("kit-pc2").unwrap();
+        assert!(
+            h.server.issue_slip(&user).is_err(),
+            "{name:?} must not get a slip"
+        );
+        assert!(!hy_core::protocol::slip::host_ok(
+            &name.to_ascii_lowercase()
+        ));
+    }
+}

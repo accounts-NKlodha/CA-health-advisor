@@ -582,19 +582,13 @@ function Test-ServerName([string]$Name) {
 }
 $script:ServerNameRule = 'Letters, digits, dots, hyphens and underscores only (no spaces).'
 
-# The SERVER NAME PC1 shows: this PC's computer name, or its IPv4 address if the name
-# would not pass Test-ServerName (Windows allows a few other characters in a name).
-function Get-ServerNameToShow([string]$ComputerName, [string[]]$Ipv4) {
-  if ($ComputerName -and (Test-ServerName $ComputerName)) { return $ComputerName }
-  $ip = @($Ipv4 | Where-Object { $_ -and $_ -notmatch '^(127\.|169\.254\.)' }) | Select-Object -First 1
-  if ($ip) { return [string]$ip }
-  if ($ComputerName) { return $ComputerName }
-  return 'this-pc'
-}
-
-function Get-LocalIpv4 {
-  if ($script:Sim -or -not $script:IsWin) { return @() }
-  try { return @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.AddressState -eq 'Preferred' } | ForEach-Object { [string]$_.IPAddress }) } catch { return @() }
+# The server puts this PC's computer name into every pairing slip (hy-server --host
+# defaults to it), and slips accept only names that pass Test-ServerName. A name that
+# fails cannot pair at all, so the pairing step stops with this reason instead of
+# sending the owner into a flow that cannot work. $null means the name is usable.
+function Get-ServerNameProblem([string]$ComputerName) {
+  if ($ComputerName -and (Test-ServerName $ComputerName)) { return $null }
+  return 'this PC''s computer name has characters a pairing slip cannot hold, so the admin page cannot issue a slip. Rename the PC (Settings > System > About > Rename this PC) using only letters, digits, dots, hyphens and underscores, restart, then run this step again with: Run-PC1-Server.cmd -Redo P1-05'
 }
 
 function Test-AdminParams([string]$Op, [hashtable]$P) {
@@ -1242,7 +1236,12 @@ function Get-RemoteServerPeers {
 
 function Invoke-PairingStep([hashtable]$Ctx) {
   $since = (Get-Date).ToUniversalTime().ToString('o')
-  $name = Get-ServerNameToShow $env:COMPUTERNAME (Get-LocalIpv4)
+  $name = $env:COMPUTERNAME
+  $problem = Get-ServerNameProblem $name
+  if ($problem) {
+    Show-Banner 'Pairing cannot start on this PC' @($problem) 'Red'
+    return New-Result 'INCONCLUSIVE' $problem @('SV2', 'LAN-3')
+  }
   $words = [string]$script:State.data['six_words']
   if (-not $script:Sim) { try { Start-Process 'http://127.0.0.1:8444' | Out-Null } catch { } }
   Show-Banner 'Pair PC2 with the server (you, on both PCs)' @(
@@ -1737,7 +1736,7 @@ function Invoke-SelfTest {
     Check 'server name: a computer name with an underscore is accepted' ((Test-ServerName 'FIRSTNAME_LASTNAME') -and (Test-ServerName 'pc_01.corp.local') -and (Test-ServerName '192.168.1.20') -and (Test-ServerName 'kit-server'))
     Check 'server name: a space or other characters are refused' (-not (Test-ServerName 'FIRSTNAME LASTNAME') -and -not (Test-ServerName 'pc;rm') -and -not (Test-ServerName '') -and -not (Test-ServerName '-pc') -and -not (Test-ServerName 'pc.') -and -not (Test-ServerName "pc`n") -and -not (Test-ServerName ('a' * 254)))
     Check 'server name: the capture step''s parameters take an underscore name and refuse a space' ($null -eq (Test-AdminParams 'network-capture' @{ server = 'FIRSTNAME_LASTNAME'; canary = 'KITPC2-AB12' }) -and $null -ne (Test-AdminParams 'network-capture' @{ server = 'FIRSTNAME LASTNAME'; canary = 'KITPC2-AB12' }))
-    Check 'server name: PC1 shows the computer name, or its IPv4 address if the name would be refused' ((Get-ServerNameToShow 'FIRSTNAME_LASTNAME' @('10.0.0.5')) -eq 'FIRSTNAME_LASTNAME' -and (Get-ServerNameToShow 'PC$1' @('127.0.0.1', '169.254.1.1', '10.0.0.5')) -eq '10.0.0.5' -and (Get-ServerNameToShow '' @()) -eq 'this-pc')
+    Check 'server name: an underscore computer name can pair; a name a slip refuses stops pairing with the reason' ((-not (Get-ServerNameProblem 'FIRSTNAME_LASTNAME')) -and (Get-ServerNameProblem 'PC$1') -match 'Rename the PC' -and (Get-ServerNameProblem 'MY PC') -match '-Redo P1-05' -and (Get-ServerNameProblem ''))
     Check 'agent leaves no request behind' (@(Get-ChildItem -LiteralPath $q -Filter 'job-*').Count -eq 0 -and @(Get-ChildItem -LiteralPath $out -Filter '*.running').Count -eq 0)
 
     # Tampering: after staging, the user's copy is replaced and a request names its own report path.
