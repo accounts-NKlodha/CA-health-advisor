@@ -3,7 +3,7 @@
 // full label as its accessible name, and the size control reaches 50% to 150%.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { groupActions, placeOf, snapSize, wheelSize } from '../src/shared/menuGroups.ts';
+import { groupActions, placeOf, sizeCommitter, snapSize, wheelSize } from '../src/shared/menuGroups.ts';
 
 const a = (id, label, continues = false) => ({ id, label, in_tray: false, continues });
 
@@ -120,4 +120,66 @@ test('wheel down makes the pet smaller, one step per notch, within the range', (
   assert.equal(wheelSize(50, 100, 50, 150, 5), 50);
   assert.equal(wheelSize(150, -3, 50, 150, 5), 150);
   assert.equal(wheelSize(100, 0, 50, 150, 5), 100);
+});
+
+// A fake clock: timers run only when the test advances time.
+function fakeTimers() {
+  let now = 0;
+  let next = 1;
+  const queue = new Map();
+  return {
+    set(fn, ms) {
+      const id = next++;
+      queue.set(id, { at: now + ms, fn });
+      return id;
+    },
+    clear(id) {
+      queue.delete(id);
+    },
+    advance(ms) {
+      now += ms;
+      for (const [id, t] of [...queue].sort((x, y) => x[1].at - y[1].at)) {
+        if (t.at <= now) {
+          queue.delete(id);
+          t.fn();
+        }
+      }
+    },
+  };
+}
+
+test('a preset chosen before a pending wheel save settles wins', () => {
+  // The menu's wiring: a wheel notch saves later, a preset click saves now.
+  const timers = fakeTimers();
+  const sizes = sizeCommitter(timers, 250);
+  const saved = [];
+  const save = (pct) => saved.push(pct);
+  // Wheel down once from 75: 70 is pending.
+  sizes.later(wheelSize(75, 100, 50, 150, 5), save);
+  timers.advance(100);
+  // XL clicked before 250 ms.
+  sizes.now(150, save);
+  timers.advance(1000);
+  assert.deepEqual(saved, [150], 'the pending wheel save must not restore 70');
+});
+
+test('wheel notches save once, after the wheel settles, with the last size', () => {
+  const timers = fakeTimers();
+  const sizes = sizeCommitter(timers, 250);
+  const saved = [];
+  const save = (pct) => saved.push(pct);
+  let pct = 100;
+  for (let i = 0; i < 4; i += 1) {
+    pct = wheelSize(pct, 100, 50, 150, 5);
+    sizes.later(pct, save);
+    timers.advance(100);
+  }
+  assert.deepEqual(saved, []);
+  timers.advance(250);
+  assert.deepEqual(saved, [80]);
+  // A slider change after a wheel turn also replaces the pending save.
+  sizes.later(75, save);
+  sizes.now(120, save);
+  timers.advance(1000);
+  assert.deepEqual(saved, [80, 120]);
 });

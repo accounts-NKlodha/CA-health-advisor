@@ -170,3 +170,45 @@ export function wheelSize(
   if (deltaY === 0) return snapSize(current, min, max, step);
   return snapSize(current + (deltaY > 0 ? -step : step), min, max, step);
 }
+
+/** Timer functions, injectable so tests can advance time. */
+export interface Timers {
+  set(fn: () => void, ms: number): unknown;
+  clear(handle: unknown): void;
+}
+
+/**
+ * The one place a size is saved from the menu, so the latest interaction wins: a wheel
+ * turn waits for the wheel to settle, and any direct choice (a preset, the slider's
+ * change, the keyboard) cancels that pending save before saving its own size.
+ */
+export interface SizeCommitter {
+  /** A wheel notch: save `pct` once no further notch arrives within the settle time. */
+  later(pct: number, save: (pct: number) => void): void;
+  /** A direct choice: drop any pending wheel save and save `pct` now. */
+  now(pct: number, save: (pct: number) => void): void;
+  /** Drop any pending wheel save. */
+  cancel(): void;
+}
+
+export function sizeCommitter(timers: Timers, settleMs: number): SizeCommitter {
+  let pending: unknown;
+  const cancel = (): void => {
+    if (pending !== undefined) timers.clear(pending);
+    pending = undefined;
+  };
+  return {
+    later(pct, save) {
+      cancel();
+      pending = timers.set(() => {
+        pending = undefined;
+        save(pct);
+      }, settleMs);
+    },
+    now(pct, save) {
+      cancel();
+      save(pct);
+    },
+    cancel,
+  };
+}

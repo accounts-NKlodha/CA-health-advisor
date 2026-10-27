@@ -5,7 +5,7 @@
 // posture check's entry (V2: "Posture check" while off, "Turn camera off" while on),
 // Settings).
 import { icon } from './icons';
-import { type Section, groupActions, snapSize, wheelSize } from './menuGroups';
+import { type Section, groupActions, sizeCommitter, snapSize, wheelSize } from './menuGroups';
 import type { MenuAction, MenuView } from './types';
 
 export interface MenuHandlers {
@@ -30,7 +30,15 @@ function button(label: string, onClick: () => void, cls = 'btn'): HTMLButtonElem
 
 /** How long the wheel waits after the last notch before it saves the size. */
 const WHEEL_SETTLE_MS = 250;
-let wheelTimer: ReturnType<typeof setTimeout> | undefined;
+/** Every size save from the menu goes through here, so the latest interaction wins (a
+ * preset chosen while a wheel save is pending cancels it). Shared across redraws. */
+const sizes = sizeCommitter(
+  {
+    set: (fn, ms) => setTimeout(fn, ms),
+    clear: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
+  },
+  WHEEL_SETTLE_MS,
+);
 
 function sectionEl(title: string, id: string): HTMLElement {
   const sec = document.createElement('section');
@@ -121,13 +129,12 @@ function sizeControl(menu: MenuView, h: MenuHandlers, headingId: string): HTMLEl
     slider.setAttribute('aria-valuetext', `${v}%${preset ? `, ${preset.label}` : ''}`);
   };
   show(menu.size_pct);
-  const commit = (v: number): void => {
+  const save = (v: number): void => {
     if (v !== menu.size_pct) h.size(v);
   };
   slider.addEventListener('input', () => show(snapSize(Number(slider.value), min, max, step)));
   slider.addEventListener('change', () => {
-    clearTimeout(wheelTimer);
-    commit(snapSize(Number(slider.value), min, max, step));
+    sizes.now(snapSize(Number(slider.value), min, max, step), save);
   });
   line.append(label, slider, pct);
 
@@ -136,7 +143,14 @@ function sizeControl(menu: MenuView, h: MenuHandlers, headingId: string): HTMLEl
   seg.setAttribute('role', 'group');
   seg.setAttribute('aria-label', 'Size presets');
   for (const p of menu.presets) {
-    const b = button(p.short, () => h.size(p.pct), 'seg-btn');
+    const b = button(
+      p.short,
+      () => {
+        show(p.pct);
+        sizes.now(p.pct, h.size);
+      },
+      'seg-btn',
+    );
     b.setAttribute('aria-pressed', String(menu.size_pct === p.pct));
     b.setAttribute('aria-label', `${p.label} (${p.pct}%)`);
     b.title = `${p.label} (${p.pct}%)`;
@@ -151,8 +165,7 @@ function sizeControl(menu: MenuView, h: MenuHandlers, headingId: string): HTMLEl
       e.preventDefault();
       const next = wheelSize(Number(slider.value), e.deltaY, min, max, step);
       show(next);
-      clearTimeout(wheelTimer);
-      wheelTimer = setTimeout(() => commit(next), WHEEL_SETTLE_MS);
+      sizes.later(next, save);
     },
     { passive: false },
   );
