@@ -225,6 +225,10 @@ fn generate_parts(
     let rng = SystemRandom::new();
     let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
         .map_err(|_| other("TLS key generation failed"))?;
+    // The computer name is added as a courtesy SAN only when it is a strict DNS label
+    // set. Names are never checked (the pin is the identity, and the companion always
+    // sends the fixed SNI), so a computer name with an underscore, which Windows allows
+    // and the slip carries, is simply left out of the certificate.
     let mut names = vec![SNI.to_owned()];
     let host = host_name.trim().to_ascii_lowercase();
     if !host.is_empty()
@@ -297,6 +301,12 @@ mod tests {
         assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
         // Debug output never shows key material.
         assert!(!format!("{a:?}").contains(&hy_core::protocol::hex(&a.fingerprint)));
+    }
+
+    #[test]
+    fn a_computer_name_with_an_underscore_still_gets_keys() {
+        let k = ServerKeys::generate("FIRSTNAME_LASTNAME", 2026).unwrap();
+        assert_eq!(k.fingerprint, fingerprint(&k.cert_der));
     }
 
     #[test]

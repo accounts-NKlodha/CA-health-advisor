@@ -8,7 +8,9 @@
 //!   idle timeout), stored only as a hash;
 //! - a CSRF token on every form, derived from the session cookie;
 //! - an Argon2id passphrase hash with exponential backoff after failed sign-ins;
-//! - `Content-Security-Policy: default-src 'none'`, no framing, no caching.
+//! - `Content-Security-Policy: default-src 'none'`, no framing, no caching;
+//! - `Referrer-Policy: same-origin` ([`REFERRER_POLICY`]): no referrer ever leaves the
+//!   page, and the browser still sends the real `Origin` on the page's own form posts.
 //!
 //! **No habit data.** No admin page or endpoint returns a summary, a payload or any
 //! aggregate. The pages show users (aliases), devices (labels, states, check codes), the
@@ -129,6 +131,17 @@ fn allowed_origins(port: u16) -> [String; 2] {
     ]
 }
 
+/// The admin page's `Referrer-Policy`.
+///
+/// It must be `same-origin`, not `no-referrer`: under `no-referrer` the Fetch standard's
+/// "serializing a request origin" step makes browsers (Chromium, Edge, Firefox, Safari)
+/// send `Origin: null` on every non-GET request, including the page's own same-origin
+/// form posts, so [`guard`] refused the sign-in form with 403. Under `same-origin` the
+/// browser sends the real origin for same-origin requests and `null` for cross-origin
+/// ones, and sends no `Referer` to any other origin. `guard` still refuses `null`, a
+/// missing `Origin` and any foreign origin.
+pub const REFERRER_POLICY: &str = "same-origin";
+
 /// Host and Origin checks, and the security headers on every response.
 async fn guard(State(st): State<AdminState>, req: Request, next: Next) -> Response {
     let hosts = [
@@ -167,7 +180,7 @@ async fn guard(State(st): State<AdminState>, req: Request, next: Next) -> Respon
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     h.insert(
         header::REFERRER_POLICY,
-        HeaderValue::from_static("no-referrer"),
+        HeaderValue::from_static(REFERRER_POLICY),
     );
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     h.insert(

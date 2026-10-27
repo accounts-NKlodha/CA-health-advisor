@@ -557,3 +557,145 @@ async fn t_s12e_a_cancelled_sign_in_keeps_the_permit_and_is_still_counted() {
     assert_eq!(status, 429, "locked by the counted failure");
     assert_eq!(h.server.peak_login_checks(), 1, "never two checks at once");
 }
+
+/// The `Origin` a browser sends on a POST, per the Fetch standard's "serializing a
+/// request origin": for any method other than GET and HEAD the document's referrer
+/// policy decides between the real origin and `null`. (`page` and `target` are both
+/// `http://`, so the downgrade rules never apply here.)
+fn browser_post_origin(policy: &str, page: &str, target: &str) -> String {
+    let same = page == target;
+    let null = match policy {
+        "no-referrer" => true,
+        "same-origin" => !same,
+        // no-referrer-when-downgrade, origin, strict-origin, origin-when-cross-origin,
+        // strict-origin-when-cross-origin and unsafe-url send the origin http -> http.
+        _ => false,
+    };
+    if null {
+        "null".to_owned()
+    } else {
+        page.to_owned()
+    }
+}
+
+fn referrer_policy_of(head: &str) -> Option<String> {
+    head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.eq_ignore_ascii_case("referrer-policy")
+            .then(|| v.trim().to_owned())
+    })
+}
+
+/// Regression: the owner's first office run. Every admin response said
+/// `Referrer-Policy: no-referrer`, so the browser sent `Origin: null` on the sign-in
+/// form's own POST and the guard refused it ("Cross-origin request refused."). The
+/// policy must let a real browser's same-origin form post carry the real origin, while
+/// `null`, a missing origin and foreign origins stay refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_browser_form_post_carries_the_real_origin_and_signs_in() {
+    let h = harness().await;
+    let port = h.admin.port();
+    let form = format!("passphrase={}", urlencode(PASS));
+    for host in [format!("127.0.0.1:{port}"), format!("localhost:{port}")] {
+        let page_origin = format!("http://{host}");
+        // The sign-in page (GET) and a refusal both carry the policy.
+        let (status, head, _) = http(
+            h.admin,
+            &admin_request("GET", "/login", &host, None, None, None),
+        )
+        .await;
+        assert_eq!(status, 200, "{host}");
+        let policy = referrer_policy_of(&head).expect("Referrer-Policy header");
+        assert_eq!(policy, "same-origin");
+        assert_eq!(policy, hy_server::admin::REFERRER_POLICY);
+        let (status, head, _) = http(
+            h.admin,
+            &admin_request("POST", "/login", &host, Some("null"), None, Some(&form)),
+        )
+        .await;
+        assert_eq!(status, 403);
+        assert_eq!(referrer_policy_of(&head).as_deref(), Some("same-origin"));
+
+        // What the old policy made a browser send is refused (the bug's symptom) ...
+        let old = browser_post_origin("no-referrer", &page_origin, &page_origin);
+        assert_eq!(old, "null");
+        // ... and what this policy makes it send for the page's own form is accepted.
+        let sent = browser_post_origin(&policy, &page_origin, &page_origin);
+        assert_eq!(sent, page_origin);
+
+        // Refused before the passphrase is ever checked: null, missing, foreign.
+        let other_port = format!("http://127.0.0.1:{}", port + 1);
+        let foreign_page = browser_post_origin(&policy, "http://attacker.example", &page_origin);
+        for (name, o) in [
+            ("null origin", Some("null")),
+            ("no origin", None),
+            ("another port", Some(other_port.as_str())),
+            ("another site", Some("http://attacker.example")),
+            ("https spelling", Some("https://127.0.0.1")),
+            (
+                "a foreign page under this policy",
+                Some(foreign_page.as_str()),
+            ),
+        ] {
+            let (status, _, body) = http(
+                h.admin,
+                &admin_request("POST", "/login", &host, o, None, Some(&form)),
+            )
+            .await;
+            assert_eq!(status, 403, "{host} {name}");
+            assert!(body.contains("Cross-origin request refused."), "{name}");
+        }
+
+        // The real origin, as the browser now sends it, signs in.
+        let (status, head, _) = http(
+            h.admin,
+            &admin_request("POST", "/login", &host, Some(&sent), None, Some(&form)),
+        )
+        .await;
+        assert_eq!(status, 303, "{host}: {head}");
+        assert!(head.to_ascii_lowercase().contains("set-cookie: hy_admin="));
+    }
+}
+
+/// The owner's server PC has a Windows computer name with an underscore. `hy-server`
+/// puts that name in every slip, so issuing a slip must not fail, and the companion's
+/// slip parser must read the same host back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_named_with_an_underscore_issues_slips_that_parse() {
+    let config = hy_server::Config {
+        host_name: "FIRSTNAME_LASTNAME".into(),
+        ..test_config()
+    };
+    let h = Harness::start_with(config, test_limits()).await;
+    let user = h.server.create_user("kit-pc2").unwrap();
+    let slip = h.server.issue_slip(&user).unwrap();
+    assert_eq!(slip.host, "firstname_lastname");
+    for text in [slip.canonical(), slip.printable()] {
+        let back = hy_core::protocol::slip::Slip::parse(text.expose()).unwrap();
+        assert_eq!(back.host, "firstname_lastname");
+        assert_eq!(back.fingerprint, h.pin());
+    }
+}
+
+/// The office test kit's pairing step (`Get-ServerNameProblem`) stops before pairing when
+/// the server PC's computer name would fail the slip host rule, because the server
+/// cannot issue a slip for it. This pins that premise: such a server refuses to issue
+/// a slip rather than handing out one that no companion could parse.
+#[tokio::test]
+async fn a_server_whose_name_a_slip_refuses_issues_no_slip() {
+    for name in ["PC$1", "MY PC"] {
+        let config = hy_server::Config {
+            host_name: name.into(),
+            ..test_config()
+        };
+        let h = Harness::start_with(config, test_limits()).await;
+        let user = h.server.create_user("kit-pc2").unwrap();
+        assert!(
+            h.server.issue_slip(&user).is_err(),
+            "{name:?} must not get a slip"
+        );
+        assert!(!hy_core::protocol::slip::host_ok(
+            &name.to_ascii_lowercase()
+        ));
+    }
+}
