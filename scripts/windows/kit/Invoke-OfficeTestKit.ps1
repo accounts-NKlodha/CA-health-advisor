@@ -573,12 +573,36 @@ function Set-SafeModulePath {
   $env:PSModulePath = (@($paths | Select-Object -Unique) -join ';')
 }
 
+# A server name PC2 may type: a computer name, a DNS name or an IPv4 address. Letters,
+# digits, dots, hyphens and underscores (Windows computer names often hold one), 1 to 253
+# characters, not starting or ending with a dot or hyphen: the same rule as the pairing
+# slip's host (hy-core slip::host_ok). Never spaces or other characters.
+function Test-ServerName([string]$Name) {
+  return [bool]($Name -match '^(?=[A-Za-z0-9._-]{1,253}\z)[A-Za-z0-9_](?:[A-Za-z0-9._-]*[A-Za-z0-9_])?\z')
+}
+$script:ServerNameRule = 'Letters, digits, dots, hyphens and underscores only (no spaces).'
+
+# The SERVER NAME PC1 shows: this PC's computer name, or its IPv4 address if the name
+# would not pass Test-ServerName (Windows allows a few other characters in a name).
+function Get-ServerNameToShow([string]$ComputerName, [string[]]$Ipv4) {
+  if ($ComputerName -and (Test-ServerName $ComputerName)) { return $ComputerName }
+  $ip = @($Ipv4 | Where-Object { $_ -and $_ -notmatch '^(127\.|169\.254\.)' }) | Select-Object -First 1
+  if ($ip) { return [string]$ip }
+  if ($ComputerName) { return $ComputerName }
+  return 'this-pc'
+}
+
+function Get-LocalIpv4 {
+  if ($script:Sim -or -not $script:IsWin) { return @() }
+  try { return @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.AddressState -eq 'Preferred' } | ForEach-Object { [string]$_.IPAddress }) } catch { return @() }
+}
+
 function Test-AdminParams([string]$Op, [hashtable]$P) {
   switch ($Op) {
     'server-install' { if ($P.mirror -and $P.mirror -notmatch '^(?:[A-Za-z]:\\|\\\\[A-Za-z0-9._-]+\\)[A-Za-z0-9._\\-]{0,200}$') { return 'the mirror folder must be a drive or share path without spaces' } }
     'soak-server' { $h = 0.0; if (-not [double]::TryParse([string]$P.hours, [ref]$h) -or $h -le 0 -or $h -gt 24) { return 'hours must be between 0 and 24' } }
     'network-capture' {
-      if ([string]$P.server -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$') { return 'the server name may hold only letters, digits, dots and hyphens' }
+      if (-not (Test-ServerName ([string]$P.server))) { return 'the server name may hold only letters, digits, dots, hyphens and underscores' }
       if ([string]$P.canary -notmatch '^[A-Z0-9-]{4,40}$') { return 'bad pairing label' }
     }
     'server-pairing-evidence' { $t = [datetime]::MinValue; if (-not [datetime]::TryParse([string]$P.since, [ref]$t)) { return 'bad time' } }
@@ -1218,7 +1242,7 @@ function Get-RemoteServerPeers {
 
 function Invoke-PairingStep([hashtable]$Ctx) {
   $since = (Get-Date).ToUniversalTime().ToString('o')
-  $name = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { 'this-pc' }
+  $name = Get-ServerNameToShow $env:COMPUTERNAME (Get-LocalIpv4)
   $words = [string]$script:State.data['six_words']
   if (-not $script:Sim) { try { Start-Process 'http://127.0.0.1:8444' | Out-Null } catch { } }
   Show-Banner 'Pair PC2 with the server (you, on both PCs)' @(
@@ -1334,7 +1358,7 @@ function Invoke-CaptureStep([hashtable]$Ctx) {
     Show-Banner 'The server''s name' @('PC1''s kit shows "SERVER NAME" on its pairing screen. Type it here.')
     $n = Read-Answer '  Server name (s to skip the capture)' $(if ($script:Unattended) { 'kit-server' } else { '' })
     if ($n -match '^[sS]$') { return New-Result 'SKIPPED' 'skipped' $rows }
-    if ($n -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$') { Write-Host '  Letters, digits, dots and hyphens only.' -ForegroundColor Red; continue }
+    if (-not (Test-ServerName $n)) { Write-Host "  $($script:ServerNameRule)" -ForegroundColor Red; continue }
     $resolves = $script:Sim
     if (-not $resolves) { try { $resolves = @([Net.Dns]::GetHostAddresses($n)).Count -gt 0 } catch { $resolves = $false } }
     if (-not $resolves) { Write-Host "  '$n' is not found on the network from this PC. Check the name (and that both PCs are on the office network)." -ForegroundColor Red; continue }
@@ -1710,6 +1734,10 @@ function Invoke-SelfTest {
     Check 'agent runs a listed step' ($r1.verdict -eq 'PASS' -and $r1.detail -eq 'echo hi')
     Check 'agent refuses an unlisted step' ($r2.verdict -eq 'INCONCLUSIVE' -and $r2.detail -like '*refused*')
     Check 'agent refuses bad parameters' ($r3.verdict -eq 'INCONCLUSIVE' -and $r3.detail -like 'refused*')
+    Check 'server name: a computer name with an underscore is accepted' ((Test-ServerName 'FIRSTNAME_LASTNAME') -and (Test-ServerName 'pc_01.corp.local') -and (Test-ServerName '192.168.1.20') -and (Test-ServerName 'kit-server'))
+    Check 'server name: a space or other characters are refused' (-not (Test-ServerName 'FIRSTNAME LASTNAME') -and -not (Test-ServerName 'pc;rm') -and -not (Test-ServerName '') -and -not (Test-ServerName '-pc') -and -not (Test-ServerName 'pc.') -and -not (Test-ServerName "pc`n") -and -not (Test-ServerName ('a' * 254)))
+    Check 'server name: the capture step''s parameters take an underscore name and refuse a space' ($null -eq (Test-AdminParams 'network-capture' @{ server = 'FIRSTNAME_LASTNAME'; canary = 'KITPC2-AB12' }) -and $null -ne (Test-AdminParams 'network-capture' @{ server = 'FIRSTNAME LASTNAME'; canary = 'KITPC2-AB12' }))
+    Check 'server name: PC1 shows the computer name, or its IPv4 address if the name would be refused' ((Get-ServerNameToShow 'FIRSTNAME_LASTNAME' @('10.0.0.5')) -eq 'FIRSTNAME_LASTNAME' -and (Get-ServerNameToShow 'PC$1' @('127.0.0.1', '169.254.1.1', '10.0.0.5')) -eq '10.0.0.5' -and (Get-ServerNameToShow '' @()) -eq 'this-pc')
     Check 'agent leaves no request behind' (@(Get-ChildItem -LiteralPath $q -Filter 'job-*').Count -eq 0 -and @(Get-ChildItem -LiteralPath $out -Filter '*.running').Count -eq 0)
 
     # Tampering: after staging, the user's copy is replaced and a request names its own report path.

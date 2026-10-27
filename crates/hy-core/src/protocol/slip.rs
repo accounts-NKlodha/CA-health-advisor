@@ -120,12 +120,20 @@ pub struct Slip {
     pub secret: Secret<[u8; SLIP_SECRET_LEN]>,
 }
 
-fn host_ok(host: &str) -> bool {
+/// Whether `host` may be a slip's host: 1 to 253 characters of `[A-Za-z0-9._-]`, not
+/// starting or ending with `-` or `.`.
+///
+/// The underscore is allowed because Windows computer names (NetBIOS names) often hold
+/// one, and the slip's host is the server PC's computer name. The host is only ever
+/// passed to the OS resolver (DNS, LLMNR or NetBIOS, which all accept it) and never used
+/// as a TLS name: the connection uses the fixed [`super::SNI`] and the certificate pin.
+#[must_use]
+pub fn host_ok(host: &str) -> bool {
     !host.is_empty()
         && host.len() <= MAX_HOST
         && host
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_')
         && !host.starts_with(['-', '.'])
         && !host.ends_with(['-', '.'])
 }
@@ -135,7 +143,7 @@ impl Slip {
     ///
     /// # Errors
     /// [`SlipError::Malformed`] if the host is not 1 to 253 characters of
-    /// `[A-Za-z0-9.-]` or the port is 0.
+    /// `[A-Za-z0-9._-]` (see [`host_ok`]) or the port is 0.
     pub fn new(
         host: &str,
         port: u16,
@@ -327,7 +335,14 @@ mod tests {
     #[test]
     fn hyphenated_and_ip_hosts_parse_right_to_left() {
         let mut s = sample();
-        for host in ["a-b-c-d", "192.168.1.20", "srv.local", "x"] {
+        for host in [
+            "a-b-c-d",
+            "192.168.1.20",
+            "srv.local",
+            "x",
+            "firstname_lastname",
+            "office_pc-01.corp.local",
+        ] {
             s.host = host.into();
             let back = Slip::parse(s.canonical().expose()).unwrap();
             assert_eq!(back.host, host);
@@ -349,6 +364,49 @@ mod tests {
     }
 
     #[test]
+    fn windows_computer_names_with_underscores_are_hosts() {
+        for ok in [
+            "FIRSTNAME_LASTNAME",
+            "pc_01",
+            "_pc",
+            "pc_",
+            "a.b_c-d",
+            "10.0.0.5",
+        ] {
+            assert!(host_ok(ok), "{ok}");
+            let s = Slip::new(ok, 8443, [7; 32], [9; 10]).unwrap();
+            assert_eq!(s.host, ok.to_ascii_lowercase());
+            for text in [
+                s.canonical().expose().clone(),
+                s.printable().expose().clone(),
+            ] {
+                assert_eq!(Slip::parse(&text).unwrap().host, s.host, "{ok}");
+            }
+        }
+        let long = "a".repeat(253);
+        assert!(host_ok(&long));
+        for bad in [
+            "",
+            "first last",
+            "pc$",
+            "pc/1",
+            "pc\\1",
+            "-pc",
+            "pc-",
+            ".pc",
+            "pc.",
+            "p\u{e9}c",
+            &"a".repeat(254),
+        ] {
+            assert!(!host_ok(bad), "{bad:?}");
+            assert_eq!(
+                Slip::new(bad, 8443, [7; 32], [9; 10]).unwrap_err(),
+                SlipError::Malformed
+            );
+        }
+    }
+
+    #[test]
     fn malformed_slips_are_refused() {
         let text = sample().canonical().expose().clone();
         for bad in [
@@ -358,7 +416,10 @@ mod tests {
             text.replacen("-8443-", "-0-", 1),
             text.replacen("-8443-", "-99999-", 1),
             text.replacen("-8443-", "-84a3-", 1),
-            text.replacen("office-pc-01", "off_ice", 1),
+            text.replacen("office-pc-01", "off/ice", 1),
+            text.replacen("office-pc-01", "off$ice", 1),
+            text.replacen("office-pc-01", "-office", 1),
+            text.replacen("office-pc-01", "office.", 1),
             text.replacen("office-pc-01", "", 1),
             text[..text.len() - 1].to_string(),
             format!("{text}0"),
@@ -368,6 +429,8 @@ mod tests {
             assert!(Slip::parse(&bad).is_err(), "accepted {bad:?}");
         }
         assert!(Slip::new("bad host", 1, [0; 32], [0; 10]).is_err());
+        assert!(Slip::new("bad$host", 1, [0; 32], [0; 10]).is_err());
+        assert!(Slip::new("bad\\host", 1, [0; 32], [0; 10]).is_err());
         assert!(Slip::new("ok", 0, [0; 32], [0; 10]).is_err());
     }
 
@@ -418,7 +481,7 @@ mod tests {
 
         #[test]
         fn every_slip_round_trips(
-            host in "[a-z0-9]([a-z0-9.-]{0,30}[a-z0-9])?",
+            host in "[a-z0-9_]([a-z0-9._-]{0,30}[a-z0-9_])?",
             port in 1u16..,
             fp in any::<[u8; 32]>(),
             secret in any::<[u8; 10]>(),
