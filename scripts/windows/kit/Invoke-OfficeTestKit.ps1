@@ -633,7 +633,7 @@ function Test-AdminParams([string]$Op, [hashtable]$P) {
     'server-install' { if ($P.mirror -and $P.mirror -notmatch $MirrorPattern) { return 'the mirror folder must be a drive or share path without spaces' } }
     'server-replace' {
       if ($P.mirror -and $P.mirror -notmatch $MirrorPattern) { return 'the mirror folder must be a drive or share path without spaces' }
-      if ($P.exe_sha256 -and [string]$P.exe_sha256 -cnotmatch '^[0-9A-F]{64}\z') { return 'bad program SHA-256' }
+      if ([string]$P.exe_sha256 -cnotmatch '^[0-9A-F]{64}\z') { return 'the kit''s program SHA-256 is missing or malformed' }
       foreach ($k in @($P.Keys)) { if (@('mirror', 'exe_sha256') -notcontains $k) { return "unexpected parameter $k" } }
     }
     'soak-server' { $h = 0.0; if (-not [double]::TryParse([string]$P.hours, [ref]$h) -or $h -le 0 -or $h -gt 24) { return 'hours must be between 0 and 24' } }
@@ -650,9 +650,9 @@ function Test-AdminParams([string]$Op, [hashtable]$P) {
 
 # What to do with an installed program, from its SHA-256 and the SHA-256 of the program the
 # kit's installer holds (kit-manifest.json): install (none installed), keep (byte for byte
-# the kit's build), replace (anything else; also when the kit records no SHA-256, since an
-# unknown build is never taken for the kit's). Version numbers are not compared: a first
-# run's build and this kit's can carry the same one.
+# the kit's build), replace (anything else). Callers refuse before deciding when the kit
+# records no valid SHA-256, so nothing is ever uninstalled without one. Version numbers are
+# not compared: a first run's build and this kit's can carry the same one.
 function Get-ReplaceDecision([string]$InstalledHash, [string]$KitHash) {
   if (-not $InstalledHash) { return 'install' }
   if ($KitHash -and ($InstalledHash.ToUpperInvariant() -ceq $KitHash.ToUpperInvariant())) { return 'keep' }
@@ -791,6 +791,9 @@ function Get-ServerWords {
 # mirror (mirror-location.txt) and the service starts on the kept keys and database.
 function Invoke-ServerReplace([hashtable]$P) {
   $kitExe = [string]$P.exe_sha256
+  # Without the kit's program SHA-256 the result could never be shown to be the kit's
+  # build, so nothing is touched (Test-AdminParams refuses this too).
+  if ($kitExe -cnotmatch '^[0-9A-F]{64}\z') { return New-Result 'INCONCLUSIVE' 'not replaced: the kit records no valid hy-server.exe SHA-256 (kit-manifest.json), so nothing was changed' }
   $decision = Get-ReplaceDecision (Get-InstalledServerHash) $kitExe
   $before = Get-ServerDataMark
   $notes = @()
@@ -1789,6 +1792,8 @@ function Invoke-UninstallStep([hashtable]$Ctx) {
 # R1-02 (PC1): the office server replaced by the kit's build when it is not that build, in
 # the administrator window (Invoke-ServerReplace). The six words come back to this window.
 function Invoke-ServerReplaceStep([hashtable]$Ctx) {
+  $kit = Get-KitBuildHash 'server'
+  if (-not $kit) { return New-Result 'INCONCLUSIVE' 'not replaced: the kit records no valid hy-server.exe SHA-256 (kit-manifest.json), so the server was not touched. Download the kit again.' @('SV1') }
   $installed = if ($script:Sim) { [bool]($script:SimServer -and $script:SimServer.exe) } else { [bool](Get-Service -Name 'HealthierYouServer' -ErrorAction SilentlyContinue) }
   $p = @{}
   if (-not $installed) {
@@ -1797,8 +1802,7 @@ function Invoke-ServerReplaceStep([hashtable]$Ctx) {
     if (-not $m) { return New-Result 'SKIPPED' 'no server installed and no second drive for the mirror' @('SV1') }
     $p.mirror = $m
   }
-  $kit = Get-KitBuildHash 'server'
-  if ($kit) { $p.exe_sha256 = $kit }
+  $p.exe_sha256 = $kit
   $r = Invoke-AdminJob 'server-replace' $p 'server-replace'
   if ($r.words) { $script:State.data['six_words'] = [string]$r.words }
   $script:State.data['passphrase_needed'] = ($r.passphrase_needed -eq $true)
@@ -1875,6 +1879,7 @@ function Invoke-CompanionReplaceStep([hashtable]$Ctx) {
   $hc = Test-InstallerHash $inst
   if ($hc.ok -ne $true) { return New-Result 'INCONCLUSIVE' "not installed: $($hc.detail)" }
   $kit = Get-KitBuildHash 'companion'
+  if (-not $kit) { return New-Result 'INCONCLUSIVE' 'not replaced: the kit records no valid hy-companion.exe SHA-256 (kit-manifest.json), so HealthierYou was not touched. Download the kit again.' }
   $decision = Get-ReplaceDecision (Get-InstalledCompanionHash) $kit
   $notes = @()
   if ($decision -eq 'keep') { $notes += 'HealthierYou is already the kit''s build (hy-companion.exe SHA-256 matches); not installed again' }
@@ -2507,7 +2512,19 @@ function Invoke-SelfTest {
     Check 'server replace: a setup error is FAIL with its meaning' ($x.verdict -eq 'FAIL' -and $x.detail -like '*exit code 3 (refused*')
     $script:SimServer = New-SimServer
     $x = Invoke-AdminOp 'server-replace' @{}
-    Check 'server replace: with no SHA-256 from the kit it replaces, and is never PASS' ((($script:SimServer.calls) -join '|') -eq 'server-uninstall|server-setup /S' -and $x.verdict -eq 'INCONCLUSIVE')
+    Check 'server replace: a request without the kit''s SHA-256 is refused, no uninstall' ($x.verdict -eq 'INCONCLUSIVE' -and $script:SimServer.calls.Count -eq 0)
+    Check 'server replace parameters: a missing SHA-256 is refused' ($null -ne (Test-AdminParams 'server-replace' @{}) -and $null -ne (Test-AdminParams 'server-replace' @{ mirror = 'D:\HealthierYou-Mirror' }))
+    $script:SimServer = New-SimServer
+    $x = Invoke-ServerReplace @{}
+    Check 'server replace: the elevated operation itself refuses a missing or malformed SHA-256, no uninstall' ($x.verdict -eq 'INCONCLUSIVE' -and $script:SimServer.calls.Count -eq 0 -and (Invoke-ServerReplace @{ exe_sha256 = 'abc' }).verdict -eq 'INCONCLUSIVE' -and $script:SimServer.calls.Count -eq 0)
+    $savedKit = $script:Manifest['server_exe_sha256']
+    foreach ($badKit in @($null, '', 'not-a-hash')) {
+      $script:Manifest['server_exe_sha256'] = $badKit
+      $script:SimServer = New-SimServer
+      $x = Invoke-ServerReplaceStep @{}
+      Check "server replace step: kit SHA-256 '$badKit' stops before any request or uninstall" ($x.verdict -eq 'INCONCLUSIVE' -and $x.detail -like '*no valid hy-server.exe SHA-256*' -and $script:SimServer.calls.Count -eq 0)
+    }
+    $script:Manifest['server_exe_sha256'] = $savedKit
     $script:Sim.running_tests = @('Test-Soak.ps1')
     $script:SimServer = New-SimServer
     $x = Invoke-AdminOp 'server-replace' $good
@@ -2553,6 +2570,14 @@ function Invoke-SelfTest {
     $script:Sim.calls = @(); $script:Sim.companion_exe = ('C' * 64); $script:Sim.companion_kit_exe = ('F' * 64)
     $c7 = Invoke-CompanionReplaceStep @{}
     Check 'companion replace: a result that is not the kit''s build is FAIL' ($c7.verdict -eq 'FAIL' -and $c7.detail -like '*NOT the kit*')
+    $savedKit = $script:Manifest['companion_exe_sha256']
+    foreach ($badKit in @($null, '', 'not-a-hash')) {
+      $script:Manifest['companion_exe_sha256'] = $badKit
+      $script:Sim.calls = @(); $script:Sim.companion_exe = ('C' * 64)
+      $c8 = Invoke-CompanionReplaceStep @{}
+      Check "companion replace: kit SHA-256 '$badKit' stops before any uninstall" ($c8.verdict -eq 'INCONCLUSIVE' -and $c8.detail -like '*no valid hy-companion.exe SHA-256*' -and $script:Sim.calls.Count -eq 0)
+    }
+    $script:Manifest['companion_exe_sha256'] = $savedKit
     $script:Sim.companion_exe = $null; $script:Sim.companion_kit_exe = $null; $script:Sim.calls = $null; $script:Sim.companion_data = $null
     $script:State.data['passphrase_needed'] = $false
     $pp = Invoke-RetestPassphraseStep @{}
