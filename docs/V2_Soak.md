@@ -9,8 +9,8 @@ V2-5 as "2-hour camera soak, Windows 10, second webcam, fixes". Section 11 puts 
 camera soak and the second webcam before V2 UAT. Assumption A2 is that memory and CPU stay
 flat over hours: the camera's 301 MB peak was 86% of the 350 MB budget, measured over
 10 minutes only. Assumption A3 is that capture works on Windows 10 and on USB or second
-webcams. The PRD's V2 targets are: combined companion and inference working set at most
-350 MB during check-ins; at most 10% total CPU averaged during capture; capture ends within
+webcams. The PRD's V2 targets are: combined companion and inference memory at most
+350 MB during check-ins (by DEC14, the app's own memory: the private working set); at most 10% total CPU averaged during capture; capture ends within
 two seconds of Off ("failures are release blockers"); no posture data leaves the PC.
 
 ## What is built
@@ -20,7 +20,7 @@ two seconds of Off ("failures are release blockers"); no posture data leaves the
 | Stop counters | `crates/hy-core/src/camera.rs` (`CameraStats`) | `stops`, `forced_stops` and `max_stop_ms` next to the existing `last_stop_ms`, so a run of hours can show that every release met the deadline, not only the last one. Unit-tested (`every_stop_is_counted_with_the_longest_kept_for_the_soak`). |
 | Camera log | `apps/companion/src-tauri/src/camera_log.rs` | Started only with `HY_CAMERA_SOAK_LOG=<file>`. Every `HY_CAMERA_SOAK_EVERY_S` seconds (default 5) the app appends one JSON line: the status as a kind and detail (for example `held` / `meeting`), whether capture is wanted and the camera page exists, the frame rate in force, frames read, stalls, worker restarts, the stop counters, and the mean inference time. It writes only numbers and fixed names: no frame, landmark, posture feature, user name or path. It appends only to a file that already exists, and stops when the file is gone, is over 64 MiB or cannot be written. |
 | CI camera soak | `apps/companion/src-tauri/src/selftest/camera_soak.rs` | With `HY_SELFTEST_CAMERA_SOAK_S`, after the camera self-test, the app keeps the posture check capturing on Chromium's synthetic camera. Each cycle is 20 s of steady capture (frames counted against the rate set), then one release in turn: lock, presentation, sleep, meeting, Off. Lock, sleep and presentation go through the coaching engine, as the Windows signals do; meeting uses the hold input; Off is the user's action. Each release is held 4 s, then ended, and the time until capture reads again is measured. |
-| Soak script | `scripts/windows/Test-CameraSoak.ps1` | One analysis for three modes: the office run (default), `-CiSelfTest` and `-SelfTest` (synthetic series). It samples the whole process tree (working set, private bytes, handles, threads, CPU, and TCP connection counts by class: loopback, LAN, internet; never an address). It reads the camera log and gives each check PASS, FAIL or INCONCLUSIVE. Exit code 0 PASS, 1 FAIL, 2 INCONCLUSIVE. |
+| Soak script | `scripts/windows/Test-CameraSoak.ps1` | One analysis for three modes: the office run (default), `-CiSelfTest` and `-SelfTest` (synthetic series). It samples the whole process tree (working set, private working set, private bytes, handles, threads, CPU, and TCP connection counts by class: loopback, LAN, internet; never an address). It reads the camera log and gives each check PASS, FAIL or INCONCLUSIVE. Exit code 0 PASS, 1 FAIL, 2 INCONCLUSIVE. |
 
 ## The checks
 
@@ -39,7 +39,7 @@ the run is PASS only when every required check is PASS (the convention of
 | Watchdog stalls bounded | At most 1 stall per hour of camera time; a worker restart only after a stall | **No** stall or restart (the synthetic camera never stops sending) |
 | Every release within 2 s | Stop counter deltas: none forced; the longest at most 2000 ms; at least one release, else INCONCLUSIVE | Same; the app also checks each release, that the page closed, and that it stayed released through the hold |
 | Holds release the camera | From the second log line of each hold on, no camera page and no capture. At least one hold is needed, else INCONCLUSIVE ("lock the PC once") | Same; every kind is exercised |
-| PRD memory budget | The approved cap: process-tree working set at most 350 MB at **every** sample while the camera page is in use (the highest sample counts; the median is reported) | Informational (a runner is not an office PC) |
+| PRD memory budget | The approved cap, counted as the app's own memory (DEC14): private working set summed over the process tree at most 350 MB at **every** sample while the camera page is in use (the highest sample counts; the median is reported). A sample has a private value only when every process of the tree has a reading. A reading over the cap fails; otherwise complete readings must cover at least 80% of the samples, never more than 2 in a row missing, or the check is INCONCLUSIVE. The whole-tree working set is reported for information | Informational (a runner is not an office PC) |
 | PRD CPU budget | Process-tree CPU at most 10% of the machine on average while capturing | Informational |
 | No growth trend | Working set, private bytes, handles and threads while capturing. Fails if the last third is past tolerance AND the fitted slope adds up to it (as `Test-Soak.ps1`). Too few samples gives INCONCLUSIVE | Same, after a 20% warm-up |
 | No internet connection | No TCP connection by the tree to an internet address at any sample. LAN (the office server) is allowed. Unreadable gives INCONCLUSIVE | Same |
@@ -79,9 +79,12 @@ The CI numbers for this PR's run are in the PR description.
 3. **"Windows 10" and "second webcam" are owner runs of the same script.** No code in
    this slice is specific to them. The acceptance rows ask for the soak on the Windows 10
    PC and with a USB webcam. The V2-1 session phase still covers unplugging it.
-4. **Memory budget read as the combined process tree.** The PRD says "combined
-   companion/inference working set at most 350 MB during check-ins". The office run checks
-   that the whole tree's highest sample while the camera page is in use is at most 350 MB. The V2-1 self-test reports the camera's share (on minus off) and
+4. **Memory budget read as the app's own memory over the combined process tree (DEC14).**
+   The PRD says "combined companion/inference working set at most 350 MB during check-ins".
+   By the owner's decision of 28 October 2026 this counts the app's own memory: the office
+   run checks that the private working set summed over the tree is at most 350 MB at its
+   highest sample while the camera page is in use. The whole-tree working set, which also
+   counts pages shared with other programs, is reported for information. The V2-1 self-test reports the camera's share (on minus off) and
    the office run reports that share too.
 5. **Thresholds set here (D, owner to confirm):** at most 1 watchdog stall per hour of
    camera time on a real PC; frame-rate delivery median 0.8 and 5th percentile 0.5 of the

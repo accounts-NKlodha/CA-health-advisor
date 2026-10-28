@@ -142,7 +142,9 @@ Proposed retention: local detailed events 90 days; personal monthly summaries 24
 These are proposed release targets to verify on the real slowest PC, not measured achievements:
 
 - V1 companion idle working set at most 150 MB; average idle CPU at most 2% of total machine CPU over a 30-minute quiet period; no sustained idle spike over 5%. Record processor, sampling method and conditions.
+  - *Note, 28 October 2026 (DEC14, `docs/Decisions.md`):* the 150 MB limit is unchanged but is measured as the app's own memory (private working set summed over the process tree, median and highest sample); the whole-tree working set, which includes shared pages, is reported for information.
 - V2 combined companion/inference working set at most 350 MB during check-ins; aim at most 10% total CPU averaged during capture. If missed, use lower duty cycle/model adjustments; report results and seek any target change rather than silently ship.
+  - *Note, 28 October 2026 (DEC14, `docs/Decisions.md`):* the 350 MB limit is unchanged but is measured as the app's own memory (private working set summed over the process tree, highest sample); the whole-tree working set is reported for information.
 - Settings/pet action responds within 500 ms on test PC; first usable companion launch within 10 seconds after login stabilises.
 - No application crash or unbounded memory growth during three working-day pilot sessions. Performance must be measured alongside ordinary office applications.
 - Three pilot participants are confirmed. Run with three real clients and ten simulated/concurrent clients for the initial LAN load test; total rollout size and server sizing remain deployment inputs, not assumed proven capacity.
