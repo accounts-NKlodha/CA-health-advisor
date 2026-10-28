@@ -312,6 +312,8 @@ pub struct MenuView {
     pub hotkey: Option<String>,
     /// The posture check's entry (V2).
     pub camera: CameraMenu,
+    /// Today's screen time in whole minutes (DEC13); `None` until the engine reports it.
+    pub screen_time_min: Option<u32>,
 }
 
 /// The keyboard panel's view.
@@ -357,6 +359,7 @@ pub fn menu_view(
     actions: &[MenuAction],
     hotkey: Option<String>,
     camera: CameraMenu,
+    screen_time_min: Option<u32>,
 ) -> MenuView {
     MenuView {
         greeting: message(MessageId::Greeting, profile.tone, &profile.display_name),
@@ -369,6 +372,7 @@ pub fn menu_view(
         hint: message(MessageId::MenuHint, profile.tone, &profile.display_name),
         hotkey,
         camera,
+        screen_time_min,
     }
 }
 

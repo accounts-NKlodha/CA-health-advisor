@@ -140,6 +140,8 @@ struct Inner {
     setup_loaded: bool,
     /// A backup file the page read, waiting for its password.
     staged_backup: Option<Vec<u8>>,
+    /// Today's screen time in whole minutes (DEC13), for the pet menu and the panel.
+    screen_time_min: Option<u32>,
 }
 
 /// The pet shell.
@@ -270,6 +272,7 @@ impl Shell {
                 plan_loaded: false,
                 setup_loaded: false,
                 staged_backup: None,
+                screen_time_min: None,
             }),
             sink: Mutex::new(None),
             system: Mutex::new(None),
@@ -493,6 +496,7 @@ impl Shell {
             i.core.model.menu_actions(),
             hk,
             self.camera_menu(),
+            i.screen_time_min,
         )
     }
 
@@ -1231,5 +1235,14 @@ impl PetShell for ShellHandle {
 
     fn set_holds(&self, holds: HoldSources) {
         self.0.post(move |s| s.camera_set_hold(holds.camera_hold()));
+    }
+
+    fn set_screen_time(&self, minutes: u32) {
+        self.0.post(move |s| {
+            s.run(|i, _| {
+                i.screen_time_min = Some(minutes);
+                vec![Effect::Render]
+            });
+        });
     }
 }

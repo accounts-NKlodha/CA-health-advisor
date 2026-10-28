@@ -1,11 +1,12 @@
 // The pet menu (wireframe B1), shared by the pet's bubble and the keyboard panel (K1).
-// The engine's actions are grouped under short headings (Water, Movement & breaks,
-// Focus, Pause; see menuGroups.ts), then the shell's own: Pet (the size slider with
+// Under the greeting, today's screen time (DEC13). The engine's actions are grouped
+// under short headings (Water, Movement & breaks, Focus, Pause; see menuGroups.ts), then the shell's own: Pet (the size slider with
 // S/M/L/XL quick picks, Bring pet above clock, Hide pet) and More (Weekly review, the
 // posture check's entry (V2: "Posture check" while off, "Turn camera off" while on),
 // Settings).
 import { icon } from './icons';
 import { type Section, groupActions, sizeCommitter, snapSize, wheelSize } from './menuGroups';
+import { screenToday } from './screenTime';
 import type { MenuAction, MenuView } from './types';
 
 export interface MenuHandlers {
@@ -183,6 +184,14 @@ export function renderMenu(menu: MenuView, h: MenuHandlers, headingId: string): 
   title.id = headingId;
   title.textContent = menu.greeting;
   root.append(title);
+  // Today's screen time, shown apart from the actions (DEC13).
+  const screen = screenToday(menu.screen_time_min);
+  if (screen) {
+    const p = document.createElement('p');
+    p.className = 'menu-screen muted';
+    p.textContent = screen;
+    root.append(p);
+  }
 
   const groups = groupActions(menu.actions);
   const more = groups.find((g) => g.id === 'more');

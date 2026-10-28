@@ -470,7 +470,7 @@ mod tests {
         assert_eq!(json["packs"][4]["selectable"], false);
         assert_eq!(json["edge"], "right");
         let cam = view::CameraMenu::of(hy_core::camera::Status::Off, false);
-        let m = view::menu_view(&profile, &[], None, cam);
+        let m = view::menu_view(&profile, &[], None, cam, Some(200));
         let json = serde_json::to_value(&m).unwrap();
         assert_eq!(json["greeting"], "Hi, I'm Shelly.");
         assert_eq!(json["presets"][3]["short"], "XL");
@@ -479,6 +479,7 @@ mod tests {
         assert_eq!(json["size_step"], 5);
         assert_eq!(json["camera"]["label"], "Posture check");
         assert_eq!(json["camera"]["on"], false);
+        assert_eq!(json["screen_time_min"], 200);
     }
 
     #[test]
