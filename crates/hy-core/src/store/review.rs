@@ -159,7 +159,8 @@ impl Store {
 
         let mut stmt = self.conn.prepare(
             "SELECT local_date, pc_active_s, work_active_s, work_quiet_s, unknown_s, away_s,
-                    confirmed_breaks, longest_block_s, focus_sessions, pomodoro_rounds, revision
+                    confirmed_breaks, longest_block_s, focus_sessions, pomodoro_rounds, revision,
+                    screen_s
              FROM activity_day WHERE local_date BETWEEN ?1 AND ?2",
         )?;
         let tallies = stmt
@@ -177,6 +178,7 @@ impl Store {
                     r.get::<_, u32>(8)?,
                     r.get::<_, u32>(9)?,
                     u(r.get(10)?),
+                    r.get::<_, Option<i64>>(11)?.map(u),
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -195,6 +197,7 @@ impl Store {
                     focus_sessions: t.8,
                     pomodoro_rounds: t.9,
                     revision: t.10,
+                    screen_s: t.11,
                 });
             }
         }

@@ -257,15 +257,25 @@ fn cats(movement: bool, eye_rest: bool, water: bool) -> CoachConfig {
     }
 }
 
+/// Water only, a 2000 ml goal and `logged_ml` logged, at `wall` on 20 Oct, with the app
+/// running and the user at the PC since the work window opened at 09:30: the pace's time
+/// at the PC is then the clock time inside the window (DEC13). The goal is set on arrival,
+/// so nothing is offered on the way.
 fn water_only_at(wall: DateTime<Utc>, logged_ml: u32) -> H {
-    H::at(
-        wall,
+    let mut h = H::at(
+        ist(20, 9, 30),
         cats(false, false, true),
         WaterSnapshot {
             logged_ml,
-            goal_ml: Some(2000),
+            goal_ml: None,
         },
-    )
+    );
+    h.tick = mins(1);
+    h.wait((wall - h.wall).to_std().unwrap());
+    h.tick = secs(5);
+    h.water.goal_ml = Some(2000);
+    h.input(Input::Refresh);
+    h
 }
 
 // ------------------------------------------------------- one reminder at a time
@@ -1714,8 +1724,8 @@ fn water_is_offered_only_when_at_least_100_ml_behind_pace() {
     ));
     assert_eq!(out.view.water.unwrap().logged_ml, 500);
     assert_eq!(h.status(Activity::Water), ChipStatus::Done);
-    // Back on pace: nothing more for now. The pace keeps moving with the clock, so by
-    // about 12:11 (600 ml expected) the user is behind again and water returns after its
+    // Back on pace: nothing more for now. The pace keeps moving with the time at the PC,
+    // so by about 12:11 (600 ml expected) the user is behind again and water returns after its
     // 30-minute interval.
     h.wait(mins(30));
     assert_eq!(h.offers().len(), 1);
@@ -2111,12 +2121,14 @@ fn t_r2_away_unlocked_twenty_minutes_pauses_after_fifteen_no_reset_no_stacking()
 
 #[test]
 fn t_r3_lock_three_minutes_resets_then_one_reminder_after_grace() {
-    // Water becomes due during the lock: 125 ml logged, 10:30 expects 220, 10:33 expects 230.
+    // 15 ml logged; 30 min at the PC expects 110 ml, 95 ml behind at the lock. The lock
+    // adds nothing to the pace (DEC13); a minute back at the PC makes it 105 ml behind,
+    // and water waits for the grace period.
     let mut h = H::at(
         ist(20, 10, 0),
         cats(true, false, true),
         WaterSnapshot {
-            logged_ml: 125,
+            logged_ml: 15,
             goal_ml: Some(2000),
         },
     );
@@ -2132,6 +2144,7 @@ fn t_r3_lock_three_minutes_resets_then_one_reminder_after_grace() {
     assert_eq!(h.accum(Activity::Movement), Duration::ZERO);
     assert_eq!(h.e.tally(h.today()).unwrap().confirmed_breaks, 1);
     assert_eq!(h.view().bubble, None);
+    assert_eq!(h.view().water.unwrap().behind_ml, 95);
     let waited = h.wait_until(mins(5), |v| v.reminder().is_some());
     assert_eq!(waited, mins(2));
     assert_eq!(h.shown(), Some(Activity::Water));
@@ -2159,7 +2172,7 @@ fn t_r5_sleep_two_hours_no_burst_and_pomodoro_waits_for_resume() {
         ist(20, 10, 0),
         CoachConfig::default(),
         WaterSnapshot {
-            logged_ml: 300,
+            logged_ml: 0,
             goal_ml: Some(2000),
         },
     );
@@ -2183,8 +2196,12 @@ fn t_r5_sleep_two_hours_no_burst_and_pomodoro_waits_for_resume() {
     assert_eq!(p.left, mins(12));
     assert_eq!(p.round, 1);
     assert_eq!(h.view().bubble, Some(Bubble::PomodoroPausedByLock));
-    // Water is far behind and eye rest and movement were reset by the sleep, but the
-    // Pomodoro card holds the slot: no reminder at all until the user decides.
+    // The sleep added nothing to the water pace: 18 min at the PC expects 70 ml (DEC13).
+    assert_eq!(h.view().water.unwrap().expected_ml, 70);
+    assert!(!h.view().water.unwrap().is_behind());
+    // Water falls behind with the time at the PC after the wake and eye rest and movement
+    // were reset by the sleep, but the Pomodoro card holds the slot: no reminder at all
+    // until the user decides.
     h.wait(mins(20));
     assert!(h.offers().is_empty());
     h.input(Input::EndPomodoro);
@@ -2470,7 +2487,8 @@ fn pomodoro_skip_break_and_auto_start() {
 
 #[test]
 fn pomodoro_break_card_mentions_water_only_when_behind_pace() {
-    // 2000 ml goal, 150 ml logged at 10:00; by 10:25 about 200 ml is expected: on pace.
+    // 2000 ml goal, 150 ml logged at 10:00; by 10:25, 25 min at the PC expects about
+    // 90 ml: on pace.
     let mut h = H::at(
         ist(20, 10, 0),
         cats(false, false, true),
@@ -2494,7 +2512,8 @@ fn pomodoro_break_card_mentions_water_only_when_behind_pace() {
         })
     ));
     h.input(Input::EndPomodoro);
-    // Behind pace by 11:20: the next break card mentions water.
+    // Behind pace by 11:20 (80 min at the PC expects 300 ml): the next break card
+    // mentions water.
     h.wait(mins(30));
     h.input(start);
     h.wait(mins(25));
@@ -3792,20 +3811,97 @@ fn reaching_the_goal_celebrates_once_and_hydration_reminders_pause() {
 #[test]
 fn logging_and_undoing_moves_the_water_pace() {
     // 13:00: well behind a 2000 ml pace with nothing logged.
-    let mut h = H::at(
-        ist(20, 13, 0),
-        cats(false, false, true),
-        WaterSnapshot {
-            logged_ml: 0,
-            goal_ml: Some(2000),
-        },
-    );
+    let mut h = water_only_at(ist(20, 13, 0), 0);
     assert!(h.view().water.unwrap().is_behind());
     let (id, _) = h.log(2000);
     assert!(!h.view().water.unwrap().is_behind());
     h.unlog(id);
     h.w(WaterInput::Undone);
     assert!(h.view().water.unwrap().is_behind());
+}
+
+// The owner's report (DEC13): after a long lock the app asked for a 600 ml backlog two
+// minutes after the unlock. The pace follows the time at the PC, so it does not.
+#[test]
+fn a_long_lock_adds_nothing_to_the_water_pace() {
+    // On pace at 11:15 (390 ml expected), then locked for 3 hours.
+    let mut h = water_only_at(ist(20, 11, 15), 390);
+    assert_eq!(h.view().water.unwrap().behind_ml, 0);
+    h.input(Input::Lock);
+    h.step(mins(180), Input::Tick { idle: mins(180) });
+    h.input(Input::Unlock);
+    assert_eq!(h.local(), hm(14, 15));
+    // By the clock 1500 ml would be expected; the user was at the PC 105 minutes.
+    assert_eq!(h.view().water.unwrap().expected_ml, 390);
+    let t = h.e.tally(h.today()).unwrap();
+    assert_eq!(t.window_screen_ms, 105 * 60_000);
+    assert_eq!(t.screen_ms, 105 * 60_000);
+    // No water reminder in the next minutes: the pace goes on from where it stopped.
+    h.wait(mins(20));
+    assert!(h.offers().is_empty());
+    assert_eq!(h.view().water.unwrap().expected_ml, 460);
+}
+
+#[test]
+fn sleep_and_time_off_count_as_away_from_the_pc() {
+    let mut h = water_only_at(ist(20, 11, 15), 390);
+    h.input(Input::Lock);
+    h.input(Input::Suspend);
+    h.step(mins(120), Input::Resume);
+    h.input(Input::Unlock);
+    h.wait(mins(5));
+    assert!(h.offers().is_empty());
+    let t = h.e.tally(h.today()).unwrap();
+    assert_eq!(t.window_screen_ms, 110 * 60_000);
+    assert_eq!(t.away_ms, 120 * 60_000);
+    assert_eq!(h.view().water.unwrap().expected_ml, 410);
+    // Long quiet and a pause still count: the user is at an unlocked, awake PC.
+    h.active = false;
+    h.wait(mins(30));
+    h.input(Input::Pause(PauseLength::Minutes(30)));
+    h.active = false;
+    h.wait(mins(10));
+    let t = h.e.tally(h.today()).unwrap();
+    assert_eq!(t.window_screen_ms, 150 * 60_000);
+    assert_eq!(h.view().screen_time, Duration::from_millis(t.screen_ms));
+}
+
+#[test]
+fn an_app_started_mid_window_starts_the_pace_from_nothing() {
+    // First start at 16:00 with nothing logged: no time at the PC yet, nothing expected.
+    let mut h = H::at(
+        ist(20, 16, 0),
+        cats(false, false, true),
+        WaterSnapshot {
+            logged_ml: 0,
+            goal_ml: Some(2000),
+        },
+    );
+    assert_eq!(h.view().water.unwrap().expected_ml, 0);
+    assert_eq!(h.view().screen_time, Duration::ZERO);
+    // About 26 minutes at the PC expects 100 ml: water is due only then.
+    h.wait_until(mins(40), |v| v.reminder().is_some());
+    assert_eq!(h.view().water.unwrap().expected_ml, 100);
+    assert_eq!(h.local(), NaiveTime::from_hms_opt(16, 25, 40).unwrap());
+}
+
+#[test]
+fn screen_time_counts_the_whole_day_and_the_pace_only_the_window() {
+    // 18:00 to 19:00: half an hour inside the 09:30 to 18:30 window, half after it.
+    let mut h = H::at(
+        ist(20, 18, 0),
+        cats(false, false, true),
+        WaterSnapshot {
+            logged_ml: 0,
+            goal_ml: Some(2000),
+        },
+    );
+    h.wait(mins(60));
+    let t = h.e.tally(h.today()).unwrap();
+    assert_eq!(t.screen_ms, 60 * 60_000);
+    assert_eq!(t.window_screen_ms, 30 * 60_000);
+    assert_eq!(h.view().screen_time, mins(60));
+    assert_eq!(h.view().water.unwrap().expected_ml, 110);
 }
 
 #[test]

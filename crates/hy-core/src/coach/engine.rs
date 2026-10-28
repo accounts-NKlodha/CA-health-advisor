@@ -26,7 +26,8 @@
 //!   calm gap and the next due time but does not restart the timer; skip-today counts as a
 //!   skip (P). All four reschedule movement.
 //! - Water is offered only while behind the user's own pace by at least 100 ml; a reached
-//!   goal pauses hydration reminders (P).
+//!   goal pauses hydration reminders (P). The pace follows the time the user was at the PC
+//!   inside the work window (unlocked, awake, app running), not the clock (DEC13).
 //! - Precedence (architecture 4.3): pause, lock, sleep, off-hours; then focus, presentation,
 //!   meeting; then an active exercise, break or Pomodoro; then one reminder. Anything held
 //!   back is never replayed: when a pause, off-hours, focus, meeting or presentation ends,
@@ -150,6 +151,14 @@ pub struct DayTally {
     pub focus_sessions: u32,
     /// Pomodoro work intervals completed.
     pub pomodoro_rounds: u32,
+    /// Screen time: at the PC (the app running, the session unlocked, the PC awake) at
+    /// any hour, paused or not, however long without input, ms (DEC13).
+    #[serde(default)]
+    pub screen_ms: u64,
+    /// At the PC inside the work window that starts on this date, ms. The water pace
+    /// follows it (DEC13).
+    #[serde(default)]
+    pub window_screen_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -693,7 +702,9 @@ impl Engine {
             logged_ml: ctx.water.logged_ml.saturating_add(extra_ml),
             goal_ml: ctx.water.goal_ml,
         };
-        pace(snap, ctx.wall, &ctx.schedule, &ctx.zone)
+        pace(snap, ctx.wall, &ctx.schedule, &ctx.zone, |d| {
+            dur(self.s.days.get(&d).map_or(0, |s| s.tally.window_screen_ms))
+        })
     }
 
     fn is_due(&self, ctx: &Context, a: Activity) -> bool {
@@ -841,7 +852,19 @@ impl Engine {
                 self.s.block_ms = 0;
                 out.significant = true;
             }
+            // At the PC, whatever the input: screen time, and the water pace's clock
+            // inside the work window (counted on the date the window starts).
+            if let Some(w) = window {
+                self.s
+                    .days
+                    .entry(w.date)
+                    .or_default()
+                    .tally
+                    .window_screen_ms += len;
+                out.touch(w.date);
+            }
             let day = &mut self.s.days.entry(date).or_default().tally;
+            day.screen_ms += len;
             match class {
                 SessionState::Active | SessionState::Quiet => {
                     day.pc_active_ms += len;
@@ -2079,7 +2102,7 @@ impl Engine {
             PomodoroPhase::BreakOffered => Some(Bubble::PomodoroBreak {
                 length: dur(p.break_ms),
                 // Water only if hydration reminders are on and the user is genuinely
-                // behind pace for the time of day (wireframe B6).
+                // behind pace for the time at the PC today (wireframe B6, DEC13).
                 water_behind: water
                     .copied()
                     .filter(|w| ctx.config.categories.water && w.is_behind()),
@@ -2099,6 +2122,11 @@ impl Engine {
             session: self.session_state(ctx),
             hold: self.hold(ctx),
             water,
+            screen_time: dur(self
+                .s
+                .days
+                .get(&ctx.zone.local_date(ctx.wall))
+                .map_or(0, |d| d.tally.screen_ms)),
             pomodoro: self.pomodoro_view(),
             focus_left: self
                 .s

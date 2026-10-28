@@ -1042,7 +1042,7 @@ pub fn bubble(b: &CoachBubble, view: &CoachView) -> Bubble {
                 vec!["Look away from the screen, stand up or walk a little.".to_owned()];
             if let Some(w) = water_behind {
                 lines.push(format!(
-                    "Water: {} ml behind your own pace for the time of day.",
+                    "Water: {} ml behind your own pace for your time at the PC today.",
                     w.behind_ml
                 ));
             }

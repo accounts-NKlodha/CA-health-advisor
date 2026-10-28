@@ -236,6 +236,12 @@ impl DayFacts {
         }
     }
 
+    /// Screen time on the date, in seconds, if the tracker measured it (DEC13).
+    #[must_use]
+    pub fn screen_s(&self) -> Option<u64> {
+        self.tally.and_then(|t| t.screen_s)
+    }
+
     /// Whether the PC recorded anything on the date: tracker tallies or any event.
     #[must_use]
     pub const fn recorded(&self) -> bool {
@@ -440,6 +446,8 @@ pub struct WeekDay {
     pub date: NaiveDate,
     /// One of the user's workdays.
     pub workday: bool,
+    /// Screen time on this PC, in seconds (an estimate; DEC13). `None` is no data.
+    pub screen_s: Option<u64>,
 }
 
 /// The tracker's tallies over a week (estimates, this PC).
@@ -674,6 +682,7 @@ pub fn week(
             .map(|f| WeekDay {
                 date: f.date,
                 workday: cal.is_workday(f.date),
+                screen_s: f.screen_s(),
             })
             .collect(),
         coverage: cov,
@@ -772,6 +781,8 @@ pub struct MonthDay {
     pub breaks: DayMark,
     /// Water mark.
     pub water: DayMark,
+    /// Screen time on this PC, in seconds (an estimate; DEC13). `None` is no data.
+    pub screen_s: Option<u64>,
 }
 
 /// The user's first four weeks, the dashed baseline (wireframe W14).
@@ -916,6 +927,7 @@ pub fn month(
             movement: mark(cal, f, Metric::Movement),
             breaks: mark(cal, f, Metric::Breaks),
             water: mark(cal, f, Metric::Water),
+            screen_s: f.screen_s(),
         })
         .collect();
     let days_used = u32::try_from(

@@ -36,6 +36,7 @@ fn tally(date: NaiveDate) -> ActivityDay {
         longest_block_s: 2400,
         focus_sessions: 0,
         pomodoro_rounds: 0,
+        screen_s: Some(4500),
         revision: 1,
     }
 }
@@ -639,4 +640,42 @@ fn reviews_serialise_for_the_page() {
     assert_eq!(v["rows"][1]["marks"][0], "nothing_due");
     assert_eq!(v["rows"][0]["value"]["pct"], 0);
     assert_eq!(v["coverage"]["recorded"], 6);
+}
+
+#[test]
+fn screen_time_is_shown_per_day_and_missing_is_no_data() {
+    // DEC13: each day's screen time, from the tally; a day without one is no data.
+    let c = cal(oct(22), oct(1));
+    let days = week_of(oct(19), |date| {
+        if date == oct(20) {
+            let mut f = recorded(date);
+            f.tally = Some(ActivityDay {
+                screen_s: None,
+                ..tally(date)
+            });
+            f
+        } else if date <= oct(22) {
+            recorded(date)
+        } else {
+            DayFacts::empty(date)
+        }
+    });
+    let w = week(&c, &days, &[], phone_none());
+    let screen: Vec<_> = w.days.iter().map(|d| d.screen_s).collect();
+    assert_eq!(
+        screen,
+        vec![Some(4500), None, Some(4500), Some(4500), None, None, None]
+    );
+    let sel = MonthKey::of(oct(22));
+    let ((from, to), _) = month_ranges(&c, sel);
+    let facts = facts_for(from, to, |date| {
+        if date <= oct(22) {
+            recorded(date)
+        } else {
+            DayFacts::empty(date)
+        }
+    });
+    let m = month(&c, sel, &facts, &[]);
+    assert_eq!(m.days[0].screen_s, Some(4500));
+    assert_eq!(m.days[30].screen_s, None);
 }

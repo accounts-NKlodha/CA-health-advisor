@@ -1,16 +1,22 @@
 //! The water pace model (wireframe B2 and section 8 item 12, approved sample rule).
 //!
-//! The user's own daily goal is spread evenly over the user's own work window for the day.
-//! The user is "behind pace" only when the logged amount is at least
-//! [`WATER_BEHIND_ML`] below the amount expected by now. A daily total below the goal is
-//! not, by itself, "behind". Once the goal is reached, hydration reminders pause; manual
-//! logging stays available and nothing encourages drinking past the goal (WAT-01).
+//! The user's own daily goal is spread evenly over the user's own work window for the day,
+//! and the share expected by now follows the time the user was at the PC inside that
+//! window, not the clock (DEC13): time locked, asleep, with the PC off or with the app
+//! not running adds nothing, so after an unlock or a start the pace goes on from where it
+//! stopped instead of jumping ahead. The user is "behind pace" only when the logged amount
+//! is at least [`WATER_BEHIND_ML`] below the amount expected by now. A daily total below
+//! the goal is not, by itself, "behind". Once the goal is reached, hydration reminders
+//! pause; manual logging stays available and nothing encourages drinking past the goal
+//! (WAT-01).
 //!
 //! The water panel (wireframe B3) lists today's [`WaterEntry`]s and logs, corrects and
 //! removes them. Its buttons use the user's [`Servings`] (wireframe W5) and the steps
 //! below.
 
-use chrono::{DateTime, NaiveTime, Utc};
+use std::time::Duration;
+
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -147,8 +153,9 @@ pub struct WaterPace {
     pub logged_ml: u32,
     /// The user's goal.
     pub goal_ml: u32,
-    /// Amount expected by now, rounded to 10 ml (0 before the window, the goal after it,
-    /// 0 on a day without a work window).
+    /// Amount expected by now, rounded to 10 ml: the goal's share for the time the user
+    /// was at the PC inside the window (0 before the window, at most the goal, 0 on a day
+    /// without a work window).
     pub expected_ml: u32,
     /// How far behind the expected amount the user is (0 when on or ahead of pace).
     pub behind_ml: u32,
@@ -164,13 +171,16 @@ impl WaterPace {
     }
 }
 
-/// The pace at `now`, or `None` without a goal.
+/// The pace at `now`, or `None` without a goal. `present` gives the time the user was at
+/// the PC so far inside the work window that starts on a date (the tracker's
+/// [`DayTally::window_screen_ms`](super::DayTally::window_screen_ms)).
 #[must_use]
 pub fn pace(
     snapshot: WaterSnapshot,
     now: DateTime<Utc>,
     schedule: &WorkSchedule,
     zone: &UserZone,
+    present: impl FnOnce(NaiveDate) -> Duration,
 ) -> Option<WaterPace> {
     let goal = snapshot.goal_ml?;
     let today = zone.local_date(now);
@@ -179,7 +189,7 @@ pub fn pace(
     let expected = schedule
         .window_at(now, zone)
         .or_else(|| schedule.window_for(today, zone))
-        .map_or(0, |w| expected_in(goal, now, w.start, w.end));
+        .map_or(0, |w| expected_in(goal, present(w.date), w.end - w.start));
     let goal_reached = snapshot.logged_ml >= goal;
     Some(WaterPace {
         logged_ml: snapshot.logged_ml,
@@ -190,9 +200,11 @@ pub fn pace(
     })
 }
 
-fn expected_in(goal: u32, now: DateTime<Utc>, start: DateTime<Utc>, end: DateTime<Utc>) -> u32 {
-    let span = (end - start).num_milliseconds().max(1);
-    let done = (now - start).num_milliseconds().clamp(0, span);
+fn expected_in(goal: u32, present: Duration, window: chrono::TimeDelta) -> u32 {
+    let span = window.num_milliseconds().max(1);
+    let done = i64::try_from(present.as_millis())
+        .unwrap_or(i64::MAX)
+        .clamp(0, span);
     // Linear share of the goal, rounded to the nearest 10 ml as in the prototype.
     let raw = i128::from(goal) * i128::from(done) / i128::from(span);
     let rounded = (raw + 5) / 10 * 10;
@@ -221,14 +233,33 @@ mod tests {
         }
     }
 
+    /// The pace at `h:m` for a user at the PC all the time since the window opened at
+    /// 09:30 (so the time at the PC equals the clock time inside the window).
     fn p(logged: u32, h: u32, m: u32) -> WaterPace {
+        let present = (at(h, m) - at(9, 30))
+            .clamp(chrono::TimeDelta::zero(), at(18, 30) - at(9, 30))
+            .to_std()
+            .unwrap();
+        at_pc(logged, h, m, present)
+    }
+
+    /// The pace at `h:m` after `present` at the PC inside today's window.
+    fn at_pc(logged: u32, h: u32, m: u32, present: Duration) -> WaterPace {
         pace(
             snap(logged),
             at(h, m),
             &WorkSchedule::default(),
             &UserZone::KOLKATA,
+            |d| {
+                assert_eq!(d, chrono::NaiveDate::from_ymd_opt(2026, 10, 20).unwrap());
+                present
+            },
         )
         .unwrap()
+    }
+
+    fn hours(h: u64) -> Duration {
+        Duration::from_secs(h * 3600)
     }
 
     #[test]
@@ -312,9 +343,27 @@ mod tests {
             at(18, 0),
             &WorkSchedule::default(),
             &UserZone::KOLKATA,
+            |_| hours(8),
         )
         .unwrap();
         assert!(!over.is_behind());
+    }
+
+    #[test]
+    fn pace_follows_time_at_the_pc_not_the_clock() {
+        // 14:00 with only 2 h at the PC (locked, asleep, off or not running the rest):
+        // 2 h of the 9 h window expects 444 ml, rounded to 440, not the clock's 1000 ml.
+        let w = at_pc(250, 14, 0, hours(2));
+        assert_eq!(w.expected_ml, 440);
+        assert_eq!(w.behind_ml, 190);
+        assert!(w.is_behind());
+        assert!(!at_pc(350, 14, 0, hours(2)).is_behind());
+        // Nothing at the PC yet (the app started just now): nothing expected.
+        assert_eq!(at_pc(0, 16, 0, Duration::ZERO).expected_ml, 0);
+        // After the window the share stays what the time at the PC earned.
+        assert_eq!(at_pc(0, 22, 0, hours(3)).expected_ml, 670);
+        // The share never passes the goal, whatever is reported.
+        assert_eq!(at_pc(0, 18, 30, hours(12)).expected_ml, 2000);
     }
 
     #[test]
@@ -324,7 +373,8 @@ mod tests {
                 WaterSnapshot::default(),
                 at(12, 0),
                 &WorkSchedule::default(),
-                &UserZone::KOLKATA
+                &UserZone::KOLKATA,
+                |_| hours(2),
             ),
             None
         );
@@ -339,6 +389,7 @@ mod tests {
             sunday,
             &WorkSchedule::default(),
             &UserZone::KOLKATA,
+            |_| hours(5),
         )
         .unwrap();
         assert_eq!(w.expected_ml, 0);
@@ -352,14 +403,19 @@ mod tests {
             start: NaiveTime::from_hms_opt(22, 0, 0).unwrap(),
             end: NaiveTime::from_hms_opt(6, 0, 0).unwrap(),
         };
-        // 02:00 on the 21st is half way through the window that began at 22:00 on the 20th.
+        // 02:00 on the 21st, after 4 h at the PC in the window that began at 22:00 on the
+        // 20th: half the goal, counted on the window's own date.
         let t = UserZone::KOLKATA.resolve_local(
             chrono::NaiveDate::from_ymd_opt(2026, 10, 21)
                 .unwrap()
                 .and_hms_opt(2, 0, 0)
                 .unwrap(),
         );
-        let w = pace(snap(0), t, &schedule, &UserZone::KOLKATA).unwrap();
+        let w = pace(snap(0), t, &schedule, &UserZone::KOLKATA, |d| {
+            assert_eq!(d, chrono::NaiveDate::from_ymd_opt(2026, 10, 20).unwrap());
+            hours(4)
+        })
+        .unwrap();
         assert_eq!(w.expected_ml, 1000);
     }
 }

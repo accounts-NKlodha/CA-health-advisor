@@ -509,7 +509,7 @@ pub enum Bubble {
     PomodoroBreak {
         /// Break length.
         length: Duration,
-        /// Present only when behind pace for the time of day.
+        /// Present only when behind pace for the time at the PC today.
         water_behind: Option<WaterPace>,
     },
     /// "Break over. Start another round?"
@@ -750,6 +750,9 @@ pub struct CoachView {
     pub hold: Option<Hold>,
     /// Today's water pace, if a goal is set.
     pub water: Option<WaterPace>,
+    /// Today's screen time so far ([`DayTally::screen_ms`](super::DayTally::screen_ms)).
+    #[serde(default)]
+    pub screen_time: Duration,
     /// The Pomodoro session, if one exists.
     pub pomodoro: Option<PomodoroView>,
     /// Time left in quiet focus.

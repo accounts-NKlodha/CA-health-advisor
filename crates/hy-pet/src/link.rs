@@ -18,7 +18,9 @@
 //! - the engine's pet menu, panel and tray entries ([`present::menu_actions`]);
 //! - the holds in force ([`PetShell::set_holds`]), for the V2 camera, which releases
 //!   capture while the PC is locked, coaching is paused, outside work hours, during a
-//!   presentation and during a meeting.
+//!   presentation and during a meeting;
+//! - today's screen time in whole minutes ([`PetShell::set_screen_time`], DEC13), shown
+//!   in the pet menu and the keyboard panel.
 //!
 //! Answers come back from the shell through [`LinkSink`] (the shell's
 //! [`ShellEventSink`]) on the UI thread: it routes the event against the [`RouteState`]
@@ -139,6 +141,7 @@ struct Shown {
     menu: Option<Vec<MenuAction>>,
     bubble: Option<(BubbleKind, Bubble)>,
     holds: Option<HoldSources>,
+    screen_min: Option<u32>,
 }
 
 /// The engine bound to the shell.
@@ -422,6 +425,12 @@ impl CoachLink {
         if self.shown.holds != Some(view.holds) {
             self.shown.holds = Some(view.holds);
             self.shell.set_holds(view.holds);
+        }
+        // Today's screen time, once a minute (DEC13).
+        let screen_min = u32::try_from(view.screen_time.as_secs() / 60).unwrap_or(u32::MAX);
+        if self.shown.screen_min != Some(screen_min) {
+            self.shown.screen_min = Some(screen_min);
+            self.shell.set_screen_time(screen_min);
         }
         let look = present::pet_look(view, celebrating);
         let menu = present::menu_actions(view);

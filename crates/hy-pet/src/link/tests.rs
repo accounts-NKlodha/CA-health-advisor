@@ -62,6 +62,7 @@ fn view(pet: PetMode) -> CoachView {
         session: SessionState::Active,
         hold: None,
         water: None,
+        screen_time: Duration::ZERO,
         water_entries: Vec::new(),
         servings: Servings::default(),
         pomodoro: None,
@@ -1035,6 +1036,8 @@ struct FakeShell {
     shown: Mutex<Vec<String>>,
     /// Every change of the holds in force, in order.
     holds: Mutex<Vec<HoldSources>>,
+    /// Every change of today's screen time (minutes), in order.
+    screen: Mutex<Vec<u32>>,
 }
 
 impl std::fmt::Debug for FakeShell {
@@ -1168,6 +1171,10 @@ impl PetShell for FakeShell {
 
     fn set_holds(&self, holds: HoldSources) {
         lock(&self.holds).push(holds);
+    }
+
+    fn set_screen_time(&self, minutes: u32) {
+        lock(&self.screen).push(minutes);
     }
 }
 
@@ -3276,4 +3283,22 @@ fn the_shell_hears_each_change_of_the_holds_once() {
             None
         ]
     );
+}
+
+#[test]
+fn the_shell_hears_todays_screen_time_once_a_minute() {
+    // DEC13: the pet menu and the keyboard panel show today's screen time.
+    let mut h = H::new();
+    assert_eq!(*lock(&h.shell.screen), vec![0]);
+    h.work(150);
+    assert_eq!(*lock(&h.shell.screen), vec![0, 1, 2]);
+    // Locked time is not screen time.
+    h.input(Input::Lock);
+    h.clock.advance(chrono::Duration::minutes(30));
+    h.input(Input::Tick {
+        idle: Duration::from_secs(1800),
+    });
+    h.input(Input::Unlock);
+    assert_eq!(*lock(&h.shell.screen), vec![0, 1, 2]);
+    assert_eq!(h.link.view().screen_time, Duration::from_secs(150));
 }

@@ -79,6 +79,8 @@ export interface MenuView {
   hotkey: string | null;
   /** The posture check's entry (V2). */
   camera: CameraMenu;
+  /** Today's screen time in whole minutes (DEC13); null until the engine reports it. */
+  screen_time_min: number | null;
 }
 
 export interface BubbleChip {
@@ -281,7 +283,8 @@ export interface WeekReview {
   end: string;
   today: string;
   status: 'before_start' | 'first_week' | 'not_enough_data' | 'normal';
-  days: { date: string; workday: boolean }[];
+  /** `screen_s`: screen time on this PC (DEC13); null is no data. */
+  days: { date: string; workday: boolean; screen_s: number | null }[];
   coverage: Coverage;
   rows: MetricRow[];
   tallies: {
@@ -323,6 +326,8 @@ export interface MonthDay {
   movement: DayMark;
   breaks: DayMark;
   water: DayMark;
+  /** Screen time on this PC (DEC13); null is no data. */
+  screen_s: number | null;
 }
 
 export interface MonthReview {

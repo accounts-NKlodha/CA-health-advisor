@@ -73,6 +73,8 @@ pub struct ActivityDay {
     pub focus_sessions: u32,
     /// Pomodoro work intervals completed.
     pub pomodoro_rounds: u32,
+    /// Screen time: at the PC at any hour (DEC13). `None` for rows from before v7.
+    pub screen_s: Option<u64>,
     /// Revision of the row.
     pub revision: u64,
 }
@@ -184,15 +186,15 @@ impl Store {
             tx.execute(
                 "INSERT INTO activity_day (local_date, pc_active_s, work_active_s, work_quiet_s,
                     unknown_s, away_s, confirmed_breaks, longest_block_s, focus_sessions,
-                    pomodoro_rounds, revision, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, ?11)
+                    pomodoro_rounds, screen_s, revision, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?12, 1, ?11)
                  ON CONFLICT (local_date) DO UPDATE SET
                     pc_active_s = excluded.pc_active_s, work_active_s = excluded.work_active_s,
                     work_quiet_s = excluded.work_quiet_s, unknown_s = excluded.unknown_s,
                     away_s = excluded.away_s, confirmed_breaks = excluded.confirmed_breaks,
                     longest_block_s = excluded.longest_block_s,
                     focus_sessions = excluded.focus_sessions,
-                    pomodoro_rounds = excluded.pomodoro_rounds,
+                    pomodoro_rounds = excluded.pomodoro_rounds, screen_s = excluded.screen_s,
                     revision = activity_day.revision + 1, updated_at = excluded.updated_at",
                 params![
                     date_text(*date),
@@ -206,6 +208,7 @@ impl Store {
                     t.focus_sessions,
                     t.pomodoro_rounds,
                     to_ms(now),
+                    secs(t.screen_ms),
                 ],
             )?;
         }
@@ -222,7 +225,8 @@ impl Store {
             .conn
             .query_row(
                 "SELECT pc_active_s, work_active_s, work_quiet_s, unknown_s, away_s,
-                    confirmed_breaks, longest_block_s, focus_sessions, pomodoro_rounds, revision
+                    confirmed_breaks, longest_block_s, focus_sessions, pomodoro_rounds, revision,
+                    screen_s
                  FROM activity_day WHERE local_date = ?1",
                 [date_text(date)],
                 |r| {
@@ -238,6 +242,7 @@ impl Store {
                         focus_sessions: r.get(7)?,
                         pomodoro_rounds: r.get(8)?,
                         revision: unsigned(r.get(9)?),
+                        screen_s: r.get::<_, Option<i64>>(10)?.map(unsigned),
                     })
                 },
             )
