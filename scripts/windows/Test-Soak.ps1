@@ -177,19 +177,67 @@ function Test-Cpu([double[]]$Seconds, [double[]]$Cpu, [double]$AvgLimit, [double
   }
 }
 
-# Memory budget (DEC14): the app's own memory, the private working set summed over the
-# process tree, at most the limit at the median and at the highest sample. The whole-tree
-# working set also counts pages shared with other programs (WebView2 and system DLLs,
-# which Windows trims and re-adds at will), so it is reported for information only.
-function Test-MemoryBudget([double[]]$PrivateWs, [double[]]$TotalWs, [double]$LimitMB) {
-  $total = if ($TotalWs.Count) { '; whole-tree working set (shared pages included, for information) median {0:N1} MB, highest {1:N1} MB' -f (Get-Median $TotalWs), (($TotalWs | Measure-Object -Maximum).Maximum) } else { '' }
-  if (-not $PrivateWs.Count) { return [pscustomobject]@{ Pass = $false; Detail = "private working set unavailable (no sample could read it)$total" } }
-  $med = Get-Median $PrivateWs
-  $max = ($PrivateWs | Measure-Object -Maximum).Maximum
-  return [pscustomobject]@{
-    Pass = ($med -le $LimitMB -and $max -le $LimitMB)
-    Detail = ('private working set median {0:N1} MB, highest {1:N1} MB (limit {2} MB for both){3}' -f $med, $max, $LimitMB, $total)
+# The app's own memory in one sample (DEC14): the private working set summed over the
+# process tree, only when EVERY process of the tree has a reading. A process missing from
+# the counters (a WebView2 child, or one that exited meanwhile) would lower the sum
+# unseen, so such a sample has no private value and counts the processes missed.
+function Get-PrivateWsSum([int[]]$Ids, $Rows) {
+  $read = @{}
+  foreach ($r in @($Rows)) {
+    if ($null -eq $r) { continue }
+    $id = [int]$r.IDProcess
+    if ($Ids -contains $id) { $read[$id] = [double]$r.WorkingSetPrivate }
   }
+  $missing = @($Ids | Where-Object { -not $read.ContainsKey($_) }).Count
+  $mb = $null
+  if ($Ids.Count -gt 0 -and $missing -eq 0) { $mb = [Math]::Round((($read.Values | Measure-Object -Sum).Sum) / 1MB, 1) }
+  return [pscustomobject]@{ Mb = $mb; Missing = $missing }
+}
+
+# Coverage of the private readings over the samples the budget is judged on, in time
+# order (a missing reading is $null): at least 80% of the samples, and never more than 2
+# in a row without one (three intervals is where the sampler counts a gap), so a high
+# stretch cannot hide in a hole of the readings while low samples elsewhere pass.
+function Get-PrivateCoverage([object[]]$Values) {
+  $have = 0; $run = 0; $longest = 0
+  foreach ($v in $Values) {
+    if ($null -ne $v) { $have++; $run = 0 } else { $run++; if ($run -gt $longest) { $longest = $run } }
+  }
+  $n = $Values.Count
+  $share = if ($n -gt 0) { $have / $n } else { 0 }
+  return [pscustomobject]@{
+    Have = $have; Total = $n; Share = $share; LongestMissing = $longest
+    Ok = ($n -gt 0 -and $share -ge 0.8 -and $longest -le 2)
+    Detail = ('complete private readings in {0} of {1} samples ({2:N0}%, at least 80%), at most {3} in a row without one (at most 2)' -f $have, $n, (100 * $share), $longest)
+  }
+}
+
+# Memory budget (DEC14): the app's own memory, the private working set summed over the
+# process tree, at most the limit at the median and at the highest sample, with complete
+# readings covering the samples (Get-PrivateCoverage; this script has no INCONCLUSIVE, so
+# short coverage fails). The whole-tree working set also counts pages shared with other
+# programs (WebView2 and system DLLs, which Windows trims and re-adds at will), so it is
+# reported for information only. $PrivateWs: one value per sample in time order, $null
+# where the sample has no complete reading.
+function Test-MemoryBudget([object[]]$PrivateWs, [double[]]$TotalWs, [double]$LimitMB) {
+  $total = if ($TotalWs.Count) { '; whole-tree working set (shared pages included, for information) median {0:N1} MB, highest {1:N1} MB' -f (Get-Median $TotalWs), (($TotalWs | Measure-Object -Maximum).Maximum) } else { '' }
+  $cov = Get-PrivateCoverage $PrivateWs
+  $vals = [double[]]@($PrivateWs | Where-Object { $null -ne $_ })
+  if (-not $vals.Count) { return [pscustomobject]@{ Pass = $false; Detail = "private working set unavailable (no sample had a complete reading)$total" } }
+  $med = Get-Median $vals
+  $max = ($vals | Measure-Object -Maximum).Maximum
+  return [pscustomobject]@{
+    Pass = ($cov.Ok -and $med -le $LimitMB -and $max -le $LimitMB)
+    Detail = ('private working set median {0:N1} MB, highest {1:N1} MB (limit {2} MB for both); {3}{4}{5}' -f $med, $max, $LimitMB, $cov.Detail, $(if ($cov.Ok) { '' } else { ' - not enough to prove the budget' }), $total)
+  }
+}
+
+# The private value of each sample, in order, $null where it has none.
+function Get-PrivateValues($Samples) {
+  $list = New-Object System.Collections.Generic.List[object]
+  # Copied one by one (@() on a generic list of ordered dictionaries can fail).
+  foreach ($x in $Samples) { if ($x.Contains('private_ws_mb')) { $list.Add($x['private_ws_mb']) } else { $list.Add($null) } }
+  return ,($list.ToArray())
 }
 
 # --------------------------------------------------------------------- sampling
@@ -214,10 +262,10 @@ function Get-ProcessSample([int[]]$Roots, [datetime]$Start) {
   $now = Get-Date
   $tree = Get-Tree $Roots
   $ids = @($tree | ForEach-Object { [int]$_.ProcessId })
-  $privWs = $null
+  $privWs = $null; $privMissing = $null
   try {
-    $perf = @(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -Property IDProcess, WorkingSetPrivate | Where-Object { $ids -contains [int]$_.IDProcess })
-    if ($perf.Count) { $privWs = [Math]::Round((($perf | Measure-Object WorkingSetPrivate -Sum).Sum) / 1MB, 1) }
+    $pr = Get-PrivateWsSum $ids @(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -Property IDProcess, WorkingSetPrivate)
+    $privWs = $pr.Mb; $privMissing = $pr.Missing
   }
   catch { }
   $cpuNow = @{}
@@ -243,6 +291,7 @@ function Get-ProcessSample([int[]]$Roots, [datetime]$Start) {
     processes = $tree.Count
     working_set_mb = [Math]::Round((($tree | Measure-Object WorkingSetSize -Sum).Sum) / 1MB, 1)
     private_ws_mb = $privWs
+    private_ws_missing = $privMissing
     private_bytes_mb = [Math]::Round((($tree | Measure-Object PrivatePageCount -Sum).Sum) / 1MB, 1)
     handles = [int](($tree | Measure-Object HandleCount -Sum).Sum)
     threads = [int](($tree | Measure-Object ThreadCount -Sum).Sum)
@@ -379,7 +428,28 @@ function Invoke-SelfTest {
   Expect 'a private working set median over 150 MB fails' (Test-MemoryBudget $privHigh $treeHigh 150).Pass $false
   $privPeak = [double[]](0..95 | ForEach-Object { if ($_ -eq 40) { 180 } else { 70 } })
   Expect 'one private working set sample over 150 MB fails' (Test-MemoryBudget $privPeak $treeHigh 150).Pass $false
-  Expect 'no private working set samples fail' (Test-MemoryBudget ([double[]]@()) $treeHigh 150).Pass $false
+  Expect 'no private working set samples fail' (Test-MemoryBudget ([object[]]@()) $treeHigh 150).Pass $false
+  # Coverage: sparse readings, or a hole in them where memory may have been high, never pass.
+  $sparse = New-Object 'object[]' 96
+  for ($i = 0; $i -lt 96; $i++) { if ($i % 3 -eq 0) { $sparse[$i] = 70.0 } }
+  Expect 'sparse private readings (a third of the samples) fail' (Test-MemoryBudget $sparse $treeHigh 150).Pass $false
+  $hole = New-Object 'object[]' 96
+  for ($i = 0; $i -lt 96; $i++) { if ($i -lt 40 -or $i -ge 50) { $hole[$i] = 70.0 } }
+  $treeHole = [double[]](0..95 | ForEach-Object { if ($_ -ge 40 -and $_ -lt 50) { 480 } else { 120 } })
+  Expect 'a high stretch with no private readings fails though the low samples around it pass' (Test-MemoryBudget $hole $treeHole 150).Pass $false
+  $blipMiss = New-Object 'object[]' 96
+  for ($i = 0; $i -lt 96; $i++) { if ($i -ne 40) { $blipMiss[$i] = 70.0 } }
+  Expect 'one sample without a reading is tolerated' (Test-MemoryBudget $blipMiss $treeHigh 150).Pass $true
+  # A sample counts only when every process of the tree has a reading.
+  $rows = @([pscustomobject]@{ IDProcess = 10; WorkingSetPrivate = 50MB }, [pscustomobject]@{ IDProcess = 11; WorkingSetPrivate = 20MB }, [pscustomobject]@{ IDProcess = 99; WorkingSetPrivate = 500MB })
+  $part = Get-PrivateWsSum @(10, 11, 12) $rows
+  Expect 'a tree process missing from the counters leaves the sample without a private value' ($null -eq $part.Mb -and $part.Missing -eq 1) $true
+  $full = Get-PrivateWsSum @(10, 11) $rows
+  Expect 'a complete reading sums the tree only' ($full.Mb -eq 70 -and $full.Missing -eq 0) $true
+  $ordered = New-Object System.Collections.Generic.List[object]
+  $ordered.Add([ordered]@{ private_ws_mb = 60.0 }); $ordered.Add([ordered]@{ private_ws_mb = $null }); $ordered.Add([ordered]@{ working_set_mb = 1.0 })
+  $pv = Get-PrivateValues $ordered
+  Expect 'samples keep their place when they have no private value' ($pv.Count -eq 3 -and $pv[0] -eq 60 -and $null -eq $pv[1] -and $null -eq $pv[2]) $true
   # The samples as the sampling loops collect them: ordered dictionaries in a generic list.
   $list = New-Object System.Collections.Generic.List[object]
   foreach ($i in 0..11) { $list.Add([ordered]@{ t_s = 10.0 * $i; roots_alive = ($i -lt 10); locked = $false; working_set_mb = 100.0; private_bytes_mb = 80.0; handles = 500; threads = 30 }) }
@@ -441,8 +511,7 @@ if ($CiSelfTest) {
   else { Add-Check 'the app ran its soak phase' $false 'no soak summary in the app report' }
   $w = Test-Samples $window 0.2 0
   $ws = [double[]]@($w | ForEach-Object { $_.working_set_mb })
-  $pws = [double[]]@($w | Where-Object { $null -ne $_.private_ws_mb } | ForEach-Object { $_.private_ws_mb })
-  $mem = Test-MemoryBudget $pws $ws $Budget.WorkingSetMB
+  $mem = Test-MemoryBudget (Get-PrivateValues $w) $ws $Budget.WorkingSetMB
   Add-Check 'memory budget: app''s own memory (informational on a CI runner)' $mem.Pass ('{0} (PRD budget {1} MB idle; the soak is not idle and a runner is not an office PC)' -f $mem.Detail, $Budget.WorkingSetMB) $false
   $ok = Save-Report @{ samples = $samples; app = $app }
   Remove-Item $selfReport -ErrorAction SilentlyContinue
@@ -551,8 +620,7 @@ if ($Role -eq 'Companion') {
   if ($final) { $statsLog.Add([ordered]@{ t_s = $samples[$samples.Count - 1].t_s; stats = $final }) }
   $w = Test-Samples $samples 0.1 $Hours
   $ws = [double[]]@($w | ForEach-Object { $_.working_set_mb })
-  $pws = [double[]]@($w | Where-Object { $null -ne $_.private_ws_mb } | ForEach-Object { $_.private_ws_mb })
-  $mem = Test-MemoryBudget $pws $ws $Budget.WorkingSetMB
+  $mem = Test-MemoryBudget (Get-PrivateValues $w) $ws $Budget.WorkingSetMB
   Add-Check "PRD budget: app's own memory (private working set) at most $($Budget.WorkingSetMB) MB" $mem.Pass $mem.Detail
   $cpuS = @($w | Where-Object { $null -ne $_.cpu_pct })
   $cpu = Test-Cpu ([double[]]@($cpuS | ForEach-Object { $_.t_s })) ([double[]]@($cpuS | ForEach-Object { $_.cpu_pct })) $Budget.CpuAvgPct $Budget.CpuSpikePct $Budget.SpikeSamples

@@ -234,6 +234,41 @@ function ConvertFrom-CameraLog([object[]]$Raw, [datetime]$Origin) {
   return [pscustomobject]@{ Lines = @($out | Sort-Object t); Bad = $bad }
 }
 
+# The app's own memory in one sample (DEC14): the private working set summed over the
+# process tree, only when EVERY process of the tree has a reading. A process missing from
+# the counters (a WebView2 child, or one that exited meanwhile) would lower the sum
+# unseen, so such a sample has no private value and counts the processes missed.
+function Get-PrivateWsSum([int[]]$Ids, $Rows) {
+  $read = @{}
+  foreach ($r in @($Rows)) {
+    if ($null -eq $r) { continue }
+    $id = [int]$r.IDProcess
+    if ($Ids -contains $id) { $read[$id] = [double]$r.WorkingSetPrivate }
+  }
+  $missing = @($Ids | Where-Object { -not $read.ContainsKey($_) }).Count
+  $mb = $null
+  if ($Ids.Count -gt 0 -and $missing -eq 0) { $mb = [Math]::Round((($read.Values | Measure-Object -Sum).Sum) / 1MB, 1) }
+  return [pscustomobject]@{ Mb = $mb; Missing = $missing }
+}
+
+# Coverage of the private readings over the samples the budget is judged on, in time
+# order (a missing reading is $null): at least 80% of the samples, and never more than 2
+# in a row without one (three intervals is where the sampler counts a gap), so a high
+# stretch cannot hide in a hole of the readings while low samples elsewhere pass.
+function Get-PrivateCoverage([object[]]$Values) {
+  $have = 0; $run = 0; $longest = 0
+  foreach ($v in $Values) {
+    if ($null -ne $v) { $have++; $run = 0 } else { $run++; if ($run -gt $longest) { $longest = $run } }
+  }
+  $n = $Values.Count
+  $share = if ($n -gt 0) { $have / $n } else { 0 }
+  return [pscustomobject]@{
+    Have = $have; Total = $n; Share = $share; LongestMissing = $longest
+    Ok = ($n -gt 0 -and $share -ge 0.8 -and $longest -le 2)
+    Detail = ('complete private readings in {0} of {1} samples ({2:N0}%, at least 80%), at most {3} in a row without one (at most 2)' -f $have, $n, (100 * $share), $longest)
+  }
+}
+
 function New-Check([string]$Name, [string]$Verdict, [string]$Detail, [bool]$Required = $true) {
   return [pscustomobject]@{ Name = $Name; Verdict = $Verdict; Required = $Required; Detail = $Detail }
 }
@@ -410,16 +445,22 @@ function Invoke-CameraAnalysis($Lines, $Samples, [hashtable]$Opt) {
     # counts (the median is reported). DEC14: it is the app's own memory, the private
     # working set over the tree; the whole-tree working set also counts pages shared with
     # other programs, which Windows trims and re-adds at will, so it is information only.
-    $pws = [double[]]@($cap | ForEach-Object { Get-Field $_ 'private_ws_mb' } | Where-Object { $null -ne $_ })
+    # Every sample while capturing, in time order, keeps its place ($null without a complete
+    # reading): a reading over the cap fails; otherwise the readings must cover the samples
+    # (Get-PrivateCoverage), or the budget is not proven.
+    $pwsAll = New-Object System.Collections.Generic.List[object]
+    foreach ($x in @($cap | Sort-Object { [double](Get-Field $_ 't') })) { $pwsAll.Add((Get-Field $x 'private_ws_mb')) }
+    $cov = Get-PrivateCoverage $pwsAll.ToArray()
+    $pws = [double[]]@($pwsAll | Where-Object { $null -ne $_ })
     $note = $(if (-not $req) { '; informational: a runner is not an office PC' } else { '' })
     $treeInfo = '; whole-tree working set (shared pages included, for information) highest {0:N1} MB, median {1:N1} MB' -f $wsMax, $wsMed
-    if ($pws.Count -lt 3) {
-      $checks.Add((New-Check 'PRD budget: memory while capturing' $(if ($req) { 'INCONCLUSIVE' } else { 'INFO' }) ('private working set read in {0} of {1} samples while capturing{2}{3}' -f $pws.Count, $cap.Count, $treeInfo, $note) $req))
+    if ($pws.Count -eq 0) {
+      $checks.Add((New-Check 'PRD budget: memory while capturing' $(if ($req) { 'INCONCLUSIVE' } else { 'INFO' }) ('no complete private working set reading while capturing; {0}{1}{2}' -f $cov.Detail, $treeInfo, $note) $req))
     }
     else {
       $pwsMed = Get-Median $pws; $pwsMax = ($pws | Measure-Object -Maximum).Maximum
-      $mv = if ($pwsMax -gt $Budget.MemoryMB) { if ($req) { 'FAIL' } else { 'INFO' } } elseif ($req) { Get-Covered 'PASS' } else { 'INFO' }
-      $checks.Add((New-Check 'PRD budget: memory while capturing' $mv ('app''s own memory (private working set over the process tree) highest {1:N1} MB (cap {2} MB, companion and inference together), median {0:N1} MB{3}{4}' -f $pwsMed, $pwsMax, $Budget.MemoryMB, $treeInfo, $note) $req))
+      $mv = if ($pwsMax -gt $Budget.MemoryMB) { if ($req) { 'FAIL' } else { 'INFO' } } elseif (-not $req) { 'INFO' } elseif (-not $cov.Ok) { 'INCONCLUSIVE' } else { Get-Covered 'PASS' }
+      $checks.Add((New-Check 'PRD budget: memory while capturing' $mv ('app''s own memory (private working set over the process tree) highest {1:N1} MB (cap {2} MB, companion and inference together), median {0:N1} MB; {3}{4}{5}' -f $pwsMed, $pwsMax, $Budget.MemoryMB, $cov.Detail, $treeInfo, $note) $req))
       $facts['private_ws_median_mb'] = [Math]::Round($pwsMed, 1)
       $facts['private_ws_max_mb'] = [Math]::Round($pwsMax, 1)
     }
@@ -509,10 +550,10 @@ function Get-ProcessSample([int]$Root, [datetime]$Origin) {
   $tree = Get-Tree @($Root)
   $ids = @($tree | ForEach-Object { [int]$_.ProcessId })
   # The app's own memory (DEC14): private working set summed over the tree.
-  $privWs = $null
+  $privWs = $null; $privMissing = $null
   try {
-    $perf = @(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -Property IDProcess, WorkingSetPrivate | Where-Object { $ids -contains [int]$_.IDProcess })
-    if ($perf.Count) { $privWs = [Math]::Round((($perf | Measure-Object WorkingSetPrivate -Sum).Sum) / 1MB, 1) }
+    $pr = Get-PrivateWsSum $ids @(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -Property IDProcess, WorkingSetPrivate)
+    $privWs = $pr.Mb; $privMissing = $pr.Missing
   }
   catch { }
   $cpuNow = @{}
@@ -540,6 +581,7 @@ function Get-ProcessSample([int]$Root, [datetime]$Origin) {
     processes = $tree.Count
     working_set_mb = [Math]::Round((($tree | Measure-Object WorkingSetSize -Sum).Sum) / 1MB, 1)
     private_ws_mb = $privWs
+    private_ws_missing = $privMissing
     private_bytes_mb = [Math]::Round((($tree | Measure-Object PrivatePageCount -Sum).Sum) / 1MB, 1)
     handles = [int](($tree | Measure-Object HandleCount -Sum).Sum)
     threads = [int](($tree | Measure-Object ThreadCount -Sum).Sum)
@@ -700,6 +742,9 @@ function New-SynthSamples([double]$Seconds, [hashtable]$Change = @{}) {
     if ($Change["TreeHigh"]) { $ws += 150 }
     if ($Change["PrivateSpike"] -and $t -eq 3000) { $pws = 380 }
     if ($Change["NoPrivate"]) { $pws = $null }
+    if ($Change["PrivateSparse"] -and ($t % 180) -ne 0) { $pws = $null }
+    if ($Change["PrivateHole"] -and $t -ge 3000 -and $t -le 3600) { $ws = 480; $pws = $null }
+    if ($Change["PrivateBlip"] -and $t -eq 3000) { $pws = $null }
     if ($Change["Gap"] -and $t -gt 900 -and $t -lt 8400) { continue }
     if ($Change["Sparse"] -and ($t % 600) -ne 0) { continue }
     $s.Add([ordered]@{
@@ -791,6 +836,18 @@ function Invoke-SelfTest {
   Expect 'one private working set sample over 350 MB fails the cap though the median is far below' (Verdict-Of $r 'PRD budget: memory while capturing') 'FAIL'
   $r = Run @{} @{ NoPrivate = $true }
   Expect 'samples without the private working set do not prove the memory budget' (Verdict-Of $r 'PRD budget: memory while capturing') 'INCONCLUSIVE'
+  $r = Run @{} @{ PrivateSparse = $true }
+  Expect 'private readings in a third of the samples do not prove the memory budget' (Verdict-Of $r 'PRD budget: memory while capturing') 'INCONCLUSIVE'
+  $r = Run @{} @{ PrivateHole = $true }
+  Expect 'a high stretch with no private readings is not proven though the low samples around it pass' (Verdict-Of $r 'PRD budget: memory while capturing') 'INCONCLUSIVE'
+  Expect '... and the run is never PASS' ((Get-OverallVerdict $r.Checks) -ne 'PASS') $true
+  $r = Run @{} @{ PrivateBlip = $true }
+  Expect 'one sample without a private reading is tolerated' (Verdict-Of $r 'PRD budget: memory while capturing') 'PASS'
+  $rows = @([pscustomobject]@{ IDProcess = 10; WorkingSetPrivate = 50MB }, [pscustomobject]@{ IDProcess = 11; WorkingSetPrivate = 20MB }, [pscustomobject]@{ IDProcess = 99; WorkingSetPrivate = 500MB })
+  $part = Get-PrivateWsSum @(10, 11, 12) $rows
+  Expect 'a tree process missing from the counters leaves the sample without a private value' ($null -eq $part.Mb -and $part.Missing -eq 1) $true
+  $full = Get-PrivateWsSum @(10, 11) $rows
+  Expect 'a complete reading sums the tree only' ($full.Mb -eq 70 -and $full.Missing -eq 0) $true
   $empty = Invoke-CameraAnalysis @() @() $opt
   Expect 'no log and no samples is never PASS' (Get-OverallVerdict $empty.Checks) 'INCONCLUSIVE'
   $old = ConvertFrom-CameraLog @(New-SynthRun $origin @{} | ForEach-Object { $_.PSObject.Properties.Remove('stops'); $_ | ConvertTo-Json -Compress }) $origin
