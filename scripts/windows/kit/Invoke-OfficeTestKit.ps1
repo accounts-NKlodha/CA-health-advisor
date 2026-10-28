@@ -104,6 +104,17 @@ $script:IsWin = ($PSVersionTable.PSVersion.Major -le 5) -or [bool]$IsWindows
 
 # ====================================================================== small helpers
 
+# The running server keeps server.log open for writing, and [IO.File]::ReadLines asks
+# for read-only sharing, which Windows refuses while a writer holds the file. Open it
+# the way a log viewer does: read access, sharing read, write and delete.
+function Read-SharedLines([string]$Path) {
+  $fs = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete')
+  try {
+    $sr = [IO.StreamReader]::new($fs)
+    while ($null -ne ($line = $sr.ReadLine())) { $line }
+  } finally { $fs.Dispose() }
+}
+
 function Get-NowText { (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') }
 
 function Write-Log([string]$Text, [string]$Color = 'Gray') {
@@ -920,7 +931,7 @@ function Invoke-AdminOp([string]$Op, [hashtable]$P) {
       $logs = Join-Path $env:ProgramData 'HealthierYou\Server\logs'
       $pairOk = 0; $confirmedOk = 0; $devices = @{}; $errors = 0
       foreach ($f in @(Get-ChildItem -LiteralPath $logs -File -Filter 'server.log*' -ErrorAction SilentlyContinue)) {
-        foreach ($line in [IO.File]::ReadLines($f.FullName)) {
+        foreach ($line in (Read-SharedLines $f.FullName)) {
           try { $o = $line | ConvertFrom-Json } catch { continue }
           if (-not $o.timestamp -or [datetime]::Parse($o.timestamp).ToUniversalTime() -lt $since) { continue }
           if ($o.fields.event -ne 'request') { continue }
@@ -1391,7 +1402,7 @@ function Invoke-CheckStep([hashtable]$Ctx) {
     $notes += $h.detail
     $verdicts += $(if ($h.ok -eq $true) { 'PASS' } elseif ($h.ok -eq $false) { 'FAIL' } else { 'INCONCLUSIVE' })
   }
-  if ($script:RetestName) { foreach ($k in $need) { if (-not (Get-KitBuildHash $k)) { $notes += "kit-manifest.json records no SHA-256 for the $k program, so an installed one cannot be compared (it is replaced)" } } }
+  if ($script:RetestName) { foreach ($k in $need) { if (-not (Get-KitBuildHash $k)) { $notes += "kit-manifest.json records no SHA-256 for the $k program, so the retest stops before replacing an installed one (it refuses to uninstall without the hash)" } } }
   if ($script:RoleName -eq 'Camera' -and -not $e.pktmon) { $notes += 'pktmon is missing (Windows 10 2004 or later is needed for the capture)' }
   Show-Banner 'This PC' @("Windows: $($e.windows) build $($e.build)", "Memory: $($e.ram_gb) GB; webcams found: $($e.webcams); laptop: $($e.laptop)", "Rows chosen: $((@($rows.capture) + @($rows.camera_row) + @($rows.soak) | Where-Object { $_ }) -join ', ')") 'Cyan'
   return New-Result (Join-Verdicts $verdicts) ($notes -join '; ')
@@ -2035,6 +2046,18 @@ function Invoke-SelfTest {
   $script:Unattended = $true
   $script:Sim = @{ windows = 'Windows 11 Pro'; build = 22631; windows11 = $true; ram_gb = 8; cores = 4; laptop = $true; webcams = 1; pktmon = $true; elevated = $false; admin_member = $false; powershell = 'test' }
   try {
+    # --- the server log is read while the running server holds it open for writing
+    $logFile = Join-Path $tmp 'server.log'
+    $writer = [IO.FileStream]::new($logFile, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]'ReadWrite, Delete')
+    try {
+      $bytes = [Text.Encoding]::UTF8.GetBytes("one`ntwo`n"); $writer.Write($bytes, 0, $bytes.Length); $writer.Flush()
+      if ($env:OS -eq 'Windows_NT') {
+        $refused = $false; try { $null = @([IO.File]::ReadLines($logFile)) } catch { $refused = $true }
+        Check 'Windows refuses a plain read of a log a writer holds (the field failure)' $refused
+      }
+      $got = @(Read-SharedLines $logFile)
+      Check 'the server log is read while a writer holds it' ($got.Count -eq 2 -and $got[1] -eq 'two')
+    } finally { $writer.Dispose() }
     # --- verdict rules
     $j = Join-Path $tmp 'v.json'
     Write-JsonFile $j @{ verdict = 'PASS' }
