@@ -716,7 +716,7 @@ fn routine_ticks_are_saved_at_most_once_a_minute() {
 
 #[test]
 fn logging_water_from_a_reminder_is_stored_with_the_answer() {
-    let env = Env::new(ist(20, 11, 15));
+    let env = Env::new(ist(20, 9, 30));
     let store = env.store();
     store
         .set_goal(GoalKind::WaterDailyMl, 2000, date(20))
@@ -724,8 +724,10 @@ fn logging_water_from_a_reminder_is_stored_with_the_answer() {
     store
         .put_setting(CONFIG_KEY, &only(false, false, true))
         .unwrap();
-    let (mut c, first) = Coach::open(store).unwrap();
-    let (offer, activity) = first.view.reminder().unwrap();
+    let (mut c, _) = Coach::open(store).unwrap();
+    // Nothing logged: about 26 minutes at the PC puts the user 100 ml behind (DEC13).
+    work_until(&env, &mut c, mins(30), |v| v.reminder().is_some());
+    let (offer, activity) = c.view().reminder().unwrap();
     assert_eq!(activity, Activity::Water);
     let out = c
         .handle(Input::Respond {
@@ -747,6 +749,34 @@ fn logging_water_from_a_reminder_is_stored_with_the_answer() {
         .unwrap();
     let out = c.handle(Input::Refresh).unwrap();
     assert_eq!(out.view.water.unwrap().logged_ml, 750);
+}
+
+#[test]
+fn time_at_the_pc_survives_a_restart_the_same_day() {
+    let env = Env::new(ist(20, 9, 30));
+    let store = env.store();
+    store
+        .set_goal(GoalKind::WaterDailyMl, 2000, date(20))
+        .unwrap();
+    store
+        .put_setting(CONFIG_KEY, &only(false, false, false))
+        .unwrap();
+    let (mut c, _) = Coach::open(store).unwrap();
+    work(&env, &mut c, mins(105));
+    assert_eq!(c.view().water.unwrap().expected_ml, 390);
+    c.close().unwrap();
+    // Closed for an hour: that hour adds nothing; the 105 minutes before it are kept.
+    env.clock.advance(chrono::Duration::minutes(60));
+    let (c, first) = Coach::open(env.store()).unwrap();
+    assert_eq!(env.local(), NaiveTime::from_hms_opt(12, 15, 0).unwrap());
+    assert_eq!(first.view.water.unwrap().expected_ml, 390);
+    assert_eq!(first.view.screen_time, mins(105));
+    let t = c.engine().tally(date(20)).unwrap();
+    assert_eq!(t.window_screen_ms, 105 * 60_000);
+    // The day's screen time is stored with its tallies for the reviews.
+    let day = c.store().activity_day(date(20)).unwrap().unwrap();
+    assert_eq!(day.screen_s, Some(105 * 60));
+    assert_eq!(day.away_s, 3600);
 }
 
 #[test]
@@ -816,15 +846,18 @@ fn an_unreadable_saved_state_restarts_coaching_without_losing_history() {
 
 #[test]
 fn water_corrections_and_removals_move_the_total_and_pace_and_a_note_ends_on_restart() {
-    let env = Env::new(ist(20, 13, 0));
+    // At the PC from 09:30; the goal is set at 13:00, well behind its pace (DEC13).
+    let env = Env::new(ist(20, 9, 30));
     let store = env.store();
-    store
-        .set_goal(GoalKind::WaterDailyMl, 2000, date(20))
-        .unwrap();
     store
         .put_setting(CONFIG_KEY, &only(false, false, true))
         .unwrap();
     let (mut c, _) = Coach::open(store).unwrap();
+    work(&env, &mut c, mins(210));
+    c.store()
+        .set_goal(GoalKind::WaterDailyMl, 2000, date(20))
+        .unwrap();
+    c.handle(Input::Refresh).unwrap();
     assert!(c.view().water.unwrap().is_behind());
     // The shell records the entry, then tells the engine.
     let e = c

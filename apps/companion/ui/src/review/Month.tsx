@@ -2,10 +2,12 @@
 // one bar per month with its count and coverage, the user's first four weeks as a dashed
 // baseline, and the selected month day by day. A measured zero is an outline at 0%, a
 // month with no data a hatched full-height bar marked "no data", and the month in
-// progress a dashed outline. "Show as table" gives every figure as text.
+// progress a dashed outline. "Show as table" gives every figure as text. Each day also
+// shows its screen time (DEC13), apart from the measure.
 import type { BarKind, Metric, MonthBar, MonthReview, Ratio } from '../shared/types';
 import { Legend } from './Week';
 import { METRICS, dayMonth, info, monthName, monthShort, percent, symbol, weekdayIndex, words } from './marks';
+import { screenDay, screenShort } from '../shared/screenTime';
 
 const TOP = 26;
 const H = 160;
@@ -148,7 +150,7 @@ function Days({ m, metric }: { m: MonthReview; metric: Metric }) {
   return (
     <section aria-labelledby="days-h">
       <h3 id="days-h">
-        {monthName(m.month)}, day by day ({info(metric).monthly.toLowerCase()})
+        {monthName(m.month)}, day by day ({info(metric).monthly.toLowerCase()}, with screen time)
       </h3>
       <div class="days-head" aria-hidden="true">
         {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d) => (
@@ -160,15 +162,22 @@ function Days({ m, metric }: { m: MonthReview; metric: Metric }) {
           const mark = d[metric];
           const start = n === 0 ? ` start-${offset}` : '';
           return (
-            <li class={`day mk ${mark}${start}`} key={d.date} title={`${dayMonth(d.date)}: ${words(mark, metric)}`}>
+            <li
+              class={`day mk ${mark}${start}`}
+              key={d.date}
+              title={`${dayMonth(d.date)}: ${words(mark, metric)}; ${screenDay(d.screen_s)}`}
+            >
               <span class="dn" aria-hidden="true">
                 {Number(d.date.slice(8))}
               </span>
               <span class="sym" aria-hidden="true">
                 {symbol(mark)}
               </span>
+              <span class="scr" aria-hidden="true">
+                {screenShort(d.screen_s)}
+              </span>
               <span class="sr">
-                {dayMonth(d.date)}: {words(mark, metric)}
+                {dayMonth(d.date)}: {words(mark, metric)}; {screenDay(d.screen_s)}
               </span>
             </li>
           );

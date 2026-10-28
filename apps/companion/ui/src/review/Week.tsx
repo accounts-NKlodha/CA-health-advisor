@@ -1,5 +1,6 @@
 // The weekly review (wireframe W13, redesigned as a visual review): a hero band with the
-// week and its coverage, three rings (one segment per workday), a day strip, up to three
+// week and its coverage, three rings (one segment per workday), a day strip with each
+// day's screen time on its own row (DEC13), up to three
 // highlights, up to three suggestions for next week (Apply really changes the setting and
 // Undo restores the exact prior value), the phone self-reports with editable labels, and
 // "Show as table" for a
@@ -28,6 +29,7 @@ import {
   symbol,
   words,
 } from './marks';
+import { screenDay, screenShort, screenTotal, screenWords } from '../shared/screenTime';
 
 function point(cx: number, cy: number, r: number, deg: number): string {
   const a = (deg * Math.PI) / 180;
@@ -148,6 +150,15 @@ function Strip({ w }: { w: WeekReview }) {
             })}
           </tr>
         ))}
+        <tr class="screen">
+          <th scope="row">Screen</th>
+          {w.days.map((d) => (
+            <td key={d.date} title={`${dayName(d.date)}: ${screenDay(d.screen_s)}`}>
+              <span aria-hidden="true">{screenShort(d.screen_s)}</span>
+              <span class="sr">{screenDay(d.screen_s)}</span>
+            </td>
+          ))}
+        </tr>
       </tbody>
     </table>
   );
@@ -209,6 +220,13 @@ function Plain({ w }: { w: WeekReview }) {
               </tr>
             );
           })}
+          <tr>
+            <th scope="row">Screen time (estimate)</th>
+            {w.days.map((d) => (
+              <td key={d.date}>{d.screen_s === null ? 'No data' : screenWords(d.screen_s)}</td>
+            ))}
+            <td>{screenTotal(w.days)}</td>
+          </tr>
         </tbody>
       </table>
       <p class="note">
@@ -467,6 +485,11 @@ export function WeekView({
           <li>
             Water goal: days your own goal was reached, out of recorded days with a goal. Each day
             is judged against the goal you had then.
+          </li>
+          <li>
+            Screen time: the time you were at this PC each day, with the session unlocked, the PC
+            awake and the app running, at any hour. Locked, asleep, switched off or with the app
+            closed does not count. It is an estimate and is shown apart from the goals.
           </li>
           <li>
             Today counts once it is over, or as soon as it is done. Work blocks and focus counts

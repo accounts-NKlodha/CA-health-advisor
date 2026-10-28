@@ -97,6 +97,13 @@ pub const MIGRATIONS: &[Migration] = &[
         // earlier link, which this version binds to the link they were made under.
         compat: Compat::Contract,
     },
+    Migration {
+        version: 7,
+        name: "screen_time",
+        sql: include_str!("../migrations/0007_screen_time.sql"),
+        // Expand: one nullable column; a v6 build reads and writes its rows as before.
+        compat: Compat::Expand,
+    },
 ];
 
 /// The schema version this build writes.
@@ -429,10 +436,35 @@ mod tests {
     }
 
     #[test]
+    fn a_v6_build_opens_a_v7_store_and_writes_its_tallies() {
+        // v7 only adds the nullable screen time column (DEC13).
+        assert_eq!(MIGRATIONS[6].compat, Compat::Expand);
+        let mut conn = mem();
+        migrate(&mut conn).unwrap();
+        migrate_with(&mut conn, &MIGRATIONS[..6], MigrateOptions::default()).unwrap();
+        conn.execute(
+            "INSERT INTO activity_day (local_date, pc_active_s, work_active_s, work_quiet_s,
+                unknown_s, away_s, confirmed_breaks, longest_block_s, focus_sessions,
+                pomodoro_rounds, revision, updated_at)
+             VALUES ('2026-10-20', 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0)",
+            [],
+        )
+        .unwrap();
+        let screen: Option<i64> = conn
+            .query_row("SELECT screen_s FROM activity_day", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(screen, None);
+        assert!(
+            conn.execute("UPDATE activity_day SET screen_s = -1", [])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn a_v5_build_refuses_a_v6_store_instead_of_sending_another_links_operations() {
         assert_eq!(MIGRATIONS[5].compat, Compat::Contract);
         let mut conn = mem();
-        migrate(&mut conn).unwrap();
+        migrate_with(&mut conn, &MIGRATIONS[..6], MigrateOptions::default()).unwrap();
         let err = migrate_with(&mut conn, &MIGRATIONS[..5], MigrateOptions::default()).unwrap_err();
         assert!(
             matches!(
@@ -453,7 +485,7 @@ mod tests {
         // it (it would accept the data and then fail every queued sharing write).
         assert_eq!(MIGRATIONS[4].compat, Compat::Contract);
         let mut conn = mem();
-        migrate(&mut conn).unwrap();
+        migrate_with(&mut conn, &MIGRATIONS[..6], MigrateOptions::default()).unwrap();
         let err = migrate_with(&mut conn, &MIGRATIONS[..4], MigrateOptions::default()).unwrap_err();
         assert!(
             matches!(

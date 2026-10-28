@@ -399,6 +399,12 @@ body {
   margin: 0 0 4px;
 }
 
+/* Today's screen time under the greeting (DEC13). */
+.menu-screen {
+  margin: 0 0 4px;
+  font-size: calc(12px * var(--ts, 1));
+}
+
 /* Menu sections (owner review): a subtle divider and a small heading per group. */
 .menu-section {
   margin-top: 10px;

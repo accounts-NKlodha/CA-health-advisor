@@ -370,6 +370,11 @@ pub trait PetShell: Send + Sync {
     fn set_holds(&self, holds: HoldSources) {
         let _ = holds;
     }
+    /// Today's screen time changed, in whole minutes (DEC13): the pet menu and the
+    /// keyboard panel show it. Shells without a menu ignore it.
+    fn set_screen_time(&self, minutes: u32) {
+        let _ = minutes;
+    }
 }
 
 /// What is open beside the pet.
