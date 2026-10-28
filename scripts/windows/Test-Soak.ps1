@@ -102,6 +102,17 @@ $Trend = @{
 
 # ------------------------------------------------------------------- analysis
 
+# The running server keeps server.log open for writing, and [IO.File]::ReadLines asks
+# for read-only sharing, which Windows refuses while a writer holds the file. Open it
+# the way a log viewer does: read access, sharing read, write and delete.
+function Read-SharedLines([string]$Path) {
+  $fs = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]'ReadWrite, Delete')
+  try {
+    $sr = [IO.StreamReader]::new($fs)
+    while ($null -ne ($line = $sr.ReadLine())) { $line }
+  } finally { $fs.Dispose() }
+}
+
 function Get-Median([double[]]$v) {
   if (-not $v -or $v.Count -eq 0) { return [double]::NaN }
   $s = $v | Sort-Object
@@ -575,7 +586,7 @@ Add-Check 'backups kept within retention' ($last.backups -le 16) ("$($last.backu
 # statuses and latencies only, by design).
 $requests = 0; $server5xx = 0; $panics = 0; $lat = New-Object System.Collections.Generic.List[double]; $endpoints = @{}
 foreach ($f in @(Get-ChildItem -LiteralPath $logs -File -Filter 'server.log*' -ErrorAction SilentlyContinue)) {
-  foreach ($line in [IO.File]::ReadLines($f.FullName)) {
+  foreach ($line in (Read-SharedLines $f.FullName)) {
     try { $o = $line | ConvertFrom-Json } catch { continue }
     if (-not $o.timestamp -or [datetime]::Parse($o.timestamp).ToUniversalTime() -lt $start.ToUniversalTime()) { continue }
     $ev = $o.fields.event
