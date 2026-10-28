@@ -23,7 +23,8 @@
   on Windows 10 and on Windows 11 (-Webcam names which one; it is asked if missing).
 
   Every -SampleSeconds (30) it records, for the companion's whole process tree (the app
-  and its WebView2 processes): working set, private bytes, handles, threads, CPU as a
+  and its WebView2 processes): working set, private working set (the app's own memory),
+  private bytes, handles, threads, CPU as a
   share of the whole machine, whether the session was locked, and how many TCP
   connections the tree holds to loopback, to the LAN (the office server) and to any
   internet address (counts only, never an address). The camera log gives the status
@@ -47,8 +48,10 @@
       2 s, none forced; at least one release seen (else INCONCLUSIVE);
     - every hold (lock, sleep, meeting, presentation, off hours) closed the camera page;
       at least one hold seen (else INCONCLUSIVE);
-    - PRD budgets while capturing: process-tree working set at most 350 MB at every
-      sample (the highest counts; the median is reported) and CPU
+    - PRD budgets while capturing: the app's own memory (private working set, summed
+      over the process tree) at most 350 MB at every sample (the highest counts; the
+      median is reported; DEC14: the whole-tree working set, which counts shared pages,
+      is reported for information) and CPU
       at most 10% of the machine on average;
     - no growth trend in working set, private bytes, handles or threads while capturing
       (the last third against the first, and the fitted slope, as Test-Soak.ps1);
@@ -98,9 +101,9 @@ trap {
   break
 }
 
-# Budgets and bounds (PRD "Performance": V2 combined working set at most 350 MB during
-# check-ins, at most 10% CPU averaged during capture; architecture 4.5: off within 2 s,
-# 2 to 3 fps). Trend tolerances as Test-Soak.ps1.
+# Budgets and bounds (PRD "Performance": V2 combined memory at most 350 MB during
+# check-ins, counted as the app's own memory, the private working set, by DEC14; at most
+# 10% CPU averaged during capture; architecture 4.5: off within 2 s, 2 to 3 fps). Trend tolerances as Test-Soak.ps1.
 $Budget = @{
   MemoryMB       = 350
   CpuPct         = 10.0
@@ -403,10 +406,23 @@ function Invoke-CameraAnalysis($Lines, $Samples, [hashtable]$Opt) {
   else {
     $ws = [double[]]@($cap | ForEach-Object { $_.working_set_mb })
     $wsMed = Get-Median $ws; $wsMax = ($ws | Measure-Object -Maximum).Maximum
-    # The PRD cap: combined working set at most 350 MB during check-ins, so the highest
-    # sample counts (the median is reported).
-    $mv = if ($wsMax -gt $Budget.MemoryMB) { if ($req) { 'FAIL' } else { 'INFO' } } elseif ($req) { Get-Covered 'PASS' } else { 'INFO' }
-    $checks.Add((New-Check 'PRD budget: memory while capturing' $mv ('process tree working set highest {1:N1} MB (cap {2} MB, companion and inference together), median {0:N1} MB{3}' -f $wsMed, $wsMax, $Budget.MemoryMB, $(if (-not $req) { '; informational: a runner is not an office PC' })) $req))
+    # The PRD cap: combined memory at most 350 MB during check-ins, so the highest sample
+    # counts (the median is reported). DEC14: it is the app's own memory, the private
+    # working set over the tree; the whole-tree working set also counts pages shared with
+    # other programs, which Windows trims and re-adds at will, so it is information only.
+    $pws = [double[]]@($cap | ForEach-Object { Get-Field $_ 'private_ws_mb' } | Where-Object { $null -ne $_ })
+    $note = $(if (-not $req) { '; informational: a runner is not an office PC' } else { '' })
+    $treeInfo = '; whole-tree working set (shared pages included, for information) highest {0:N1} MB, median {1:N1} MB' -f $wsMax, $wsMed
+    if ($pws.Count -lt 3) {
+      $checks.Add((New-Check 'PRD budget: memory while capturing' $(if ($req) { 'INCONCLUSIVE' } else { 'INFO' }) ('private working set read in {0} of {1} samples while capturing{2}{3}' -f $pws.Count, $cap.Count, $treeInfo, $note) $req))
+    }
+    else {
+      $pwsMed = Get-Median $pws; $pwsMax = ($pws | Measure-Object -Maximum).Maximum
+      $mv = if ($pwsMax -gt $Budget.MemoryMB) { if ($req) { 'FAIL' } else { 'INFO' } } elseif ($req) { Get-Covered 'PASS' } else { 'INFO' }
+      $checks.Add((New-Check 'PRD budget: memory while capturing' $mv ('app''s own memory (private working set over the process tree) highest {1:N1} MB (cap {2} MB, companion and inference together), median {0:N1} MB{3}{4}' -f $pwsMed, $pwsMax, $Budget.MemoryMB, $treeInfo, $note) $req))
+      $facts['private_ws_median_mb'] = [Math]::Round($pwsMed, 1)
+      $facts['private_ws_max_mb'] = [Math]::Round($pwsMax, 1)
+    }
     $cpuS = [double[]]@($cap | Where-Object { $null -ne $_.cpu_pct } | ForEach-Object { $_.cpu_pct })
     if ($cpuS.Count -lt 3) { $checks.Add((New-Check 'PRD budget: CPU while capturing' $(if ($req) { 'INCONCLUSIVE' } else { 'INFO' }) 'no CPU samples' $req)) }
     else {
@@ -492,6 +508,13 @@ function Get-ProcessSample([int]$Root, [datetime]$Origin) {
   $now = Get-Date
   $tree = Get-Tree @($Root)
   $ids = @($tree | ForEach-Object { [int]$_.ProcessId })
+  # The app's own memory (DEC14): private working set summed over the tree.
+  $privWs = $null
+  try {
+    $perf = @(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -Property IDProcess, WorkingSetPrivate | Where-Object { $ids -contains [int]$_.IDProcess })
+    if ($perf.Count) { $privWs = [Math]::Round((($perf | Measure-Object WorkingSetPrivate -Sum).Sum) / 1MB, 1) }
+  }
+  catch { }
   $cpuNow = @{}
   foreach ($id in $ids) {
     $p = Get-Process -Id $id -ErrorAction SilentlyContinue
@@ -516,6 +539,7 @@ function Get-ProcessSample([int]$Root, [datetime]$Origin) {
     alive = ($ids -contains $Root)
     processes = $tree.Count
     working_set_mb = [Math]::Round((($tree | Measure-Object WorkingSetSize -Sum).Sum) / 1MB, 1)
+    private_ws_mb = $privWs
     private_bytes_mb = [Math]::Round((($tree | Measure-Object PrivatePageCount -Sum).Sum) / 1MB, 1)
     handles = [int](($tree | Measure-Object HandleCount -Sum).Sum)
     threads = [int](($tree | Measure-Object ThreadCount -Sum).Sum)
@@ -671,11 +695,15 @@ function New-SynthSamples([double]$Seconds, [hashtable]$Change = @{}) {
     $h = $t / 3600
     $ws = 260 + $rand.NextDouble() * 15
     if ($Change["Leak"]) { $ws += 40 * $h }
+    $pws = $ws - 120
     if ($Change["Spike"] -and $t -eq 3000) { $ws = 420 }
+    if ($Change["TreeHigh"]) { $ws += 150 }
+    if ($Change["PrivateSpike"] -and $t -eq 3000) { $pws = 380 }
+    if ($Change["NoPrivate"]) { $pws = $null }
     if ($Change["Gap"] -and $t -gt 900 -and $t -lt 8400) { continue }
     if ($Change["Sparse"] -and ($t % 600) -ne 0) { continue }
     $s.Add([ordered]@{
-        t = $t; alive = (-not ($Change["DiesAt"] -and $t -ge $Change["DiesAt"])); working_set_mb = $ws; private_bytes_mb = $ws - 60; handles = 1800 + ($t % 7); threads = 120
+        t = $t; alive = (-not ($Change["DiesAt"] -and $t -ge $Change["DiesAt"])); working_set_mb = $ws; private_ws_mb = $pws; private_bytes_mb = $ws - 60; handles = 1800 + ($t % 7); threads = 120
         cpu_pct = $(if ($Change["Busy"]) { 14.0 } else { 3.5 + $rand.NextDouble() })
         tcp_ok = (-not $Change["NoTcp"]); tcp_internet = $(if ($Change["Internet"] -and $t -eq 600) { 1 } else { 0 }); tcp_lan = 1; tcp_loopback = 0
       })
@@ -756,7 +784,13 @@ function Invoke-SelfTest {
   $r = Run @{} @{} @{ FailedSamples = 10 }
   Expect 'a few failed attempts are tolerated' (Verdict-Of $r 'process samples cover the camera time') 'PASS'
   $r = Run @{} @{ Spike = $true }
-  Expect 'one sample over 350 MB fails the cap though the median is far below' (Verdict-Of $r 'PRD budget: memory while capturing') 'FAIL'
+  Expect 'one whole-tree working set sample over 350 MB with low private working set passes (DEC14)' (Verdict-Of $r 'PRD budget: memory while capturing') 'PASS'
+  $r = Run @{} @{ TreeHigh = $true }
+  Expect 'a whole-tree working set above 350 MB throughout with private working set below passes' (Verdict-Of $r 'PRD budget: memory while capturing') 'PASS'
+  $r = Run @{} @{ PrivateSpike = $true }
+  Expect 'one private working set sample over 350 MB fails the cap though the median is far below' (Verdict-Of $r 'PRD budget: memory while capturing') 'FAIL'
+  $r = Run @{} @{ NoPrivate = $true }
+  Expect 'samples without the private working set do not prove the memory budget' (Verdict-Of $r 'PRD budget: memory while capturing') 'INCONCLUSIVE'
   $empty = Invoke-CameraAnalysis @() @() $opt
   Expect 'no log and no samples is never PASS' (Get-OverallVerdict $empty.Checks) 'INCONCLUSIVE'
   $old = ConvertFrom-CameraLog @(New-SynthRun $origin @{} | ForEach-Object { $_.PSObject.Properties.Remove('stops'); $_ | ConvertTo-Json -Compress }) $origin
@@ -800,7 +834,7 @@ function Invoke-SelfTest {
   $appJson = '{"ok":true,"checks":[{"name":"camera_soak_completed","ok":true,"required":true,"detail":"17 cycles"},{"name":"camera_soak_frame_rate","ok":true,"required":true,"detail":"rates [2.95]"}],"monitors":[],"webview2":"1.0","soak":null,"camera_soak":{"started_utc":"' + $soakFrom.ToString('yyyy-MM-ddTHH:mm:ss.fffZ') + '","ended_utc":"' + $soakTo.ToString('yyyy-MM-ddTHH:mm:ss.fffZ') + '","real_s":600,"cycles":17,"releases":[],"windows":[],"windows_rate_changed":0,"frames":3000,"stalls":0,"worker_restarts":0,"stops":17,"forced_stops":0,"max_stop_ms":420}}'
   $ciSamples = New-Object System.Collections.Generic.List[object]
   foreach ($x in (New-SynthSamples 760)) { $ciSamples.Add($x) }
-  for ($t = 0; $t -le 760; $t += 5) { $ciSamples.Add([ordered]@{ t = [double]$t; alive = $true; working_set_mb = 300.0; private_bytes_mb = 200.0; handles = 2000; threads = 150; cpu_pct = 6.0; tcp_ok = $true; tcp_internet = 0; tcp_lan = 0; tcp_loopback = 2 }) }
+  for ($t = 0; $t -le 760; $t += 5) { $ciSamples.Add([ordered]@{ t = [double]$t; alive = $true; working_set_mb = 300.0; private_ws_mb = 150.0; private_bytes_mb = 200.0; handles = 2000; threads = 150; cpu_pct = 6.0; tcp_ok = $true; tcp_internet = 0; tcp_lan = 0; tcp_loopback = 2 }) }
   $picked = @($ciSamples | Where-Object { $_.t % 5 -eq 0 } | Sort-Object { $_.t } | Group-Object { $_.t } | ForEach-Object { $_.Group[-1] })
   # As the sampling loop collects them: ordered dictionaries in a generic list.
   $ciSamples = New-Object System.Collections.Generic.List[object]

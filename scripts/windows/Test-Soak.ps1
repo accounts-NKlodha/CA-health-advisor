@@ -29,7 +29,9 @@
     - no crash or restart: the same main process throughout;
     - no growth trend in memory, handles or threads after a warm-up (the last third of
       the run against the first, and the fitted slope);
-    - PRD budgets for the companion: working set at most 150 MB (median), CPU at most 2%
+    - PRD budgets for the companion: the app's own memory (private working set, summed
+      over the tree) at most 150 MB, median and highest sample (DEC14; the whole-tree
+      working set, which counts shared pages, is reported for information), CPU at most 2%
       of the machine averaged over every 30 minutes, no spike over 5% lasting 3 samples;
     - the database's write-ahead log at most 16 MiB and the database growing at most
       4 MiB, logs within their rotation;
@@ -84,7 +86,7 @@ Set-StrictMode -Version 2
 # generous so only real growth fails: a leak must both grow past the tolerance between the
 # first and last third of the run and show a slope that adds up to it.
 $Budget = @{
-  WorkingSetMB  = 150   # PRD: V1 companion idle working set at most 150 MB
+  WorkingSetMB  = 150   # PRD: V1 companion at most 150 MB of its own memory (private working set, DEC14)
   CpuAvgPct     = 2.0   # PRD: average idle CPU at most 2% of the machine (30-minute windows)
   CpuSpikePct   = 5.0   # PRD: no sustained idle spike over 5%
   SpikeSamples  = 3
@@ -172,6 +174,21 @@ function Test-Cpu([double[]]$Seconds, [double[]]$Cpu, [double]$AvgLimit, [double
   return [pscustomobject]@{
     Pass = ($worst -le $AvgLimit -and $longest -lt $SpikeSamples)
     Detail = ('average {0:N2}%, highest 30-minute average {1:N2}% (budget {2}%); longest run over {3}%: {4} samples (fails at {5})' -f $avg, $worst, $AvgLimit, $SpikeLimit, $longest, $SpikeSamples)
+  }
+}
+
+# Memory budget (DEC14): the app's own memory, the private working set summed over the
+# process tree, at most the limit at the median and at the highest sample. The whole-tree
+# working set also counts pages shared with other programs (WebView2 and system DLLs,
+# which Windows trims and re-adds at will), so it is reported for information only.
+function Test-MemoryBudget([double[]]$PrivateWs, [double[]]$TotalWs, [double]$LimitMB) {
+  $total = if ($TotalWs.Count) { '; whole-tree working set (shared pages included, for information) median {0:N1} MB, highest {1:N1} MB' -f (Get-Median $TotalWs), (($TotalWs | Measure-Object -Maximum).Maximum) } else { '' }
+  if (-not $PrivateWs.Count) { return [pscustomobject]@{ Pass = $false; Detail = "private working set unavailable (no sample could read it)$total" } }
+  $med = Get-Median $PrivateWs
+  $max = ($PrivateWs | Measure-Object -Maximum).Maximum
+  return [pscustomobject]@{
+    Pass = ($med -le $LimitMB -and $max -le $LimitMB)
+    Detail = ('private working set median {0:N1} MB, highest {1:N1} MB (limit {2} MB for both){3}' -f $med, $max, $LimitMB, $total)
   }
 }
 
@@ -353,6 +370,16 @@ function Invoke-SelfTest {
   Expect 'three samples over 5% fail' (Test-Cpu $s30 $spike 2 5 3).Pass $false
   $blip = [double[]](0..60 | ForEach-Object { if ($_ -eq 10) { 30.0 } else { 0.2 } })
   Expect 'one short spike passes' (Test-Cpu $s30 $blip 2 5 3).Pass $true
+  # Memory budget (DEC14): the private working set decides, the whole tree is information.
+  $treeHigh = [double[]](0..95 | ForEach-Object { if ($_ -lt 64) { 218 + ($_ % 7) * 17 } else { 97 } })
+  $privLow = [double[]](0..95 | ForEach-Object { 67 + ($_ % 5) })
+  Expect 'a high whole-tree working set with low private working set passes' (Test-MemoryBudget $privLow $treeHigh 150).Pass $true
+  Expect '... and the whole tree is reported' ((Test-MemoryBudget $privLow $treeHigh 150).Detail -like '*whole-tree working set*') $true
+  $privHigh = [double[]](0..95 | ForEach-Object { 160 + ($_ % 5) })
+  Expect 'a private working set median over 150 MB fails' (Test-MemoryBudget $privHigh $treeHigh 150).Pass $false
+  $privPeak = [double[]](0..95 | ForEach-Object { if ($_ -eq 40) { 180 } else { 70 } })
+  Expect 'one private working set sample over 150 MB fails' (Test-MemoryBudget $privPeak $treeHigh 150).Pass $false
+  Expect 'no private working set samples fail' (Test-MemoryBudget ([double[]]@()) $treeHigh 150).Pass $false
   # The samples as the sampling loops collect them: ordered dictionaries in a generic list.
   $list = New-Object System.Collections.Generic.List[object]
   foreach ($i in 0..11) { $list.Add([ordered]@{ t_s = 10.0 * $i; roots_alive = ($i -lt 10); locked = $false; working_set_mb = 100.0; private_bytes_mb = 80.0; handles = 500; threads = 30 }) }
@@ -414,7 +441,9 @@ if ($CiSelfTest) {
   else { Add-Check 'the app ran its soak phase' $false 'no soak summary in the app report' }
   $w = Test-Samples $window 0.2 0
   $ws = [double[]]@($w | ForEach-Object { $_.working_set_mb })
-  Add-Check 'working set budget (informational on a CI runner)' ((Get-Median $ws) -le $Budget.WorkingSetMB) ('median {0:N1} MB, highest {1:N1} MB (PRD budget {2} MB idle; the soak is not idle and a runner is not an office PC)' -f (Get-Median $ws), (($ws | Measure-Object -Maximum).Maximum), $Budget.WorkingSetMB) $false
+  $pws = [double[]]@($w | Where-Object { $null -ne $_.private_ws_mb } | ForEach-Object { $_.private_ws_mb })
+  $mem = Test-MemoryBudget $pws $ws $Budget.WorkingSetMB
+  Add-Check 'memory budget: app''s own memory (informational on a CI runner)' $mem.Pass ('{0} (PRD budget {1} MB idle; the soak is not idle and a runner is not an office PC)' -f $mem.Detail, $Budget.WorkingSetMB) $false
   $ok = Save-Report @{ samples = $samples; app = $app }
   Remove-Item $selfReport -ErrorAction SilentlyContinue
   if (-not $ok) { exit 1 }
@@ -523,7 +552,8 @@ if ($Role -eq 'Companion') {
   $w = Test-Samples $samples 0.1 $Hours
   $ws = [double[]]@($w | ForEach-Object { $_.working_set_mb })
   $pws = [double[]]@($w | Where-Object { $null -ne $_.private_ws_mb } | ForEach-Object { $_.private_ws_mb })
-  Add-Check 'PRD budget: working set at most 150 MB' ((Get-Median $ws) -le $Budget.WorkingSetMB) ('median {0:N1} MB, highest {1:N1} MB; private working set median {2}' -f (Get-Median $ws), (($ws | Measure-Object -Maximum).Maximum), $(if ($pws.Count) { '{0:N1} MB' -f (Get-Median $pws) } else { 'unavailable' }))
+  $mem = Test-MemoryBudget $pws $ws $Budget.WorkingSetMB
+  Add-Check "PRD budget: app's own memory (private working set) at most $($Budget.WorkingSetMB) MB" $mem.Pass $mem.Detail
   $cpuS = @($w | Where-Object { $null -ne $_.cpu_pct })
   $cpu = Test-Cpu ([double[]]@($cpuS | ForEach-Object { $_.t_s })) ([double[]]@($cpuS | ForEach-Object { $_.cpu_pct })) $Budget.CpuAvgPct $Budget.CpuSpikePct $Budget.SpikeSamples
   Add-Check 'PRD budget: CPU (2% average, no sustained spike over 5%)' $cpu.Pass $cpu.Detail
