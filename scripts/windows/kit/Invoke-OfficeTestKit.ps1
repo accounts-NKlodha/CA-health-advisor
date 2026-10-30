@@ -973,9 +973,12 @@ function Invoke-AgentOnce {
   $base = $job.Name.Substring(0, $job.Name.Length - 5)
   $text = $null
   if ($job.Length -le 65536) { try { $text = [IO.File]::ReadAllText($job.FullName) } catch { } }
-  Remove-Item -LiteralPath $job.FullName -Force -ErrorAction SilentlyContinue
+  # The marker goes down before the request is removed, so the step always shows as queued
+  # or running. The agent's PID comes first: a marker whose agent is gone is a step that
+  # will never finish.
   $running = Join-Path $out "$base.running"
-  Set-Content -LiteralPath $running -Value (Get-NowText)
+  Set-Content -LiteralPath $running -Value "$PID $(Get-NowText)"
+  Remove-Item -LiteralPath $job.FullName -Force -ErrorAction SilentlyContinue
   $r = $null
   try {
     $j = $null; if ($text) { try { $j = ConvertTo-HashtableDeep ($text | ConvertFrom-Json) } catch { } }
@@ -1199,6 +1202,18 @@ function Copy-AdminReports($Result, [datetime]$Since) {
 # the job's name). A job still pending from an earlier run under the same key is waited
 # for instead of being sent again (for example the 8-hour server soak after the kit window
 # was closed).
+# Whether the step `$Name` is still being worked on: waiting in the queue for the agent, or
+# running in the agent that is open now. A running marker left by an administrator window
+# that was closed mid-step (or written by an older kit, without the agent's PID) is not.
+function Test-AdminJobLive([string]$Name) {
+  if (Test-Path -LiteralPath (Join-Path (Get-AdminDir 'queue') "$Name.json")) { return $true }
+  $marker = Join-Path (Get-AdminDir 'out') "$Name.running"
+  if (-not (Test-Path -LiteralPath $marker)) { return $false }
+  $owner = 0; try { $owner = [int](([string](Get-Content -LiteralPath $marker -TotalCount 1)) -split ' ')[0] } catch { }
+  $agent = 0; try { $agent = [int](Get-Content -LiteralPath (Join-Path (Get-AdminDir 'out') 'agent.pid')) } catch { }
+  return ($owner -gt 0 -and $owner -eq $agent -and (Test-AgentAlive))
+}
+
 function Invoke-AdminJob([string]$Op, [hashtable]$Params, [string]$Key, [switch]$NoWait) {
   $since = (Get-Date).AddSeconds(-2)
   if ($script:AgentInline) {
@@ -1213,7 +1228,8 @@ function Invoke-AdminJob([string]$Op, [hashtable]$Params, [string]$Key, [switch]
   $name = $null
   if ($Key -and $jobs[$Key]) {
     $old = [string]$jobs[$Key].name
-    if ($old -and ((Test-Path -LiteralPath (Join-Path $out "$old.result.json")) -or (Test-Path -LiteralPath (Join-Path $q "$old.json")) -or (Test-Path -LiteralPath (Join-Path $out "$old.running")))) { $name = $old; Write-Log "Waiting for the administrator step started earlier ($Op)." }
+    if ($old -and ((Test-Path -LiteralPath (Join-Path $out "$old.result.json")) -or (Test-AdminJobLive $old))) { $name = $old; Write-Log "Waiting for the administrator step started earlier ($Op)." }
+    elseif ($old) { Write-Log "The administrator step started earlier ($Op) was interrupted (its window was closed): starting it again." }
   }
   if (-not $name) {
     $name = 'job-{0}-{1}' -f (Get-Date).ToString('yyyyMMddHHmmssfff'), $Op
@@ -1228,6 +1244,11 @@ function Wait-AdminJob([string]$Name, [string]$Key) {
   if ($Name -like 'inline:*') { return $script:InlineResults[$Name.Substring(7)] }
   $res = Join-Path (Get-AdminDir 'out') "$Name.result.json"
   while (-not (Test-Path -LiteralPath $res)) {
+    if ((Test-AgentAlive) -and -not (Test-AdminJobLive $Name)) {
+      Start-Sleep -Seconds 2
+      if (Test-Path -LiteralPath $res) { break }
+      return New-Result 'INCONCLUSIVE' 'the administrator step was interrupted before it finished (its window was closed): run this step again'
+    }
     if (-not (Test-AgentAlive)) {
       Start-Sleep -Seconds 2
       if (Test-Path -LiteralPath $res) { break }
@@ -1967,6 +1988,9 @@ function Get-Steps([string]$RoleName) {
 
 # Run the steps in order. Done steps are skipped; a step left "running" (window closed,
 # reboot) runs again. PAUSE keeps the step pending and stops the run.
+# The answer to "run a step again": "Redo P1-06" and "-Redo P1-06" mean the same as "P1-06".
+function ConvertFrom-StepAnswer([string]$Answer) { ($Answer.Trim() -replace '^(?i)-?redo\s+', '').ToUpperInvariant() }
+
 function Invoke-Steps([object[]]$Steps, [string]$RedoId) {
   $n = $Steps.Count; $i = 0
   foreach ($st in $Steps) {
@@ -2167,6 +2191,28 @@ function Invoke-SelfTest {
     Check 'server name: the capture step''s parameters take an underscore name and refuse a space' ($null -eq (Test-AdminParams 'network-capture' @{ server = 'FIRSTNAME_LASTNAME'; canary = 'KITPC2-AB12' }) -and $null -ne (Test-AdminParams 'network-capture' @{ server = 'FIRSTNAME LASTNAME'; canary = 'KITPC2-AB12' }))
     Check 'server name: an underscore computer name can pair; a name a slip refuses stops pairing with the reason' ((-not (Get-ServerNameProblem 'FIRSTNAME_LASTNAME')) -and (Get-ServerNameProblem 'PC$1') -match 'Rename the PC' -and (Get-ServerNameProblem 'MY PC') -match '-Redo P1-05' -and (Get-ServerNameProblem ''))
     Check 'agent leaves no request behind' (@(Get-ChildItem -LiteralPath $q -Filter 'job-*').Count -eq 0 -and @(Get-ChildItem -LiteralPath $out -Filter '*.running').Count -eq 0)
+    # --- an administrator step left half-started by a closed window (office PC1, 29 Oct)
+    Set-Content -LiteralPath (Join-Path $out 'agent.pid') -Value $PID
+    # This process stands for the open administrator window (its name differs by host).
+    $saveAlive = ${function:Test-AgentAlive}; ${function:script:Test-AgentAlive} = { $true }
+    $script:State.data['jobs'] = @{ 'soak-server' = @{ name = 'job-20260101000000010-soak-server'; since = (Get-Date).ToString('o') } }
+    Set-Content -LiteralPath (Join-Path $out 'job-20260101000000010-soak-server.running') -Value '2026-10-29 22:10:00'
+    Check 'a running marker without a live agent PID (an older kit, or a closed window) is not live' (-not (Test-AdminJobLive 'job-20260101000000010-soak-server'))
+    $fresh = Invoke-AdminJob 'echo' @{ text = 'again' } 'soak-server' -NoWait
+    Check 'an interrupted administrator step is started again, not waited for' ($fresh -ne 'job-20260101000000010-soak-server' -and (Test-Path -LiteralPath (Join-Path $q "$fresh.json")) -and $script:State.data['jobs']['soak-server'].name -eq $fresh)
+    $null = Invoke-AgentOnce
+    Check 'the fresh step runs and finishes' ((Wait-AdminJob $fresh 'soak-server').detail -eq 'echo again')
+    Set-Content -LiteralPath (Join-Path $out 'job-20260101000000011-soak-server.running') -Value "$PID 2026-10-30 06:00:00"
+    Check 'a running marker of the open agent is live' (Test-AdminJobLive 'job-20260101000000011-soak-server')
+    $script:State.data['jobs'] = @{ 'soak-server' = @{ name = 'job-20260101000000011-soak-server'; since = (Get-Date).ToString('o') } }
+    Check 'a step the open agent is running is waited for, not sent again' ((Invoke-AdminJob 'echo' @{ text = 'x' } 'soak-server' -NoWait) -eq 'job-20260101000000011-soak-server')
+    Set-Content -LiteralPath (Join-Path $out 'job-20260101000000011-soak-server.running') -Value '1 2026-10-30 06:00:00'
+    $lost = Wait-AdminJob 'job-20260101000000011-soak-server' 'soak-server'
+    Check 'waiting on a step nobody is running ends INCONCLUSIVE instead of waiting forever' ($lost.verdict -eq 'INCONCLUSIVE' -and $lost.detail -like '*interrupted*')
+    Remove-Item -LiteralPath (Join-Path $out 'job-20260101000000010-soak-server.running'), (Join-Path $out 'job-20260101000000011-soak-server.running'), (Join-Path $out 'agent.pid') -Force -ErrorAction SilentlyContinue
+    $script:State.data['jobs'] = @{}
+    ${function:script:Test-AgentAlive} = $saveAlive
+    Check 'the step prompt takes "Redo P1-06", "-redo p1-06" and "P1-06" alike' (((ConvertFrom-StepAnswer 'Redo P1-06') -eq 'P1-06') -and ((ConvertFrom-StepAnswer ' -redo p1-06 ') -eq 'P1-06') -and ((ConvertFrom-StepAnswer 'P1-06') -eq 'P1-06') -and ((ConvertFrom-StepAnswer 'redo') -eq 'REDO'))
 
     # Tampering: after staging, the user's copy is replaced and a request names its own report path.
     Set-Content -LiteralPath (Join-Path $kitScripts 'Test-Soak.ps1') -Value '# EVIL'
@@ -2807,7 +2853,8 @@ while ($true) {
   $null = Complete-Run $steps
   $again = Read-Answer "To run a step again type its id (for example $($steps[-1].Id)); press Enter to finish" ''
   if (-not $again) { break }
-  $match = @($steps | Where-Object { $_.Id -eq $again.ToUpperInvariant() })
+  $again = ConvertFrom-StepAnswer $again
+  $match = @($steps | Where-Object { $_.Id -eq $again })
   if (-not $match.Count) { Write-Host "  No step $again." -ForegroundColor Red; continue }
   if ($match[0].Admin -and -not (Test-AgentAlive)) { $script:AgentStarted = $false; $null = Start-AdminAgent @($match[0].Why) }
   $outcome = Invoke-Steps $steps $match[0].Id
