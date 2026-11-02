@@ -47,7 +47,11 @@
 //!   opens on its own.
 //! - The weekly review offer ([`review`], slice V1-4) opens once a week at the user's
 //!   review time, like the recovery cards that open on their own.
+//! - The combined 5-minute break ([`breaks`], DEC15) replaces the three reminders above
+//!   while it is on (the default): one offer every 30 minutes of time at the PC, under
+//!   the same holds, calm gap and no-replay rules, then a guided break in the one bubble.
 
+mod breaks;
 mod guide;
 mod meditation;
 mod note;
@@ -216,6 +220,9 @@ struct Offer {
     activity: Activity,
     phase: OfferPhase,
     first_shown: u64,
+    /// The combined break's reminder (DEC15), recorded as `activity` movement.
+    #[serde(default)]
+    combined: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -369,6 +376,9 @@ pub struct EngineState {
     /// The posture cue's cooldown (slice V2-2).
     #[serde(default)]
     posture: posture::PostureCue,
+    /// The combined 5-minute break's timer and the break in progress (DEC15).
+    #[serde(default)]
+    breaks: breaks::Breaks,
 }
 
 /// What one step produced.
@@ -451,6 +461,7 @@ impl Engine {
                 review: review::ReviewOffer::default(),
                 meditation: meditation::Meditation::default(),
                 posture: posture::PostureCue::default(),
+                breaks: breaks::Breaks::default(),
             },
         }
     }
@@ -497,6 +508,12 @@ impl Engine {
         &self.s.acts[idx(a)]
     }
 
+    /// The combined break's timer (read-only; DEC15).
+    #[must_use]
+    pub const fn break_timer(&self) -> &ActivityState {
+        &self.s.breaks.timer
+    }
+
     /// Today's tally, if any time was counted today.
     #[must_use]
     pub fn tally(&self, date: NaiveDate) -> Option<DayTally> {
@@ -532,7 +549,8 @@ impl Engine {
             ..Out::default()
         };
         // Close what the previous run left open, at the moment it stopped. A routine in the
-        // guide keeps the movements already answered.
+        // guide keeps the movements already answered, a break the steps already done.
+        self.interrupt_break(ctx, &mut out);
         self.interrupt_guide(ctx, &mut out);
         self.interrupt_meditation(ctx, &mut out);
         if let Some(o) = self.s.offer {
@@ -631,6 +649,7 @@ impl Engine {
     fn level3(&self) -> bool {
         self.s.exercise_since.is_some()
             || self.meditation_running()
+            || self.break_running()
             || self.s.pomodoro.is_some_and(|p| {
                 p.card_open
                     || (p.paused.is_none()
@@ -708,7 +727,8 @@ impl Engine {
     }
 
     fn is_due(&self, ctx: &Context, a: Activity) -> bool {
-        if !ctx.config.categories.allows(a) {
+        // The combined break replaces the three separate reminders (DEC15).
+        if ctx.config.combined() || !ctx.config.categories.allows(a) {
             return false;
         }
         let st = &self.s.acts[idx(a)];
@@ -755,6 +775,7 @@ impl Engine {
         for a in &mut self.s.acts {
             a.last = None;
         }
+        self.s.breaks.timer.last = None;
         if self.s.meeting.is_some_and(|d| d < today) {
             self.s.meeting = None;
         }
@@ -863,6 +884,11 @@ impl Engine {
                     .window_screen_ms += len;
                 out.touch(w.date);
             }
+            // The combined break follows time at the PC inside work hours (DEC13 presence,
+            // DEC15), whatever the input.
+            if counts_as_work {
+                self.count_break_time(len);
+            }
             let day = &mut self.s.days.entry(date).or_default().tally;
             day.screen_ms += len;
             match class {
@@ -909,6 +935,7 @@ impl Engine {
         }
         self.run_guide_timers(ctx, out);
         self.run_meditation_timers(ctx, out);
+        self.run_break_timers(ctx, out);
         if self
             .s
             .exercise_since
@@ -936,6 +963,8 @@ impl Engine {
                         self.resolve_no_response(ctx, out);
                     }
                 }
+                // A break in progress keeps its own time.
+                OfferPhase::InProgress { .. } if o.combined => {}
                 OfferPhase::InProgress { since } => match o.activity {
                     Activity::EyeRest if now.saturating_sub(since) >= ms(EYE_REST_LENGTH) => {
                         self.reset_timer(Activity::EyeRest);
@@ -956,7 +985,7 @@ impl Engine {
         // A card opens on its own only when nothing above the Pomodoro holds it back; a
         // card held back is not replayed when the hold ends (the pet still shows the
         // phase, and the user can open it).
-        let visible = !self.pomodoro_card_held(ctx) && self.s.guide.is_none();
+        let visible = !self.pomodoro_card_held(ctx) && self.s.guide.is_none() && !self.break_open();
         let auto = ctx.config.pomodoro_auto_start;
         let Some(p) = self.s.pomodoro.as_mut() else {
             return;
@@ -1005,9 +1034,10 @@ impl Engine {
             st.snooze_until = None;
             st.due_since = None;
         }
+        self.reset_break_timer();
     }
 
-    /// A confirmed break restarts the movement and eye-rest timers. It is never recorded
+    /// A confirmed break restarts the movement, eye-rest and combined break timers. It is never recorded
     /// as movement and never changes a chip's outcome.
     fn confirmed_break(&mut self, ctx: &Context, out: &mut Out) {
         self.fresh_timers();
@@ -1033,7 +1063,7 @@ impl Engine {
         self.s.idle_ms = 0;
         self.s.grace_until = self.s.now + ms(GRACE_AFTER_WAKE);
         // The "paused while you were away" card, unless something else still holds.
-        let show = !self.pomodoro_card_held(ctx) && self.s.guide.is_none();
+        let show = !self.pomodoro_card_held(ctx) && self.s.guide.is_none() && !self.break_open();
         if let Some(p) = self.s.pomodoro.as_mut()
             && p.paused == Some(PomodoroPause::LockOrSleep)
         {
@@ -1115,7 +1145,11 @@ impl Engine {
 
     /// Close the current offer with a final status, start the calm gap.
     fn finish_offer(&mut self, o: Offer, status: ChipStatus, out: &mut Out) {
-        self.s.acts[idx(o.activity)].last = Some(status);
+        if o.combined {
+            self.s.breaks.timer.last = Some(status);
+        } else {
+            self.s.acts[idx(o.activity)].last = Some(status);
+        }
         self.s.offer = None;
         self.s.gap_until = self.s.now + ms(CALM_GAP);
         out.significant = true;
@@ -1146,7 +1180,11 @@ impl Engine {
         };
         out.events
             .push(Self::response_event(ctx, o, ReminderOutcome::NoResponse));
-        self.reschedule(ctx, o.activity);
+        if o.combined {
+            self.reschedule_break();
+        } else {
+            self.reschedule(ctx, o.activity);
+        }
         self.finish_offer(o, ChipStatus::NoResponse, out);
     }
 
@@ -1156,6 +1194,11 @@ impl Engine {
         let Some(o) = self.s.offer else {
             return;
         };
+        if o.combined {
+            self.reschedule_break();
+            self.finish_offer(o, ChipStatus::NoneRecorded, out);
+            return;
+        }
         let now = self.s.now;
         let st = &mut self.s.acts[idx(o.activity)];
         st.snooze_until = None;
@@ -1172,7 +1215,8 @@ impl Engine {
     }
 
     fn count_dismissal(&mut self, ctx: &Context) {
-        let light = ctx.config.intensity == Intensity::Light;
+        // The Light schedule changes nothing while the combined break is on (DEC15).
+        let light = ctx.config.intensity == Intensity::Light || ctx.config.combined();
         let day = self.today_state(ctx);
         day.dismissals += 1;
         let offer = day.dismissals >= DISMISSALS_FOR_LIGHTER && !day.lighter_offered && !light;
@@ -1192,6 +1236,9 @@ impl Engine {
         };
         if !matches!(o.phase, OfferPhase::Showing { .. } | OfferPhase::Waiting) {
             return InputOutcome::Ignored("reminder already answered");
+        }
+        if o.combined {
+            return self.respond_break(ctx, o, r, out);
         }
         let a = o.activity;
         match r {
@@ -1278,7 +1325,9 @@ impl Engine {
             RoutineOutcome::Skipped => ChipStatus::Skipped,
         };
         let in_progress = self.s.offer.filter(|o| {
-            o.activity == Activity::Movement && matches!(o.phase, OfferPhase::InProgress { .. })
+            o.activity == Activity::Movement
+                && !o.combined
+                && matches!(o.phase, OfferPhase::InProgress { .. })
         });
 
         match offer.or(in_progress.map(|o| o.id)) {
@@ -1287,6 +1336,7 @@ impl Engine {
                     return InputOutcome::Ignored("stale reminder");
                 };
                 if o.activity != Activity::Movement
+                    || o.combined
                     || !matches!(o.phase, OfferPhase::InProgress { .. })
                 {
                     return InputOutcome::Ignored("no movement routine in progress");
@@ -1430,6 +1480,7 @@ impl Engine {
             Input::RoutineStarted => {
                 if let Some(o) = self.s.offer
                     && o.activity == Activity::Movement
+                    && !o.combined
                     && matches!(o.phase, OfferPhase::Showing { .. } | OfferPhase::Waiting)
                 {
                     return self.respond(ctx, o.id, Response::Start, out);
@@ -1443,6 +1494,9 @@ impl Engine {
             }
             Input::Guide(action) => self.guide_input(ctx, action, out),
             Input::RoutineFinished { offer, outcome } => {
+                if self.break_open() {
+                    return Ignored("a break is running; answer it on its card");
+                }
                 // With the guide running, the report is read against the movements
                 // already answered; the reminder and the routine record get the same result.
                 let r = self.routine_finished(ctx, offer, self.reported_outcome(outcome), out);
@@ -1457,6 +1511,7 @@ impl Engine {
                     return Ignored("stale reminder");
                 };
                 if o.activity != Activity::Movement
+                    || o.combined
                     || !matches!(o.phase, OfferPhase::InProgress { .. })
                 {
                     return Ignored("no movement routine in progress");
@@ -1559,6 +1614,7 @@ impl Engine {
                 self.s.pause = None;
                 // A Pomodoro replaces an exercise: the movement guide and a meditation
                 // pause stop (recorded as stopped) before its timer starts.
+                self.interrupt_break(ctx, out);
                 self.interrupt_guide(ctx, out);
                 self.interrupt_meditation(ctx, out);
                 self.s.exercise_since = None;
@@ -1588,6 +1644,11 @@ impl Engine {
                 if self.s.pause.is_some() {
                     return Ignored("coaching is paused");
                 }
+                // One exercise at a time: the Pomodoro's work timer does not run beside
+                // a combined break (its menu item is hidden meanwhile).
+                if self.break_running() {
+                    return Ignored("a break is running");
+                }
                 match self.s.pomodoro.as_mut() {
                     Some(p) if p.paused.is_some() => {
                         p.paused = None;
@@ -1605,6 +1666,9 @@ impl Engine {
                 Applied
             }
             Input::StartPomodoroBreak => {
+                if self.break_running() {
+                    return Ignored("a break is running");
+                }
                 let Some(p) = self.s.pomodoro.as_mut() else {
                     return Ignored("no Pomodoro");
                 };
@@ -1620,6 +1684,9 @@ impl Engine {
                 Applied
             }
             Input::SkipPomodoroBreak => {
+                if self.break_running() {
+                    return Ignored("a break is running");
+                }
                 let auto = ctx.config.pomodoro_auto_start;
                 let holds = self.holds_above_pomodoro(ctx);
                 // The movement guide (open or waiting) or an open card keeps the bubble.
@@ -1650,6 +1717,9 @@ impl Engine {
                 Applied
             }
             Input::NextPomodoroRound => {
+                if self.break_running() {
+                    return Ignored("a break is running");
+                }
                 let Some(p) = self.s.pomodoro.as_mut() else {
                     return Ignored("no Pomodoro");
                 };
@@ -1682,11 +1752,13 @@ impl Engine {
             Input::Review(answer) => self.review_input(ctx, answer, out),
             Input::Meditation(action) => self.meditation_input(ctx, action, out),
             Input::PostureCue => self.posture_cue_input(ctx, out),
+            Input::Break(action) => self.break_input(ctx, action, out),
         }
     }
 
     /// Close the card on show as its close button does (no answer is recorded): a
-    /// reminder collapses to its waiting badge, the movement guide waits behind the pet, a
+    /// reminder collapses to its waiting badge, a break stops (its steps done are
+    /// recorded), the movement guide waits behind the pet, a
     /// check-in, offer or recovery card closes with the calm gap, a note closes, and a
     /// Pomodoro card closes (its phase stays for the menu). Returns false if none is open.
     fn close_open_card(&mut self, ctx: &Context, out: &mut Out) -> bool {
@@ -1695,7 +1767,13 @@ impl Engine {
         {
             self.collapse(out);
             true
-        } else if self.close_guide_card(out) || self.close_meditation_card(ctx, out) {
+        } else if self.break_running() && self.clear_note(out) {
+            // A card opened over a running break closes; the break goes on.
+            true
+        } else if self.close_break_card(ctx, out)
+            || self.close_guide_card(out)
+            || self.close_meditation_card(ctx, out)
+        {
             true
         } else if self.s.prompt.is_some() {
             self.clear_prompt();
@@ -1744,6 +1822,8 @@ impl Engine {
 
     /// Apply holds, then offer at most one thing.
     fn settle(&mut self, ctx: &Context, out: &mut Out) {
+        // Any hold that starts ends a break (recorded as stopped, with the steps done).
+        self.settle_break(ctx, out);
         // A hold that was not in force when the guide's card opened puts it behind the pet;
         // the routine keeps running.
         self.settle_guide(ctx, out);
@@ -1751,9 +1831,12 @@ impl Engine {
         self.settle_meditation(ctx, out);
         let hold = self.hold(ctx);
         // Anything holding reminders back withdraws a reminder that is showing or waiting.
+        // So does a change of reminder style, or the reminder's category switched off.
         if let Some(o) = self.s.offer
             && matches!(o.phase, OfferPhase::Showing { .. } | OfferPhase::Waiting)
-            && (hold.is_some() || !ctx.config.categories.allows(o.activity))
+            && (hold.is_some()
+                || o.combined != ctx.config.combined()
+                || (!o.combined && !ctx.config.categories.allows(o.activity)))
         {
             self.resolve_no_response(ctx, out);
         }
@@ -1769,6 +1852,9 @@ impl Engine {
                 if self.is_due(ctx, a) {
                     self.reschedule(ctx, a);
                 }
+            }
+            if self.break_due(ctx) {
+                self.reschedule_break();
             }
             self.s.gap_until = self.s.gap_until.max(self.s.now + ms(CALM_GAP));
             out.notices.push(Notice::HoldEnded(ended));
@@ -1789,9 +1875,11 @@ impl Engine {
                 _ => {}
             }
         }
+        self.track_break_due(ctx);
         let slot_free = self.s.offer.is_none()
             && self.s.prompt.is_none()
             && self.s.guide.is_none()
+            && !self.break_open()
             && !self.meditation_open()
             && self.s.note.is_none();
         let calm = now >= self.s.gap_until && now >= self.s.grace_until;
@@ -1807,12 +1895,17 @@ impl Engine {
             if self.maybe_recovery_card(ctx, out) {
                 return;
             }
-            let next = ORDER
+            if ctx.config.combined() {
+                if self.break_due(ctx) {
+                    self.show_break(ctx, out);
+                    return;
+                }
+            } else if let Some(a) = ORDER
                 .iter()
                 .copied()
                 .filter(|a| self.is_due(ctx, *a))
-                .min_by_key(|a| (self.s.acts[idx(*a)].due_since.unwrap_or(now), idx(*a)));
-            if let Some(a) = next {
+                .min_by_key(|a| (self.s.acts[idx(*a)].due_since.unwrap_or(now), idx(*a)))
+            {
                 self.show(ctx, a, out);
                 return;
             }
@@ -1886,6 +1979,7 @@ impl Engine {
             activity: a,
             phase: OfferPhase::Showing { since: now },
             first_shown: now,
+            combined: false,
         });
         // A snooze returns the activity once.
         self.s.acts[idx(a)].snooze_until = None;
@@ -1924,6 +2018,17 @@ impl Engine {
     // --------------------------------------------------------------------- view
 
     fn chip(&self, ctx: &Context, a: Activity, water: Option<&WaterPace>) -> Chip {
+        if a == Activity::Movement && ctx.config.combined() {
+            // The movement chip stands for the combined break (recorded as movement).
+            let (status, snooze) = self.break_chip(ctx);
+            return Chip {
+                activity: a,
+                status,
+                snoozed_for: snooze
+                    .filter(|_| status == ChipStatus::Snoozed)
+                    .map(|u| dur(u.saturating_sub(self.s.now))),
+            };
+        }
         let st = &self.s.acts[idx(a)];
         let snoozed_for = st.snooze_until.map(|u| dur(u.saturating_sub(self.s.now)));
         let status = if !ctx.config.categories.allows(a) {
@@ -2019,6 +2124,7 @@ impl Engine {
         if let Some(o) = self.s.offer {
             return match o.phase {
                 OfferPhase::InProgress { .. } => PetMode::Exercise,
+                OfferPhase::Showing { .. } if o.combined => PetMode::BreakOffer,
                 OfferPhase::Showing { .. } => PetMode::Reminder(o.activity),
                 OfferPhase::Waiting => PetMode::Waiting(o.activity),
             };
@@ -2028,6 +2134,9 @@ impl Engine {
         }
         if self.s.prompt.is_some() {
             return PetMode::Nudge;
+        }
+        if self.s.breaks.timer.snooze_until.is_some() {
+            return PetMode::Snoozed(Activity::Movement);
         }
         if let Some(a) = ORDER
             .iter()
@@ -2042,6 +2151,15 @@ impl Engine {
     fn bubble(&self, ctx: &Context, water: Option<&WaterPace>) -> Option<Bubble> {
         if !self.visible(ctx) {
             return None;
+        }
+        if let Some(o) = self.s.offer
+            && matches!(o.phase, OfferPhase::Showing { .. })
+            && o.combined
+        {
+            return Some(Bubble::BreakOffer {
+                offer: o.id,
+                at_pc: dur(self.s.breaks.timer.accum_ms),
+            });
         }
         if let Some(o) = self.s.offer
             && matches!(o.phase, OfferPhase::Showing { .. })
@@ -2066,10 +2184,19 @@ impl Engine {
                 reason,
             });
         }
+        // A card the user opened over a running break shows; the break waits behind it.
+        if self.break_running()
+            && let Some(n) = self.s.note
+        {
+            return Some(n.bubble());
+        }
         if let Some(g) = self.guide_view(ctx)
             && g.open
         {
             return Some(Bubble::MovementGuide(g));
+        }
+        if let Some(b) = self.break_view() {
+            return Some(Bubble::Break(b));
         }
         if let Some(m) = self.meditation_view() {
             return Some(Bubble::Meditation(m));
@@ -2134,6 +2261,7 @@ impl Engine {
                 .map(|t| dur(t.saturating_sub(self.s.now))),
             meeting: self.s.meeting.is_some(),
             active_routine: self.active_routine(),
+            in_break: self.break_running(),
             guide: self.guide_view(ctx),
             recovery: self.recovery_view(ctx),
             water_entries: ctx.water_entries.clone(),
@@ -2155,6 +2283,7 @@ impl Engine {
     fn active_routine(&self) -> Option<ActiveRoutine> {
         if let Some(o) = self.s.offer
             && matches!(o.phase, OfferPhase::InProgress { .. })
+            && !o.combined
         {
             return Some(ActiveRoutine {
                 activity: o.activity,

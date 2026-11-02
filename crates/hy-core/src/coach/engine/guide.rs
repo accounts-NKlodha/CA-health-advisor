@@ -28,6 +28,10 @@
 //!   routine. Movements already answered are kept: the result is recorded from them as a
 //!   stop (D). With nothing answered, nothing is recorded and a routine started from a
 //!   reminder shows "none recorded", as before.
+//! - As the movement step of a combined break ([`super::breaks`], DEC15) the guide runs the
+//!   same routine, but "Skip this step" (Later or Skip today) records nothing and moves on,
+//!   the result goes straight to the break's next step instead of a result card, and the
+//!   break's own rules govern holds, closing and its time limit.
 
 use chrono::{Datelike, Weekday};
 use serde::{Deserialize, Serialize};
@@ -82,6 +86,9 @@ pub(super) struct Guide {
     /// The holds in force when the card was opened; when any other hold starts, the card
     /// goes behind the pet (the routine keeps running).
     opened_under: HoldSet,
+    /// The movement step of a combined break (DEC15).
+    #[serde(default)]
+    pub(super) brk: bool,
 }
 
 impl Guide {
@@ -117,6 +124,7 @@ impl Engine {
             since: now,
             result_since: now,
             opened_under: self.holds_above_pomodoro(ctx),
+            brk: false,
         });
         // One bubble: an open Pomodoro card closes (its phase stays for the menu).
         if let Some(p) = self.s.pomodoro.as_mut() {
@@ -124,6 +132,14 @@ impl Engine {
             p.card_opened_under = HoldSet::EMPTY;
         }
         out.significant = true;
+    }
+
+    /// Open the guide as the movement step of a combined break.
+    pub(super) fn open_break_guide(&mut self, ctx: &Context, out: &mut Out) {
+        self.open_guide(ctx, None, out);
+        if let Some(g) = self.s.guide.as_mut() {
+            g.brk = true;
+        }
     }
 
     /// The guide for the view.
@@ -154,6 +170,7 @@ impl Engine {
             from_reminder: g.offer.is_some(),
             open: g.open,
             default_variant: ctx.config.movement_version.variant(),
+            in_break: g.brk,
         })
     }
 
@@ -175,6 +192,15 @@ impl Engine {
                 return Applied;
             }
             (_, Stage::Result { .. }) => return Ignored("the routine is over"),
+            // In a break, Later and Skip today skip the step: nothing is recorded.
+            (GuideAction::Later | GuideAction::SkipToday, Stage::Intro | Stage::ChooseDay)
+                if g.brk =>
+            {
+                self.s.guide = None;
+                out.significant = true;
+                self.break_step_answered(ctx, false, out);
+                return Applied;
+            }
             (GuideAction::Variant(v), Stage::Intro) if scheduled => {
                 g.variant = Some(v);
                 g.stage = Stage::Step;
@@ -283,6 +309,16 @@ impl Engine {
                 .at(ctx.wall),
             );
         }
+        if g.brk {
+            // The movement step of a break: on to the break's next step.
+            if outcome.resets_movement_timer() {
+                self.reset_timer(Activity::Movement);
+            }
+            self.s.guide = None;
+            out.significant = true;
+            self.break_step_answered(ctx, outcome.resets_movement_timer(), out);
+            return;
+        }
         let offer = g.offer.filter(|id| {
             self.current_offer(*id).is_some_and(|o| {
                 o.activity == Activity::Movement && matches!(o.phase, OfferPhase::InProgress { .. })
@@ -327,6 +363,11 @@ impl Engine {
         let Some(g) = self.s.guide else {
             return;
         };
+        if g.brk {
+            // The break ends with it, keeping its steps done.
+            self.interrupt_break(ctx, out);
+            return;
+        }
         out.significant = true;
         if g.running() && g.stage == Stage::Step && g.done + g.skipped > 0 {
             let outcome = self.outcome_so_far(g);
@@ -345,8 +386,42 @@ impl Engine {
         self.s.guide = None;
     }
 
+    /// End the movement step of a break that stops: movements already answered are
+    /// recorded as a stop, as for any guide. Returns whether a movement was done.
+    pub(super) fn end_break_guide(&mut self, ctx: &Context, out: &mut Out) -> bool {
+        let Some(g) = self.s.guide.filter(|g| g.brk) else {
+            return false;
+        };
+        self.s.guide = None;
+        out.significant = true;
+        if !(g.running() && g.stage == Stage::Step && g.done + g.skipped > 0) {
+            return false;
+        }
+        let outcome = self.outcome_so_far(g);
+        if let Some(r) = routine_for(g.day) {
+            out.events.push(
+                NewEvent::manual(EventPayload::MovementSession {
+                    session_id: g.id,
+                    routine_id: r.id.to_owned(),
+                    routine_version: CONTENT_VERSION,
+                    variant: g.variant,
+                    outcome,
+                    steps_done: g.done,
+                    steps_skipped: g.skipped,
+                    steps_total: MOVEMENTS_PER_ROUTINE,
+                })
+                .at(ctx.wall),
+            );
+        }
+        if outcome.resets_movement_timer() {
+            self.reset_timer(Activity::Movement);
+        }
+        outcome.resets_movement_timer()
+    }
+
     /// The close button, a click on the pet, or hiding the pet: a running guide waits
-    /// behind the pet; a result closes. Returns false if no guide card is open.
+    /// behind the pet; a result closes. Returns false if no guide card is open. (In a
+    /// break, the break's card closes first and stops it.)
     pub(super) fn close_guide_card(&mut self, out: &mut Out) -> bool {
         match self.s.guide.as_mut() {
             Some(g) if g.open && g.running() => {
@@ -368,7 +443,8 @@ impl Engine {
     /// result; a hold that ended no longer covers the card if it begins again.
     pub(super) fn settle_guide(&mut self, ctx: &Context, out: &mut Out) {
         let holds = self.holds_above_pomodoro(ctx);
-        let Some(g) = self.s.guide.as_mut() else {
+        // In a break, the break's own rules apply.
+        let Some(g) = self.s.guide.as_mut().filter(|g| !g.brk) else {
             return;
         };
         if holds.within(g.opened_under) {
@@ -478,7 +554,8 @@ impl Engine {
 
     /// The 30-minute limit and the result card's own time.
     pub(super) fn run_guide_timers(&mut self, ctx: &Context, out: &mut Out) {
-        let Some(g) = self.s.guide else {
+        // In a break, the break's own time limit applies.
+        let Some(g) = self.s.guide.filter(|g| !g.brk) else {
             return;
         };
         let now = self.s.now;

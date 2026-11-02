@@ -107,6 +107,8 @@ Pet/reminders/manual logs continue locally. A small settings indicator explains 
 
 Initial Balanced configuration: movement cue after 45 minutes of accumulated active work; optional brief eye-rest cue at 20 minutes; five-minute full-reminder cooldown; snooze ten minutes; focus 30/60/90 minutes. All intervals are configurable. These numbers are UI starting values to test for usefulness, not medical requirements.
 
+Changed by DEC15 (owner request, 2 November 2026): by default these cues are combined into one guided 5-minute break every 30 minutes of time at the PC (20, 30, 45 or 60 configurable): water, an eye exercise, the movement routine, then slow breathing with the eyes closed, each step skippable. Water pace is still shown but raises no separate cue. "Separate reminders" in Settings restores the configuration above.
+
 Priority order: user pause/lock/sleep/off-hours → focus/presentation suppression → active exercise/break → combined due reminder. An eye cue due shortly before a movement break is folded into that break. Hydration joins an eligible reminder when behind the user's selected pacing. One nonurgent reminder is visible at a time. Repeated dismissals lead to a gentle offer to reduce intensity, never escalation or guilt.
 
 Do not claim detection of file saves, GST submissions or natural task completion in V1 without an explicit supported signal and tested implementation. App switches or input pauses are imperfect proxies. No screen scraping, portal integration, keystroke contents or window-title collection is required by this PRD.

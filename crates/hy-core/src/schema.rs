@@ -291,6 +291,20 @@ text_enum! {
     }
 }
 
+text_enum! {
+    /// A step of the combined 5-minute break (DEC15), in the order the break runs them.
+    BreakStep {
+        /// Drink some water (with "Log 250 ml").
+        Water => "water",
+        /// Rest the eyes: look far away, slow eye movements.
+        Eyes => "eyes",
+        /// The guided movement routine (its own `movement.step` and `movement.session`).
+        Movement => "movement",
+        /// Slow breathing with the eyes closed.
+        Breathe => "breathe",
+    }
+}
+
 /// The meditation pause lengths offered, in minutes (2, 5 or 10; 5 is the default).
 pub const MEDITATION_MINUTES: [u32; 3] = [2, 5, 10];
 /// Parts in a meditation pause.
@@ -620,6 +634,24 @@ pub enum EventPayload {
         /// Parts reached (1 to 5).
         parts_reached: u32,
     },
+    /// The result of a combined 5-minute break (DEC15), started from its reminder. The
+    /// movement step also writes its own `movement.session`; water logged in the break is
+    /// a `water.logged` entry like any other.
+    #[serde(rename = "break.session")]
+    BreakSession {
+        /// The break's id.
+        session_id: Uuid,
+        /// The break reminder it was started from.
+        reminder_id: Uuid,
+        /// The steps offered, in order.
+        steps: Vec<BreakStep>,
+        /// The steps done (self-reported, or their time ran out on screen).
+        done: Vec<BreakStep>,
+        /// Done (every step done), partial (some) or none.
+        outcome: RoutineOutcome,
+        /// Stopped before the last step was answered.
+        stopped: bool,
+    },
     /// A V2 posture observation (derived numbers only, never frames or landmarks).
     #[serde(rename = "posture.observation")]
     PostureObservation {
@@ -673,6 +705,7 @@ impl EventPayload {
             Self::RecoveryPlanChanged { .. } => "recovery.plan",
             Self::RecoveryReflection { .. } => "recovery.reflection",
             Self::MeditationSession { .. } => "meditation.session",
+            Self::BreakSession { .. } => "break.session",
             Self::PhoneInterruption { .. } => "phone.interruption",
             Self::PostureObservation { .. } => "posture.observation",
             Self::SharingPolicyChanged { .. } => "sharing.policy_changed",
@@ -702,6 +735,7 @@ impl EventPayload {
                 | Self::RecoveryPlanChanged { .. }
                 | Self::RecoveryReflection { .. }
                 | Self::MeditationSession { .. }
+                | Self::BreakSession { .. }
         )
     }
 
@@ -798,6 +832,35 @@ impl EventPayload {
                 }
                 if *outcome == MeditationOutcome::Done && *parts_reached != MEDITATION_PARTS {
                     return Err(Error::invalid("a done meditation pause reached every part"));
+                }
+            }
+            Self::BreakSession {
+                steps,
+                done,
+                outcome,
+                ..
+            } => {
+                let ordered = |v: &[BreakStep]| v.windows(2).all(|w| w[0] < w[1]);
+                if steps.is_empty() || !ordered(steps) || !ordered(done) {
+                    return Err(Error::invalid(
+                        "a break offers its steps once each, in their order",
+                    ));
+                }
+                if done.iter().any(|d| !steps.contains(d)) {
+                    return Err(Error::invalid("a break's done steps are among its steps"));
+                }
+                let consistent = match outcome {
+                    RoutineOutcome::Done => done.len() == steps.len(),
+                    RoutineOutcome::Partial => !done.is_empty() && done.len() < steps.len(),
+                    RoutineOutcome::None => done.is_empty(),
+                    RoutineOutcome::Skipped => false,
+                };
+                if !consistent {
+                    return Err(Error::invalid(format!(
+                        "break outcome {outcome} does not match {} of {} steps done",
+                        done.len(),
+                        steps.len()
+                    )));
                 }
             }
             Self::PostureObservation {
@@ -1130,6 +1193,14 @@ mod tests {
                 outcome: MeditationOutcome::Done,
                 parts_reached: 5,
             },
+            EventPayload::BreakSession {
+                session_id: rid,
+                reminder_id: rid,
+                steps: BreakStep::ALL.to_vec(),
+                done: vec![BreakStep::Water, BreakStep::Breathe],
+                outcome: RoutineOutcome::Partial,
+                stopped: false,
+            },
             EventPayload::PostureObservation {
                 kind: PostureKind::DriftEpisode,
                 duration_s: 75,
@@ -1181,6 +1252,7 @@ mod tests {
         check(ReflectionAnswer::ALL);
         check(MeditationVersion::ALL);
         check(MeditationOutcome::ALL);
+        check(BreakStep::ALL);
         check(PhoneLabel::ALL);
         check(SessionState::ALL);
         check(PostureKind::ALL);
@@ -1408,6 +1480,60 @@ mod tests {
         assert!(e.validate().is_ok());
         e.source = EventSource::Inferred;
         assert!(e.validate().is_err());
+    }
+
+    #[test]
+    fn break_session_rules() {
+        use BreakStep::{Breathe, Eyes, Movement, Water};
+        let b = |steps: &[BreakStep], done: &[BreakStep], outcome| EventPayload::BreakSession {
+            session_id: Uuid::nil(),
+            reminder_id: Uuid::nil(),
+            steps: steps.to_vec(),
+            done: done.to_vec(),
+            outcome,
+            stopped: false,
+        };
+        let all = BreakStep::ALL;
+        assert!(b(all, all, RoutineOutcome::Done).validate().is_ok());
+        assert!(
+            b(all, &[Water, Eyes], RoutineOutcome::Partial)
+                .validate()
+                .is_ok()
+        );
+        assert!(b(all, &[], RoutineOutcome::None).validate().is_ok());
+        assert!(
+            b(&[Water, Breathe], &[Water, Breathe], RoutineOutcome::Done)
+                .validate()
+                .is_ok()
+        );
+        assert!(b(all, &[Water], RoutineOutcome::Done).validate().is_err());
+        assert!(b(all, all, RoutineOutcome::Partial).validate().is_err());
+        assert!(b(all, &[Water], RoutineOutcome::None).validate().is_err());
+        assert!(b(all, &[], RoutineOutcome::Skipped).validate().is_err());
+        assert!(b(&[], &[], RoutineOutcome::None).validate().is_err());
+        assert!(
+            b(&[Eyes, Water], &[], RoutineOutcome::None)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            b(&[Water, Water], &[], RoutineOutcome::None)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            b(&[Water, Eyes], &[Movement], RoutineOutcome::Partial)
+                .validate()
+                .is_err()
+        );
+        // Only the user's break writes one.
+        let mut e = NewEvent::manual(b(all, all, RoutineOutcome::Done));
+        assert!(e.validate().is_ok());
+        e.source = EventSource::Inferred;
+        assert!(e.validate().is_err());
+        let v = serde_json::to_value(b(all, &[Eyes], RoutineOutcome::Partial)).unwrap();
+        assert_eq!(v["type"], "break.session");
+        assert_eq!(v["data"]["done"], serde_json::json!(["eyes"]));
     }
 
     #[test]

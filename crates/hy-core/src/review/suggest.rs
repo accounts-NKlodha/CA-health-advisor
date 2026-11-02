@@ -12,6 +12,9 @@
 //!   other.
 //! - **Lighter reminders:** at least [`LIGHTER_MIN_OFFERED`] breaks were offered and more
 //!   than half were set aside (skipped, dismissed or left unanswered); one step lighter.
+//!   With the combined 5-minute break (DEC15), which intensity does not change, that is
+//!   the next longer break interval (20 to 30, 30 to 45, 45 to 60 minutes; none at 60),
+//!   and the line says so; with separate reminders, one step lighter intensity.
 //! - **Keep:** with none of the above in a normal week where most offered breaks were
 //!   taken, a line saying no change is needed (no Apply).
 
@@ -21,7 +24,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 use super::{Metric, MetricRow, WeekStatus};
-use crate::coach::config::{Intensity, MovementVersion};
+use crate::coach::config::{BREAK_MINUTES, Intensity, MovementVersion, ReminderStyle};
 use crate::coach::water::{MAX_SERVINGS, Servings};
 
 /// An amount must be logged this often in the week to suggest a button for it.
@@ -77,6 +80,10 @@ pub struct Current {
     pub movement_version: MovementVersion,
     /// The reminder intensity.
     pub intensity: Intensity,
+    /// Combined 5-minute break or separate reminders (DEC15).
+    pub reminder_style: ReminderStyle,
+    /// The combined break's interval, in minutes.
+    pub break_minutes: u32,
 }
 
 /// A change to one setting.
@@ -89,6 +96,8 @@ pub enum Change {
     MovementVersion(MovementVersion),
     /// The reminder intensity.
     Intensity(Intensity),
+    /// The combined break's interval, in minutes (DEC15).
+    BreakMinutes(u32),
 }
 
 impl Change {
@@ -99,6 +108,7 @@ impl Change {
             Self::Servings(_) => Self::Servings(current.servings.clone()),
             Self::MovementVersion(_) => Self::MovementVersion(current.movement_version),
             Self::Intensity(_) => Self::Intensity(current.intensity),
+            Self::BreakMinutes(_) => Self::BreakMinutes(current.break_minutes),
         }
     }
 
@@ -126,6 +136,7 @@ impl Change {
                     Intensity::MoreOften => "More often",
                 }
             ),
+            Self::BreakMinutes(m) => format!("a 5-minute break every {m} minutes"),
         }
     }
 }
@@ -246,6 +257,11 @@ const fn lighter(i: Intensity) -> Option<Intensity> {
     }
 }
 
+/// The next longer combined break interval, if any.
+fn longer_break(minutes: u32) -> Option<u32> {
+    BREAK_MINUTES.iter().copied().find(|m| *m > minutes)
+}
+
 /// The suggestions the rules give for a week, in a fixed order, at most
 /// [`MAX_SUGGESTIONS`]. None without enough data.
 #[must_use]
@@ -296,18 +312,36 @@ pub fn proposals(
             });
         }
     }
-    if facts.offered >= LIGHTER_MIN_OFFERED
-        && facts.set_aside.saturating_mul(2) > facts.offered
-        && let Some(next) = lighter(current.intensity)
-    {
-        out.push(Proposal {
-            kind: SuggestionKind::Lighter,
-            text: format!(
-                "{} of {} breaks were set aside. Try fewer reminders next week?",
-                facts.set_aside, facts.offered
-            ),
-            change: Some(Change::Intensity(next)),
-        });
+    if facts.offered >= LIGHTER_MIN_OFFERED && facts.set_aside.saturating_mul(2) > facts.offered {
+        let set_aside = format!(
+            "{} of {} breaks were set aside.",
+            facts.set_aside, facts.offered
+        );
+        // Intensity does not change the combined break: a longer interval does.
+        let lighter = match current.reminder_style {
+            ReminderStyle::Combined => longer_break(current.break_minutes).map(|next| {
+                (
+                    format!(
+                        "{set_aside} Try one break every {next} minutes instead of {}?",
+                        current.break_minutes
+                    ),
+                    Change::BreakMinutes(next),
+                )
+            }),
+            ReminderStyle::Separate => lighter(current.intensity).map(|next| {
+                (
+                    format!("{set_aside} Try fewer reminders next week?"),
+                    Change::Intensity(next),
+                )
+            }),
+        };
+        if let Some((text, change)) = lighter {
+            out.push(Proposal {
+                kind: SuggestionKind::Lighter,
+                text,
+                change: Some(change),
+            });
+        }
     }
     let breaks_pct = rows
         .iter()

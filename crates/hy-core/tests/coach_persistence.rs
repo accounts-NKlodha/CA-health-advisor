@@ -23,6 +23,13 @@ use hy_core::store::{CoachCommit, Store};
 use hy_core::time::{UserZone, WeekdaySet, WorkSchedule};
 use uuid::Uuid;
 
+fn separate() -> CoachConfig {
+    CoachConfig {
+        reminder_style: ReminderStyle::Separate,
+        ..CoachConfig::default()
+    }
+}
+
 fn mins(m: u64) -> Duration {
     Duration::from_secs(m * 60)
 }
@@ -62,8 +69,14 @@ impl Env {
         Store::open(&self.path, self.clock.clone()).unwrap()
     }
 
+    /// Open the engine; a new store gets the separate reminders these tests were written
+    /// for (DEC15 made the combined break the default).
     fn open(&self) -> Coach {
-        Coach::open(self.store()).unwrap().0
+        let store = self.store();
+        if store.setting::<CoachConfig>(CONFIG_KEY).unwrap().is_none() {
+            store.put_setting(CONFIG_KEY, &separate()).unwrap();
+        }
+        Coach::open(store).unwrap().0
     }
 
     fn open_with(&self, config: CoachConfig) -> Coach {
@@ -84,7 +97,7 @@ fn only(movement: bool, eye_rest: bool, water: bool) -> CoachConfig {
             eye_rest,
             water,
         },
-        ..CoachConfig::default()
+        ..separate()
     }
 }
 
@@ -910,7 +923,7 @@ fn water_corrections_and_removals_move_the_total_and_pace_and_a_note_ends_on_res
 #[test]
 fn settings_saved_by_a_screen_reach_the_engine_on_refresh() {
     let env = Env::new(ist(20, 10, 0));
-    let mut c = env.open_with(CoachConfig::default());
+    let mut c = env.open_with(separate());
     assert_eq!(c.view().servings, Servings::default());
     let s = Servings::new(vec![200, 750]).unwrap();
     c.store().set_water_servings(&s).unwrap();

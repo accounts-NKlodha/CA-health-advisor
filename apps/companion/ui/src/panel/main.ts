@@ -6,7 +6,7 @@
 // When the engine's bubble is open beside the pet (a reminder, a Pomodoro card, the
 // check-in), the panel shows the same bubble first so it can be answered by keyboard.
 import { applyA11y } from '../shared/a11y';
-import { renderProgress, renderRows } from '../shared/bubble';
+import { renderCountdown, renderProgress, renderRows } from '../shared/bubble';
 import { renderFigure } from '../shared/figures';
 import { call, on, report } from '../shared/ipc';
 import { renderMenu } from '../shared/menu';
@@ -28,6 +28,8 @@ function bubbleSection(b: Bubble): HTMLElement {
   section.append(h);
   const meter = renderProgress(b);
   if (meter) section.append(meter);
+  const timer = renderCountdown(b);
+  if (timer) section.append(timer);
   if (b.figure) {
     const fig = renderFigure(b.figure.id, b.figure.label);
     if (fig) section.append(fig);

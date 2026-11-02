@@ -4,7 +4,7 @@
 // takes focus (WS_EX_NOACTIVATE), so clicks here never move the user's caret.
 import { applyA11y } from '../shared/a11y';
 import { insertArt, setPalette } from '../shared/art';
-import { renderProgress, renderRows } from '../shared/bubble';
+import { renderCountdown, renderProgress, renderRows } from '../shared/bubble';
 import { renderBadge } from '../shared/icons';
 import { renderFigure } from '../shared/figures';
 import { call, on, report } from '../shared/ipc';
@@ -137,6 +137,8 @@ function bubbleBody(b: Bubble, engine: boolean): HTMLElement {
   };
   const meter = renderProgress(b);
   if (meter) body.append(meter);
+  const timer = renderCountdown(b);
+  if (timer) body.append(timer);
   if (b.steps.length > 0 || b.figure) {
     // The movement guide: the illustration beside the numbered steps.
     const guide = el('div', 'guide', body);

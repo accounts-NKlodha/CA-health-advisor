@@ -107,6 +107,14 @@ export interface BubbleProgress {
   label: string;
 }
 
+/** A countdown the page runs from when the card is drawn (a step of the 5-minute break). */
+export interface BubbleCountdown {
+  /** Seconds left when the card was drawn. */
+  seconds: number;
+  /** What runs out, for example "Rest your eyes". */
+  label: string;
+}
+
 export interface BubbleFigure {
   id: string;
   label: string;
@@ -130,6 +138,8 @@ export interface Bubble {
   rows: BubbleRow[];
   /** The card continues after an answer, so the keyboard panel stays open. */
   continues: boolean;
+  /** A countdown under the title (a step of the 5-minute break). */
+  countdown?: BubbleCountdown | null;
 }
 
 export type OpenView =
@@ -366,6 +376,8 @@ export type Suggestion = { kind: SuggestionKind; text: string } & (
 
 export type Intensity = 'light' | 'balanced' | 'more_often';
 export type MovementVersion = 'ask' | 'seated' | 'standing';
+/** One combined 5-minute break (the default, DEC15) or separate reminders. */
+export type ReminderStyle = 'combined' | 'separate';
 export type WeekdayName = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
 
 export interface CoachConfig {
@@ -380,6 +392,9 @@ export interface CoachConfig {
   review: { day: WeekdayName; at: string };
   /** The meditation pause's daily invitation, "HH:MM", or null while off. */
   meditation: { at: string | null };
+  reminder_style: ReminderStyle;
+  /** Minutes of time at the PC between combined breaks: 20, 30, 45 or 60. */
+  break_minutes: number;
 }
 
 export interface WorkSchedule {
@@ -403,7 +418,9 @@ export type CoachChange =
   | { pomodoro_auto_start: boolean }
   | { movement_version: MovementVersion }
   | { review: { day: WeekdayName; at: string } }
-  | { meditation: { at: string | null } };
+  | { meditation: { at: string | null } }
+  | { reminder_style: ReminderStyle }
+  | { break_minutes: number };
 
 /** One Water tab change (hy_core::settings::WaterChange). */
 export type WaterChange =

@@ -57,6 +57,10 @@ pub const WATER_BEHIND_ML: u32 = 100;
 pub const FOCUS_MINUTES: std::ops::RangeInclusive<u32> = 5..=240;
 /// Pause lengths in minutes are accepted between these bounds (D).
 pub const PAUSE_MINUTES: std::ops::RangeInclusive<u32> = 1..=24 * 60;
+/// The combined break's interval choices, in minutes of time at the PC (DEC15).
+pub const BREAK_MINUTES: [u32; 4] = [20, 30, 45, 60];
+/// The combined break's default interval (DEC15: the owner asked for 30 minutes).
+pub const DEFAULT_BREAK_MINUTES: u32 = 30;
 
 /// Reminder intensity (wireframe W4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +219,23 @@ pub struct MeditationTime {
     pub at: Option<NaiveTime>,
 }
 
+/// How movement, eye rest and water are offered (DEC15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReminderStyle {
+    /// One guided 5-minute break (water, eyes, movement, closed-eye breathing) every
+    /// [`CoachConfig::break_minutes`] of time at the PC. The default, also for settings
+    /// saved before DEC15.
+    #[default]
+    Combined,
+    /// Separate movement, eye-rest and water reminders, as before DEC15.
+    Separate,
+}
+
+const fn default_break_minutes() -> u32 {
+    DEFAULT_BREAK_MINUTES
+}
+
 /// The user's coaching settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -241,6 +262,12 @@ pub struct CoachConfig {
     /// The daily meditation invitation (V2-4), off until a time is set.
     #[serde(default)]
     pub meditation: MeditationTime,
+    /// One combined break, or separate reminders (DEC15; combined unless chosen).
+    #[serde(default)]
+    pub reminder_style: ReminderStyle,
+    /// Minutes of time at the PC between combined breaks: 20, 30, 45 or 60 (DEC15).
+    #[serde(default = "default_break_minutes")]
+    pub break_minutes: u32,
 }
 
 impl Default for CoachConfig {
@@ -255,6 +282,8 @@ impl Default for CoachConfig {
             movement_version: MovementVersion::Ask,
             review: ReviewTime::default(),
             meditation: MeditationTime::default(),
+            reminder_style: ReminderStyle::Combined,
+            break_minutes: DEFAULT_BREAK_MINUTES,
         }
     }
 }
@@ -263,8 +292,8 @@ impl CoachConfig {
     /// Check the settings' own rules.
     ///
     /// # Errors
-    /// [`Error::Invalid`] if the check-in hours are not 8, 9 or 10, or the review time
-    /// has seconds.
+    /// [`Error::Invalid`] if the check-in hours are not 8, 9 or 10, the review time has
+    /// seconds, or the break interval is not 20, 30, 45 or 60 minutes.
     pub fn validate(&self) -> Result<()> {
         if !(8..=10).contains(&self.long_day_check_in.hours) {
             return Err(Error::invalid("long-day check-in hours must be 8, 9 or 10"));
@@ -279,7 +308,24 @@ impl CoachConfig {
         {
             return Err(Error::invalid("the meditation time uses whole minutes"));
         }
+        if !BREAK_MINUTES.contains(&self.break_minutes) {
+            return Err(Error::invalid(
+                "the break interval is 20, 30, 45 or 60 minutes",
+            ));
+        }
         Ok(())
+    }
+
+    /// The combined 5-minute break replaces the separate reminders (DEC15).
+    #[must_use]
+    pub const fn combined(&self) -> bool {
+        matches!(self.reminder_style, ReminderStyle::Combined)
+    }
+
+    /// Time at the PC between combined breaks.
+    #[must_use]
+    pub const fn break_every(&self) -> Duration {
+        min(self.break_minutes as u64)
     }
 
     /// The offer interval for `activity` at the current intensity.
@@ -472,6 +518,43 @@ mod tests {
             ..CoachConfig::default()
         };
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn the_combined_break_is_the_default_also_for_saved_settings() {
+        let c = CoachConfig::default();
+        assert!(c.combined());
+        assert_eq!(c.break_every(), min(30));
+        // Settings saved before DEC15 load with the combined break every 30 minutes.
+        let mut old = serde_json::to_value(CoachConfig::default()).unwrap();
+        let o = old.as_object_mut().unwrap();
+        o.remove("reminder_style");
+        o.remove("break_minutes");
+        let c: CoachConfig = serde_json::from_value(old).unwrap();
+        assert_eq!(c.reminder_style, ReminderStyle::Combined);
+        assert_eq!(c.break_minutes, 30);
+        let v = serde_json::to_value(CoachConfig {
+            reminder_style: ReminderStyle::Separate,
+            break_minutes: 45,
+            ..CoachConfig::default()
+        })
+        .unwrap();
+        assert_eq!(v["reminder_style"], "separate");
+        assert_eq!(v["break_minutes"], 45);
+        for (m, ok) in [
+            (15, false),
+            (20, true),
+            (30, true),
+            (45, true),
+            (60, true),
+            (90, false),
+        ] {
+            let c = CoachConfig {
+                break_minutes: m,
+                ..CoachConfig::default()
+            };
+            assert_eq!(c.validate().is_ok(), ok, "{m} min");
+        }
     }
 
     #[test]

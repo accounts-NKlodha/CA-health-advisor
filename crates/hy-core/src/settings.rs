@@ -11,7 +11,9 @@
 use chrono::NaiveTime;
 use serde::{Deserialize, Serialize};
 
-use crate::coach::{CoachConfig, Intensity, MeditationTime, MovementVersion, ReviewTime, Servings};
+use crate::coach::{
+    CoachConfig, Intensity, MeditationTime, MovementVersion, ReminderStyle, ReviewTime, Servings,
+};
 use crate::error::{Error, Result};
 use crate::time::{WeekdaySet, WorkSchedule};
 
@@ -44,6 +46,10 @@ pub enum CoachChange {
     Review(ReviewTime),
     /// When the meditation pause is offered (off until a time is set).
     Meditation(MeditationTime),
+    /// One combined 5-minute break, or separate reminders (DEC15).
+    ReminderStyle(ReminderStyle),
+    /// Minutes of time at the PC between combined breaks (20, 30, 45 or 60).
+    BreakMinutes(u32),
 }
 
 impl CoachChange {
@@ -63,6 +69,8 @@ impl CoachChange {
             Self::MovementVersion(v) => config.movement_version = v,
             Self::Review(v) => config.review = v,
             Self::Meditation(v) => config.meditation = v,
+            Self::ReminderStyle(v) => config.reminder_style = v,
+            Self::BreakMinutes(v) => config.break_minutes = v,
         }
         config
     }
@@ -217,6 +225,10 @@ mod tests {
         assert_eq!(c, CoachChange::Meditation(MeditationTime { at: None }));
         let c: CoachChange = serde_json::from_str(r#"{"movement_version":"seated"}"#).unwrap();
         assert_eq!(c, CoachChange::MovementVersion(MovementVersion::Seated));
+        let c: CoachChange = serde_json::from_str(r#"{"reminder_style":"separate"}"#).unwrap();
+        assert_eq!(c, CoachChange::ReminderStyle(ReminderStyle::Separate));
+        let c: CoachChange = serde_json::from_str(r#"{"break_minutes":45}"#).unwrap();
+        assert_eq!(c.applied_to(CoachConfig::default()).break_minutes, 45);
         assert!(serde_json::from_str::<CoachChange>(r#"{"eye_rest":false,"water":true}"#).is_err());
         assert!(serde_json::from_str::<CoachChange>(r#"{"config":{}}"#).is_err());
     }

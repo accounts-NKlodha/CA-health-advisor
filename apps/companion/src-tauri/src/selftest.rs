@@ -637,23 +637,24 @@ fn coach_end_to_end(
         ),
     );
 
-    // 2. "Already did it" on the real bubble is routed to the engine and recorded.
+    // 2. "Skip" on the real bubble (the combined break's reminder, DEC15) is routed to
+    // the engine and recorded.
     if let Some(bubble_id) = id.clone() {
-        let _ = on_main(shell, move |s| s.bubble_action(&bubble_id, action::DONE));
+        let _ = on_main(shell, move |s| s.bubble_action(&bubble_id, action::SKIP));
     }
     let recorded = offer.as_ref().is_some_and(|o| {
         wait_until(Duration::from_secs(10), || {
             reminder_events(runner)
                 .1
                 .iter()
-                .any(|(r, out)| r == o && *out == ReminderOutcome::Done)
+                .any(|(r, out)| r == o && *out == ReminderOutcome::Skipped)
         })
     });
     let closed = wait_until(Duration::from_secs(5), || shell.open_bubble_id().is_none());
     r.check(
         "coach_answer_recorded_in_store",
         recorded && closed,
-        format!("reminder.response done for {offer:?}: {recorded}; bubble closed {closed}"),
+        format!("reminder.response skipped for {offer:?}: {recorded}; bubble closed {closed}"),
     );
 
     // 3. The next reminder; a presentation hides it, and nothing comes back afterwards.

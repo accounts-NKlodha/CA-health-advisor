@@ -9,8 +9,9 @@
 //! and evenings, a lunchtime lock, an overnight sleep, and the settings and review
 //! windows opened and closed every three simulated hours (each opening makes a new
 //! webview and each closing returns it). Every reminder the engine offers is shown on the
-//! real bubble window and answered there in turn ("Already did it", "Snooze", "Not now",
-//! or left unanswered to collapse), and any other card is closed. The script outside
+//! real bubble window and answered there in turn ("Skip", "Snooze", "Not now" on the
+//! combined break's reminder, DEC15, or left unanswered to collapse), and any other card
+//! is closed. The script outside
 //! samples the processes' memory, handles, threads and CPU throughout and checks there is
 //! no growth trend; this side checks what only the app knows:
 //!
@@ -207,7 +208,7 @@ pub(super) fn run(
     let mut last_card: Option<String> = None;
     let mut turn = 0usize;
     let mut answers: [(&str, u64); 4] = [
-        (action::DONE, 0),
+        (action::SKIP, 0),
         (action::SNOOZE, 0),
         (action::DISMISS, 0),
         ("unanswered", 0),

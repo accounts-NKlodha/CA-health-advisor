@@ -18,6 +18,16 @@ use hy_core::schema::{
 use hy_core::time::{UserZone, WeekdaySet, WorkSchedule};
 use uuid::Uuid;
 
+/// The settings these traces were written for: separate movement, eye-rest and water
+/// reminders (DEC15 made the combined break the default; its traces are in
+/// `coach_breaks.rs`).
+fn separate() -> CoachConfig {
+    CoachConfig {
+        reminder_style: ReminderStyle::Separate,
+        ..CoachConfig::default()
+    }
+}
+
 fn mins(m: u64) -> Duration {
     Duration::from_secs(m * 60)
 }
@@ -97,11 +107,7 @@ impl H {
 
     /// Tuesday 20 Oct 2026, 10:00, no water goal, Balanced.
     fn new() -> Self {
-        Self::at(
-            ist(20, 10, 0),
-            CoachConfig::default(),
-            WaterSnapshot::default(),
-        )
+        Self::at(ist(20, 10, 0), separate(), WaterSnapshot::default())
     }
 
     fn only(movement: bool, eye: bool, water: bool) -> Self {
@@ -253,7 +259,7 @@ fn cats(movement: bool, eye_rest: bool, water: bool) -> CoachConfig {
             eye_rest,
             water,
         },
-        ..CoachConfig::default()
+        ..separate()
     }
 }
 
@@ -1377,7 +1383,7 @@ fn guide_reported_skip_after_an_answer_is_a_stop() {
     // the counts of the movements answered.
     let mut h = H::at(
         ist(20, 9, 40),
-        CoachConfig::default(),
+        separate(),
         WaterSnapshot {
             logged_ml: 0,
             goal_ml: None,
@@ -2170,7 +2176,7 @@ fn t_r4_lock_one_minute_pauses_without_reset() {
 fn t_r5_sleep_two_hours_no_burst_and_pomodoro_waits_for_resume() {
     let mut h = H::at(
         ist(20, 10, 0),
-        CoachConfig::default(),
+        separate(),
         WaterSnapshot {
             logged_ml: 0,
             goal_ml: Some(2000),
@@ -2643,11 +2649,7 @@ fn pomodoro_round_done_during_a_meeting_opens_no_card() {
 
 #[test]
 fn pomodoro_break_due_after_hours_opens_no_card_and_is_not_replayed_next_morning() {
-    let mut h = H::at(
-        ist(20, 18, 15),
-        CoachConfig::default(),
-        WaterSnapshot::default(),
-    );
+    let mut h = H::at(ist(20, 18, 15), separate(), WaterSnapshot::default());
     classic_pomodoro(&mut h);
     h.wait(mins(25)); // ends at 18:40, after the 18:30 end of work hours
     assert_eq!(h.view().hold, Some(Hold::PauseLockOffHours));
@@ -4673,7 +4675,7 @@ mod property {
             acts in prop::collection::vec(act(), 1..160),
             goal in prop::option::of(1000u32..3000),
         ) {
-            let mut h = H::at(ist(20, 9, 40), CoachConfig::default(), WaterSnapshot {
+            let mut h = H::at(ist(20, 9, 40), separate(), WaterSnapshot {
                 logged_ml: 0,
                 goal_ml: goal,
             });
@@ -4824,7 +4826,7 @@ fn review_offer_follows_the_chosen_time() {
             day: Weekday::Fri,
             at: hm(11, 0),
         },
-        ..CoachConfig::default()
+        ..separate()
     };
     let mut h = H::at(ist(23, 10, 55), config, WaterSnapshot::default());
     h.wait_until(mins(6), |v| review_offer(v).is_some());
@@ -4835,7 +4837,7 @@ fn review_offer_follows_the_chosen_time() {
 fn default_movement_version_reaches_the_guide() {
     let config = CoachConfig {
         movement_version: MovementVersion::Standing,
-        ..CoachConfig::default()
+        ..separate()
     };
     let mut h = H::at(ist(20, 10, 0), config, WaterSnapshot::default());
     h.input(Input::RoutineStarted);
@@ -5210,7 +5212,7 @@ fn the_view_reports_each_hold_for_the_camera() {
         ist(20, 10, 0),
         CoachConfig {
             hide_during_presentation: false,
-            ..CoachConfig::default()
+            ..separate()
         },
         WaterSnapshot::default(),
     );
@@ -5239,11 +5241,7 @@ fn the_view_reports_each_hold_for_the_camera() {
     h.input(Input::Unlock);
     assert_eq!(h.view().holds.camera_hold(), None);
     // Off-hours: 19:00 on a workday.
-    let mut late = H::at(
-        ist(20, 19, 0),
-        CoachConfig::default(),
-        WaterSnapshot::default(),
-    );
+    let mut late = H::at(ist(20, 19, 0), separate(), WaterSnapshot::default());
     late.input(Input::Refresh);
     assert_eq!(late.view().holds.camera_hold(), Some(CameraHold::OffHours));
     // Views saved before V2-1 still load.

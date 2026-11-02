@@ -185,6 +185,8 @@ impl Store {
             servings: self.water_servings()?,
             movement_version: config.movement_version,
             intensity: config.intensity,
+            reminder_style: config.reminder_style,
+            break_minutes: config.break_minutes,
         })
     }
 
@@ -238,6 +240,11 @@ impl Store {
             Change::Intensity(i) => {
                 let mut c = self.coach_config()?;
                 c.intensity = *i;
+                self.set_coach_config(&c)
+            }
+            Change::BreakMinutes(m) => {
+                let mut c = self.coach_config()?;
+                c.break_minutes = *m;
                 self.set_coach_config(&c)
             }
         }
