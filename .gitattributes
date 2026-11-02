@@ -6,3 +6,5 @@
 *.task binary
 # Windows batch files need CRLF line endings.
 *.cmd text eol=crlf
+# Fuzz seeds are exact bytes (checked by crates/hy-core/tests/fuzz_seeds.rs).
+fuzz/corpus/** binary

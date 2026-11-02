@@ -104,15 +104,15 @@ Run `scripts/windows/Test-HealthierYou-OfficePC.ps1 -Installer <setup.exe> -Repo
 
 ## 7. Tracked work (approved, not yet built)
 
-These are required by the approved architecture and not dropped. Each is outside V1-7's scope and is recorded here so it is not lost.
+These are required by the approved architecture and not dropped. Each is outside V1-7's scope and is recorded here so it is not lost. Rows marked **Built** are done and stay listed for the record.
 
 **Built since:** W1, server-delivered updates (DEC16; V1-6 section 2a). Paired, confirmed PCs take the update file from the office server's drop folder over the paired channel and run the file route's whole check on it; its physical test is I10 in section 3.
 
 | Id | Work | Source | Notes |
 | --- | --- | --- | --- |
 | W2 | Companion observability: JSON-line log rotated at 7 days or 10 MB, the hourly resource summary, a panic hook with webview recreation, and the user-reviewed diagnostics zip | Architecture 10 | The server has its log, rotation and panic hook. The companion has none of these yet, so S1 reads its numbers from outside (`Test-Soak.ps1`) and from the store (`--hy-soak-stats`), and T-S10's diagnostics-zip part cannot run until the zip exists |
-| W3 | Supply chain: `cargo-deny` with a `deny.toml`, `npm audit`, the licence register and an SBOM | Architecture 9; V1-5 contract C18 | Not in CI yet |
-| W4 | T-S25 fuzzing (cargo-fuzz, time-boxed on Linux CI): slip parser, control-entry decoder and chain verifier, head and receipt decoder, upload JSON | V1-5 contract 14.2 | Property tests cover single-bit changes today; the fuzz targets are not added |
+| W3 | Supply chain: `cargo-deny` with a `deny.toml`, `npm audit`, the licence register and an SBOM | Architecture 9; V1-5 contract C18 | **Built.** CI job "Supply chain": `cargo deny --locked check` over `deny.toml` (advisories, licences, bans, sources), `npm audit --audit-level=high` for `apps/companion/ui`, the UI's licences checked from its SBOM, and CycloneDX SBOMs (Rust workspace for the Windows target, UI runtime packages) kept as the artifact `sbom`. Register and exceptions: `docs/Licence_Register.md`. Its first run found seven advisories (rustls, rustls-webpki, webpki-root-certs, tokio); all fixed by updates |
+| W4 | T-S25 fuzzing (cargo-fuzz, time-boxed on Linux CI): slip parser, control-entry decoder and chain verifier, head and receipt decoder, upload JSON | V1-5 contract 14.2 | **Built.** `fuzz/` (cargo-fuzz 0.13.2, own workspace): `slip`, `control_entry`, `chain_verify`, `head_receipt` (receipt body and wire head), `state_json` (the state response as the companion reads it) and `upload_json` (the upload body as the server reads it, with the payload schemas). Each checks no panic plus round-trip or verdict properties. Seeds come from the protocol test vectors (`crates/hy-core/tests/fuzz_seeds.rs` writes and checks them). CI job "Fuzz (T-S25)" runs each target for 60 s on a pinned nightly (that job only); crash inputs are kept as the artifact `fuzz-crashes`. No crash found so far (10 minutes per target locally, then CI) |
 | W5 | Pin the checksums of companion migrations 0005 and 0006 | `hy-core` migrations | They are pinned when first released (as v1 to v4 were); do it in the pilot release build |
 
 ## 8. Filing results
