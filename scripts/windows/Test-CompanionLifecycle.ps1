@@ -62,6 +62,22 @@ function Test-AppWebView2([object]$Process, [string]$InstallRoot) {
   $cmd.IndexOf("\$UserDataName", [StringComparison]::OrdinalIgnoreCase) -ge 0
 }
 
+# True for the NSIS uninstaller's temp copy working on this install: Un.exe (NSIS 3) or
+# Au_.exe (NSIS 2) started with "_?=<install folder>", or, when the command line cannot be
+# read, run from a ~nsu*.tmp folder.
+function Test-UninstallerCopy([object]$Process, [string]$InstallRoot) {
+  if (@('Un.exe', 'Au_.exe') -notcontains "$($Process.Name)") { return $false }
+  $cmd = "$($Process.CommandLine)"
+  if ($cmd) {
+    $root = $InstallRoot.TrimEnd('\')
+    $i = $cmd.IndexOf('_?=', [StringComparison]::OrdinalIgnoreCase)
+    if ($i -lt 0) { return $false }
+    $dir = $cmd.Substring($i + 3).Trim().Trim('"').TrimEnd('\')
+    return [string]::Equals($dir, $root, [StringComparison]::OrdinalIgnoreCase)
+  }
+  "$($Process.ExecutablePath)" -match '\\~nsu[0-9A-Fa-f]*\.tmp\\[^\\]+$'
+}
+
 # One line per uninstall-loop round, then the verdict: every round must leave no cache.
 function Get-LoopSummary([object[]]$Rounds) {
   $left = @($Rounds | Where-Object { $_.cache_left })
@@ -96,6 +112,15 @@ if ($Phase -eq 'SelfTest') {
   $s = Get-LoopSummary @((& $r $false $false 1), (& $r $true $false 2))
   T 'loop summary: one round with the cache left fails' (-not $s.ok -and $s.cache_left -eq 1)
   T 'loop summary: no rounds is not a pass' (-not (Get-LoopSummary @()).ok)
+  $u = { param($n, $path, $cmd) [pscustomobject]@{ Name = $n; ExecutablePath = $path; CommandLine = $cmd } }
+  $tmp = 'C:\Users\u\AppData\Local\Temp'
+  T 'uninstaller copy (NSIS 3 Un.exe) for this install counts' (Test-UninstallerCopy (& $u 'Un.exe' "$tmp\~nsu1.tmp\Un.exe" "`"$tmp\~nsu1.tmp\Un.exe`" /S _?=$root\") $root)
+  T 'uninstaller copy: case-insensitive, NSIS 2 Au_.exe, /DELETEDATA' (Test-UninstallerCopy (& $u 'Au_.exe' "$tmp\~nsu.tmp\Au_.exe" "`"$tmp\~nsu.tmp\Au_.exe`" /S /DELETEDATA _?=C:\USERS\U\APPDATA\LOCAL\HEALTHIERYOU\") $root)
+  T 'uninstaller copy: command line not readable, ~nsu folder counts' (Test-UninstallerCopy (& $u 'Un.exe' "$tmp\~nsuA.tmp\Un.exe" $null) $root)
+  T 'another program''s uninstaller copy does not count' (-not (Test-UninstallerCopy (& $u 'Un.exe' "$tmp\~nsu2.tmp\Un.exe" "`"$tmp\~nsu2.tmp\Un.exe`" /S _?=C:\Program Files\Other\") $root))
+  T 'a folder that only starts like the install folder does not count' (-not (Test-UninstallerCopy (& $u 'Un.exe' "$tmp\~nsu1.tmp\Un.exe" "`"x`" _?=${root}Old\") $root))
+  T 'other processes named Un.exe elsewhere do not count' (-not (Test-UninstallerCopy (& $u 'Un.exe' 'C:\tools\Un.exe' $null) $root))
+  T 'the original uninstall.exe does not count' (-not (Test-UninstallerCopy (& $u 'uninstall.exe' "$root\uninstall.exe" "`"$root\uninstall.exe`" /S") $root))
   Write-Host "self-test: $fails failed"
   exit $(if ($fails -eq 0) { 0 } else { 1 })
 }
@@ -211,14 +236,23 @@ function Run-Installer([string]$Path, [string]$Arguments = '/S') {
 function Invoke-Uninstall([string]$Arguments = '/S') {
   $u = Join-Path $Root 'uninstall.exe'
   if (-not (Test-Path $u)) { return $false }
-  # The NSIS uninstaller copies itself to the temp folder and exits at once; wait for
-  # the copy (Au_.exe) to finish and the entry to go, as Windows Settings would.
+  # The NSIS uninstaller copies itself to %TEMP%\~nsu<N>.tmp\Un.exe (Au_.exe before NSIS
+  # 3), starts the copy with "_?=<install folder>" and exits at once; the copy does the
+  # work. Wait for the copy to end, as Windows Settings would: the uninstall entry and the
+  # program go early in the copy's run, before the installer hooks (the WebView2 wait
+  # and the cache removal), so they alone do not say it has finished (I9a). The install
+  # key HKCU\Software\HealthierYou, removed by the hook after the cache, must be gone too.
   $null = Start-AndWait $u $Arguments
+  $seen = $false
   $deadline = (Get-Date).AddMinutes(3)
   while ((Get-Date) -lt $deadline) {
-    $running = @(Get-Process -Name 'Au_' -ErrorAction SilentlyContinue).Count -gt 0
-    if (-not $running -and -not (Test-Path $UninstallKey) -and -not (Test-Path $Exe)) { return $true }
-    Start-Sleep -Milliseconds 500
+    $copies = @(Get-CimInstance Win32_Process -Filter "Name = 'Un.exe' OR Name = 'Au_.exe'" -ErrorAction SilentlyContinue | Where-Object { Test-UninstallerCopy $_ $Root })
+    if ($copies.Count -gt 0) { $seen = $true }
+    if ($copies.Count -eq 0 -and -not (Test-Path $UninstallKey) -and -not (Test-Path $Exe) -and -not (Test-Path $ManuKey)) {
+      if (-not $seen) { Write-Host "::warning title=Lifecycle::the uninstaller's temp copy was never seen running; finished judged by the registry and files only" }
+      return $true
+    }
+    Start-Sleep -Milliseconds 250
   }
   $false
 }

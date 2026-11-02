@@ -15,26 +15,49 @@
 !define HY_STARTUP_APPROVED_KEY "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
 !define HY_DATA_ROOT "$LOCALAPPDATA\HealthierYou"
 
-; Sets `outvar` to 1 while a process runs this install's bundled WebView2 runtime
-; (webview2-fixed\msedgewebview2.exe), else 0. Only HealthierYou runs that private copy of
-; the runtime, so these are exactly this app's WebView2 processes (other apps' WebView2
-; processes run another copy and are never counted). Asks the Restart Manager, as the
-; template does for the app itself. Uses $0, $1, $2, $3 and $5.
+; Registers `path` with Restart Manager session `handle` if the file is there; sets $0 to
+; the result (0 when it is not there). Uses $0.
+!macro HY_RM_REGISTER_IF_PRESENT handle path
+  StrCpy $0 0
+  ${If} ${FileExists} "${path}"
+    !insertmacro RestartManager_RegisterFile ${handle} "${path}"
+  ${EndIf}
+!macroend
+
+; Sets `outvar` to 1 while a process uses this app's WebView2, else 0, asking the Restart
+; Manager (as the template does for the app itself), which reports both processes that
+; run a file and processes that hold it open:
+; - this install's bundled runtime (webview2-fixed\msedgewebview2.exe): only HealthierYou
+;   runs that private copy, so other apps' WebView2 processes are never counted;
+; - the WebView2 user-data folder's own files: `lockfile`, which Chromium's browser process
+;   holds open for as long as it uses the folder, and the files I9a's CI loop found held
+;   (Local State, Last Version, Variations). Any process tied to this app's user-data
+;   folder counts, whichever runtime it runs, and so does a scanner holding one for a
+;   moment (the wait is bounded).
+; Uses $0, $1, $2, $3 and $5.
 !macro HY_RUNTIME_IN_USE outvar
   StrCpy ${outvar} 0
-  ${If} ${FileExists} "$INSTDIR\webview2-fixed\msedgewebview2.exe"
-    !insertmacro RestartManager_StartSession $1
-    ${If} $1 != ""
-      !insertmacro RestartManager_RegisterFile $1 "$INSTDIR\webview2-fixed\msedgewebview2.exe"
-      ${If} $0 = 0
-        ; ERROR_MORE_DATA (234): at least one process uses the file.
-        System::Call 'RSTRTMGR::RmGetList(i r1, *i .r2, *i .r3, p 0, *i .r5) i .r0'
-        ${If} $0 = 234
-          StrCpy ${outvar} 1
-        ${EndIf}
+  !insertmacro RestartManager_StartSession $1
+  ${If} $1 != ""
+    StrCpy $2 0
+    !insertmacro HY_RM_REGISTER_IF_PRESENT $1 "$INSTDIR\webview2-fixed\msedgewebview2.exe"
+    ${IfThen} $0 <> 0 ${|} StrCpy $2 1 ${|}
+    !insertmacro HY_RM_REGISTER_IF_PRESENT $1 "$LOCALAPPDATA\${BUNDLEID}\EBWebView\lockfile"
+    ${IfThen} $0 <> 0 ${|} StrCpy $2 1 ${|}
+    !insertmacro HY_RM_REGISTER_IF_PRESENT $1 "$LOCALAPPDATA\${BUNDLEID}\EBWebView\Local State"
+    ${IfThen} $0 <> 0 ${|} StrCpy $2 1 ${|}
+    !insertmacro HY_RM_REGISTER_IF_PRESENT $1 "$LOCALAPPDATA\${BUNDLEID}\EBWebView\Last Version"
+    ${IfThen} $0 <> 0 ${|} StrCpy $2 1 ${|}
+    !insertmacro HY_RM_REGISTER_IF_PRESENT $1 "$LOCALAPPDATA\${BUNDLEID}\EBWebView\Variations"
+    ${IfThen} $0 <> 0 ${|} StrCpy $2 1 ${|}
+    ${If} $2 = 0
+      ; ERROR_MORE_DATA (234): at least one process uses one of the files.
+      System::Call 'RSTRTMGR::RmGetList(i r1, *i .r2, *i .r3, p 0, *i .r5) i .r0'
+      ${If} $0 = 234
+        StrCpy ${outvar} 1
       ${EndIf}
-      !insertmacro RestartManager_EndSession $1
     ${EndIf}
+    !insertmacro RestartManager_EndSession $1
   ${EndIf}
 !macroend
 
@@ -62,9 +85,10 @@
     ; I9a (docs/V1_Acceptance.md): the template has closed the app by now (or it was not
     ; running), but its WebView2 processes end on their own a little later and keep files
     ; of the runtime and of the WebView2 cache open until then; a scanner can also hold a
-    ; new file for a moment. So wait for every WebView2 process of this app to end (at
-    ; most 30 s), close any still running after that, then remove the runtime and the
-    ; cache, retrying for at most 30 s. $R8 counts the tries ($R9 is used below).
+    ; file for a moment. So wait until no process uses this app's WebView2 (at most 30 s),
+    ; close any process still running the bundled runtime after that, then remove the
+    ; runtime and the cache, retrying for at most 30 s. $R8 counts the tries ($R9 is used
+    ; below).
     StrCpy $R8 0
     ${Do}
       !insertmacro HY_RUNTIME_IN_USE $4
@@ -82,7 +106,11 @@
     ; The runtime folder, whatever an older runtime left in it, and WebView2's cache for
     ; this app (the pages keep nothing in browser storage, so it holds no personal data),
     ; then the program folder if that leaves it empty (the template tried before the
-    ; runtime was gone).
+    ; runtime was gone). Done only when each folder itself is gone, not merely emptied:
+    ; RMDir /r can empty a tree and still fail on a folder that Windows has not finished
+    ; deleting a child of (delete pending) or that something holds for a moment, so it is
+    ; simply run again. `${FileExists} "dir\*.*"` is true while the folder exists, even
+    ; empty (it matches the folder's "." entry).
     StrCpy $R8 0
     ${Do}
       RMDir /r "$INSTDIR\webview2-fixed"
