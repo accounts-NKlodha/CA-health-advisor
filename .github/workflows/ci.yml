@@ -201,6 +201,9 @@ jobs:
       FUZZ_TOOLCHAIN: nightly-2026-10-15
       CARGO_FUZZ_VERSION: 0.13.2
       FUZZ_SECONDS: 60
+      # Named explicitly: the prebuilt cargo-fuzz is a musl binary and would otherwise
+      # default to the musl target, which the address sanitizer cannot use.
+      FUZZ_TARGET: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
 
@@ -225,14 +228,14 @@ jobs:
           cargo clippy --manifest-path fuzz/Cargo.toml --locked --all-targets -- -D warnings
 
       - name: Build the fuzz targets
-        run: cargo "+$FUZZ_TOOLCHAIN" fuzz build --fuzz-dir fuzz
+        run: cargo "+$FUZZ_TOOLCHAIN" fuzz build --fuzz-dir fuzz --target "$FUZZ_TARGET"
 
       - name: Run each target from its seeds
         run: |
           failed=""
           for t in $(cargo "+$FUZZ_TOOLCHAIN" fuzz list --fuzz-dir fuzz); do
             echo "::group::$t"
-            if ! cargo "+$FUZZ_TOOLCHAIN" fuzz run --fuzz-dir fuzz "$t" -- -max_total_time="$FUZZ_SECONDS" -rss_limit_mb=2048 -timeout=10; then
+            if ! cargo "+$FUZZ_TOOLCHAIN" fuzz run --fuzz-dir fuzz --target "$FUZZ_TARGET" "$t" -- -max_total_time="$FUZZ_SECONDS" -rss_limit_mb=2048 -timeout=10; then
               failed="$failed $t"
               echo "::error title=Fuzz (T-S25)::$t found a crash; the input is in the artifact fuzz-crashes"
             fi
