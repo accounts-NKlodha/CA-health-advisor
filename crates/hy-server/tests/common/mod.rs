@@ -568,6 +568,16 @@ pub fn gated_requests() -> Vec<(reqwest::Method, &'static str, Option<Vec<u8>>)>
         ),
         (Method::POST, "/v1/receipt", Some(br#"{"head":"AAAA"}"#.to_vec())),
         (Method::GET, "/v1/update/manifest", None),
+        (
+            Method::GET,
+            "/v1/update/signature?file=HealthierYou_0.1.1_x64-setup.exe",
+            None,
+        ),
+        (
+            Method::GET,
+            "/v1/update/installer?file=HealthierYou_0.1.1_x64-setup.exe&offset=0",
+            None,
+        ),
     ]
 }
 

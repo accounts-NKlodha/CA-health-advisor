@@ -9,6 +9,7 @@ import {
   markNote,
   outcomeLine,
   rollbackLine,
+  serverLine,
   sizeText,
 } from '../src/screens/app.ts';
 
@@ -55,6 +56,16 @@ test('going back names the only version it can be', () => {
   const page = { previous_version: null };
   assert.match(rollbackLine(page), /there is none yet/);
   assert.match(rollbackLine({ previous_version: '0.1.0' }), /install version 0\.1\.0/);
+});
+
+test('the office server check says why there is nothing to install', () => {
+  assert.match(serverLine({ kind: 'none_offered' }), /has no update/);
+  assert.equal(
+    serverLine({ kind: 'up_to_date', version: '0.2.0' }),
+    'This PC already has version 0.2.0, the version the office server offers.',
+  );
+  // A ready update is shown exactly as a checked file.
+  assert.equal(serverLine({ kind: 'ready', check: check() }), null);
 });
 
 test('the diagnostics zip says what it holds before it is saved (W2)', () => {

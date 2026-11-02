@@ -53,6 +53,7 @@ const COMMANDS: &[&str] = &[
     "server_restore",
     "app_page",
     "update_choose",
+    "update_from_server",
     "update_install",
     "set_autostart",
     "camera_open",

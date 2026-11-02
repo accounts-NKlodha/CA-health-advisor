@@ -26,6 +26,9 @@
 //! opened take the full reset: new keys (`init` on a fresh data folder), every PC re-pairs
 //! with a new slip, and the old backups cannot be opened (`docs/Server_Operations.md`).
 //!
+//! Companion update files for the paired PCs go in `<data-dir>\updates` (made at start;
+//! see `hy_server::updates`).
+//!
 //! The data directory defaults to `%ProgramData%\HealthierYou\Server` on Windows and must
 //! be given elsewhere. Running as a Windows service under a virtual account, the folder
 //! ACLs and the firewall rule are set up by the server installer (slice V1-6).
@@ -395,9 +398,14 @@ fn serve_cmd(
     let log_file: &'static logging::RotatingFile = Box::leak(Box::new(log_file));
     logging::install(move || log_file);
     logging::install_panic_hook();
+    // The drop folder for companion update files (W1). Made here, by the service's own
+    // account, so it takes the data folder's rights.
+    let updates_dir = dir.join(hy_server::updates::DIR_NAME);
+    std::fs::create_dir_all(&updates_dir).map_err(|e| format!("updates folder: {e}"))?;
     let config = Config {
         host_name: host_name(args),
         api_port: args.api.port(),
+        updates_dir: Some(updates_dir),
         ..Config::default()
     };
     let server = Arc::new(Server::new(

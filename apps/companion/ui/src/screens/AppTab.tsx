@@ -1,7 +1,8 @@
 // Settings > App & updates (slice V1-6): the version, start at sign-in, installing a
-// signed update file (with the previous version kept and put back if the new one does
-// not start), where the data lives, and (W2) the diagnostics zip: built, shown in full,
-// and saved only where the user chooses. Nothing is uploaded.
+// signed update file chosen from a share or downloaded from the paired office server
+// (W1; the same check either way, with the previous version kept and put back if the new
+// one does not start), where the data lives, and (W2) the diagnostics zip: built, shown
+// in full, and saved only where the user chooses. Nothing is uploaded.
 import { useEffect, useState } from 'preact/hooks';
 import { call, report } from '../shared/ipc';
 import type { AppPage, DiagnosticsPreview, UpdateCheck } from '../shared/types';
@@ -13,6 +14,7 @@ import {
   markNote,
   outcomeLine,
   rollbackLine,
+  serverLine,
   sizeText,
 } from './app';
 
@@ -36,6 +38,23 @@ export function AppTab() {
       .then((c) => {
         setCheck(c);
         setStatus('');
+      })
+      .catch((e: unknown) => setStatus(String(e)))
+      .finally(() => setBusy(false));
+  };
+
+  const fromServer = () => {
+    setBusy(true);
+    setCheck(null);
+    setStatus('Asking the office server and checking its file...');
+    call('update_from_server')
+      .then((r) => {
+        if (r.kind === 'ready') {
+          setCheck(r.check);
+          setStatus('');
+        } else {
+          setStatus(serverLine(r) ?? '');
+        }
       })
       .catch((e: unknown) => setStatus(String(e)))
       .finally(() => setBusy(false));
@@ -79,21 +98,32 @@ export function AppTab() {
       ) : null}
 
       <section aria-labelledby="update-h">
-        <h3 id="update-h">Install update from file</h3>
+        <h3 id="update-h">Install an update</h3>
         <p>
-          Choose the installer from the shared folder or USB stick. Its signature file (the same
-          name ending in .sig) must be next to it. Nothing runs until the signature checks out.
-          Your data stays where it is. If the new version does not start, the version you have now
-          is put back.
+          Get the update from the office server (when this PC is paired with it and confirmed), or
+          choose the installer from the shared folder or USB stick, with its signature file (the
+          same name ending in .sig) next to it. Either way nothing runs until the signature checks
+          out. Your data stays where it is. If the new version does not start, the version you
+          have now is put back.
         </p>
         {page.update_blocked ? (
           <p class="note" role="note">
             {page.update_blocked}
           </p>
         ) : (
-          <button type="button" class="btn" disabled={busy || page.in_progress} onClick={choose}>
-            Choose update file...
-          </button>
+          <div class="actions">
+            <button
+              type="button"
+              class="btn"
+              disabled={busy || page.in_progress}
+              onClick={fromServer}
+            >
+              Check the office server for an update
+            </button>
+            <button type="button" class="btn" disabled={busy || page.in_progress} onClick={choose}>
+              Choose update file...
+            </button>
+          </div>
         )}
         {check ? (
           <div class="notice" role="group" aria-label="Checked update">

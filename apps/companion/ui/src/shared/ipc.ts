@@ -28,6 +28,7 @@ import type {
   SettingsView,
   SuggestionAnswer,
   SuggestionKind,
+  ServerUpdate,
   UpdateCheck,
   WaterChange,
   WeekReview,
@@ -92,6 +93,8 @@ interface Commands {
   app_page: { args: undefined; result: AppPage };
   /** Opens the Open dialog; null if the user cancelled it. */
   update_choose: { args: undefined; result: UpdateCheck | null };
+  /** Downloads the office server's update and checks it as a chosen file. */
+  update_from_server: { args: undefined; result: ServerUpdate };
   update_install: { args: undefined; result: void };
   set_autostart: { args: { enabled: boolean }; result: AppPage };
   // The diagnostics zip (W2): built and shown, then saved only where the user chooses.

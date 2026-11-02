@@ -1,6 +1,6 @@
 // The text of Settings > App & updates (slice V1-6), kept apart from the component so it
 // can be tested with node --test.
-import type { AppPage, DiagnosticsPreview, UpdateCheck, UpdateOutcome } from '../shared/types';
+import type { AppPage, DiagnosticsPreview, ServerUpdate, UpdateCheck, UpdateOutcome } from '../shared/types';
 
 /** What installing the checked file will do. */
 export function checkSummary(c: UpdateCheck): string {
@@ -46,6 +46,19 @@ export function rollbackLine(p: AppPage): string {
   return p.previous_version
     ? `To go back, install version ${p.previous_version} (the version this PC was updated from) from its file the same way.`
     : 'Going back is possible only to the version this PC was updated from; there is none yet.';
+}
+
+/** What the office server check found, when there is nothing to install (null when a
+ * checked update is ready: the page then shows it as a chosen file). */
+export function serverLine(r: ServerUpdate): string | null {
+  switch (r.kind) {
+    case 'none_offered':
+      return 'The office server has no update for HealthierYou right now.';
+    case 'up_to_date':
+      return `This PC already has version ${r.version}, the version the office server offers.`;
+    case 'ready':
+      return null;
+  }
 }
 
 /** A size in bytes, for people. */
