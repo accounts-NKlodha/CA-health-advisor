@@ -304,6 +304,7 @@ fn main() {
             commands::server_restore,
             commands::app_page,
             commands::update_choose,
+            commands::update_from_server,
             commands::update_install,
             commands::set_autostart,
             commands::camera_open,

@@ -551,6 +551,7 @@ async fn dashboard(State(st): State<AdminState>, headers: HeaderMap) -> Response
          On a replacement server, after a Windows reinstall, or if the keys cannot be opened, the only route is a full reset: \
          new keys, every PC re-pairs with a new slip, and the old backups cannot be opened.</p>"
     );
+    updates_section(&mut b, s);
     if users.iter().any(|u| u.hold) {
         b.push_str("<p class=\"warn\">One or more users are in recovery hold: their shared history is paused.</p>");
         recovery_section(&mut b, s, &csrf, now);
@@ -676,6 +677,45 @@ async fn dashboard(State(st): State<AdminState>, headers: HeaderMap) -> Response
     }
     b.push_str("</table>");
     page("Overview", &b)
+}
+
+/// "Updates for the PCs" (W1): what the drop folder offers. Read-only: the files are
+/// placed by copying them into the folder ([`crate::updates`]).
+fn updates_section(b: &mut String, s: &Server) {
+    b.push_str("<h2>Updates for the PCs</h2>");
+    let Some(dir) = s.config.updates_dir.as_deref() else {
+        b.push_str("<p>This server does not offer updates.</p>");
+        return;
+    };
+    let _ = write!(
+        b,
+        "<p>To offer a companion update, copy the release's two files, \
+         <span class=\"mono\">HealthierYou_&lt;version&gt;_x64-setup.exe</span> and the same name ending in \
+         <span class=\"mono\">.sig</span>, unchanged, into <span class=\"mono\">{}</span> from a command prompt or \
+         PowerShell run as administrator. Paired, confirmed PCs then find it under Settings &gt; App &amp; updates. \
+         The newest version in the folder is offered. This server does not check the signature: every PC checks it \
+         with the release key built into it, and refuses a changed, unsigned or older file, before anything is installed.</p>",
+        esc(&dir.display().to_string())
+    );
+    match crate::updates::current(dir) {
+        None => b.push_str("<p>Offered now: nothing.</p>"),
+        Some(o) => {
+            #[allow(clippy::cast_precision_loss)]
+            let mb = o.size as f64 / 1_048_576.0;
+            let _ = write!(
+                b,
+                "<p>Offered now: <span class=\"mono\">{}</span> (version {}, {mb:.1} MB).</p>",
+                esc(&o.file_name),
+                o.version
+            );
+            if !o.has_signature {
+                b.push_str(
+                    "<p class=\"warn\">Its .sig file is missing (or too large to be one): every PC will refuse this \
+                     update. Copy the .sig file the owner made for it into the same folder.</p>",
+                );
+            }
+        }
+    }
 }
 
 /// The recovery-hold section: what each held user still needs, and the witness forms

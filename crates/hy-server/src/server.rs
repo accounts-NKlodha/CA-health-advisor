@@ -51,6 +51,9 @@ pub struct Config {
     /// Pairing attempts allowed per source IP per minute, per IP per hour, and in total
     /// per hour (4.4).
     pub pair_limits: (u32, u32, u32),
+    /// The drop folder for companion update files (W1, [`crate::updates`]):
+    /// `<data folder>\updates` for the service; `None` offers no update.
+    pub updates_dir: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -62,6 +65,7 @@ impl Default for Config {
             // The parameters used by `.hybackup` (contract 6.1).
             argon2: (64 * 1024, 3, 1),
             pair_limits: (5, 30, 60),
+            updates_dir: None,
         }
     }
 }

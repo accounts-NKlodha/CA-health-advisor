@@ -22,6 +22,16 @@
 //!    back and starts the previous version. Settings then says what happened. If Windows
 //!    or the user stopped the installer before it ran, nothing was changed.
 //!
+//! **From the office server** (architecture 8, W1), "Check the office server for an
+//! update": a paired, confirmed PC asks the server over the pinned channel with its token,
+//! downloads the same two files into `updates\downloaded`
+//! ([`hy_core::link::flow::fetch_update`], which refuses a missing signature, a key this
+//! build does not trust, a renamed file or a version that is not allowed before it
+//! downloads the installer), and then runs exactly step 1's check on them
+//! ([`Updater::check`]). From there it is the same flow: the page shows what would
+//! happen, and "Install and restart" stages and checks the copy again. The server is
+//! never trusted for authenticity, and a refused file gets the file route's message.
+//!
 //! The same check and install run from the command line for scripted installs and the CI
 //! lifecycle test: `hy-companion.exe --hy-update-check <installer> [--report <file>]` and
 //! `--hy-update-install <installer> [--report <file>]` (refused while the app runs).
@@ -30,14 +40,20 @@
 //! migrations keep the previous release able to open it (expand, then contract).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use hy_core::link::LinkOptions;
+use hy_core::link::flow::{FlowError, UpdateFetch, fetch_update};
+use hy_core::protocol::wire::WireError;
 use hy_core::update::{
     self, Attempt, Confirmation, OutcomeKind, Phase, Plan, Product, TrustedKeys, UpdateState,
     VerifiedRelease, Version,
 };
 use serde::Serialize;
+
+use crate::server_link::DpapiUserVault;
+use crate::shell::Shell;
 
 /// The update public keys built into this program (`build.rs`: the `HY_UPDATE_PUBKEY`
 /// environment variable at build time, else `release/update-keys.txt`). Empty in a build
@@ -98,6 +114,11 @@ impl Dirs {
 
     fn staged(&self) -> PathBuf {
         self.updates.join("staged")
+    }
+
+    /// Where the files downloaded from the office server go before they are checked.
+    fn downloaded(&self) -> PathBuf {
+        self.updates.join("downloaded")
     }
 
     fn previous(&self) -> PathBuf {
@@ -176,6 +197,24 @@ pub struct UpdateCheck {
     pub size_mb: f64,
     /// Whether Windows marked the file as downloaded (it may show its own warning).
     pub marked_from_internet: bool,
+}
+
+/// What "Check the office server for an update" found.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ServerUpdate {
+    /// The administrator has placed no update on the server.
+    NoneOffered,
+    /// The server offers the version this PC already runs.
+    UpToDate {
+        /// That version.
+        version: String,
+    },
+    /// Downloaded and checked exactly as a chosen file: "Install and restart" installs it.
+    Ready {
+        /// The check, as for a file.
+        check: UpdateCheck,
+    },
 }
 
 /// The last update's outcome, as the page shows it.
@@ -445,14 +484,12 @@ impl Updater {
         if st.attempt.is_some() {
             return Err("An update is already in progress.".into());
         }
-        let sig =
-            update::read_signature_file(&update::sig_path_for(path)).map_err(|e| e.to_string())?;
-        let release = update::verify_release(keys, path, &sig).map_err(|e| e.to_string())?;
-        let plan = update::plan(
+        let (release, plan) = update::check_update_file(
+            keys,
             Product::Companion,
             self.version,
             st.previous_version,
-            &release,
+            path,
         )
         .map_err(|e| e.to_string())?;
         let marked = marked_from_internet(path);
@@ -514,6 +551,11 @@ impl Updater {
         if again != chosen.release {
             return Err("Nothing was installed: the file changed after it was checked.".into());
         }
+        // A file downloaded from the office server is staged now; its download is not
+        // needed again.
+        if chosen.path.starts_with(self.dirs.downloaded()) {
+            let _ = std::fs::remove_dir_all(self.dirs.downloaded());
+        }
         let mut token = [0u8; 16];
         getrandom::fill(&mut token).map_err(|e| fail("no random token", &e))?;
         let mut st = self.state();
@@ -558,6 +600,81 @@ impl Updater {
             return Err(fail("the update helper did not start", &e));
         }
         Ok(())
+    }
+}
+
+/// "Check the office server for an update" (W1): ask the paired server for the update it
+/// offers, download its two files, and check them exactly as a chosen file
+/// ([`Updater::check`]), which also remembers them for "Install and restart".
+///
+/// # Errors
+/// Why there is nothing to install, worded for the page: not paired or not confirmed, the
+/// server cannot be reached, or the file is refused (with the file route's message).
+pub async fn check_server(
+    shell: Arc<Shell>,
+    updater: Arc<Updater>,
+) -> Result<ServerUpdate, String> {
+    if let Some(why) = updater.blocked() {
+        return Err(why);
+    }
+    let keys = updater.keys.clone()?;
+    updater.settle_stale_attempt();
+    let st = updater.state();
+    if st.attempt.is_some() {
+        return Err("An update is already in progress.".into());
+    }
+    let link = shell
+        .with_store(|s| s.server_link())
+        .map_err(|_| "HealthierYou could not read or save its data on this PC.".to_owned())?
+        .ok_or_else(|| {
+            "This PC is not paired with the office server. Pair it in Settings > Sharing & server, or install the update from a file.".to_owned()
+        })?;
+    if !link.confirmed {
+        return Err(FlowError::Server(WireError::DeviceUnconfirmed).to_string());
+    }
+    let dest = updater.dirs.downloaded();
+    let fetched = fetch_update(
+        &link,
+        &DpapiUserVault,
+        LinkOptions::default(),
+        &keys,
+        updater.version,
+        st.previous_version,
+        &dest,
+    )
+    .await;
+    match fetched {
+        Ok(UpdateFetch::NoneOffered) => Ok(ServerUpdate::NoneOffered),
+        Ok(UpdateFetch::UpToDate(v)) => Ok(ServerUpdate::UpToDate {
+            version: v.to_string(),
+        }),
+        Ok(UpdateFetch::Downloaded(path)) => {
+            let u = Arc::clone(&updater);
+            let checked = tauri::async_runtime::spawn_blocking(move || u.check(&path))
+                .await
+                .map_err(|e| e.to_string())?;
+            match checked {
+                Ok(check) => {
+                    log(
+                        &updater.dirs,
+                        &format!("downloaded {} from the office server", check.version),
+                    );
+                    Ok(ServerUpdate::Ready { check })
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&dest);
+                    log(
+                        &updater.dirs,
+                        &format!("refused from the office server: {e}"),
+                    );
+                    Err(e)
+                }
+            }
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dest);
+            Err(e.to_string())
+        }
     }
 }
 

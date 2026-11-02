@@ -55,10 +55,22 @@ The process is in Settings > App & updates > **Choose update file...** (or on th
 
 A just-staged attempt is left alone for two minutes (its helper may still be starting). So an orphaned attempt never blocks later updates. The helper's log is `updates\update.log`.
 
+### 2a. Updating from the office server (W1, DEC16)
+
+The same two files, taken from the office server instead of a share (architecture 8). The file format and the check are the file route's; the server never vouches for a file.
+
+1. **The administrator places them.** Copy the release's `HealthierYou_<version>_x64-setup.exe` and its `.sig`, unchanged, into the server's drop folder `%ProgramData%\HealthierYou\Server\updates` (made by the service at start, with the data folder's rights). Copy from a command prompt or PowerShell **run as administrator**: Explorer's "You don't currently have permission... Continue" adds your own account to the folder's rights (the next server upgrade's rights check resets them). The admin page's "Updates for the PCs" shows what is offered, and warns when the `.sig` is missing. The newest companion installer in the folder is offered; server installers and other files are ignored. A drop folder, not an upload on the admin page: the admin page is a small form-only page on the server PC itself, so whoever can open it can already copy files there, and a 200 MB upload would need a far larger request limit and a streaming upload path on the admin listener.
+2. **The PC asks.** Settings > App & updates > **Check the office server for an update** (shown on every PC; it needs a paired PC the administrator has confirmed). Over the pinned TLS channel with this PC's token (V1-5 contract 5 and 8.1), the companion reads `GET /v1/update/manifest` (the offered file's name and size, or nothing).
+3. **Checks before the download**, each with the file route's message: the name is a companion installer's; its version is allowed (newer, or exactly the version this PC came from; the installed version says "already has version X"); the `.sig` (`GET /v1/update/signature`) is there, decodes, is not legacy, names this file and version, and was made by a key built into this release. A missing signature is refused exactly as a file with no `.sig` next to it, and the installer is not downloaded.
+4. **The download.** The installer comes in pieces of at most 4 MiB (`GET /v1/update/installer?file=&offset=`), each its own pinned, authenticated request, so every request stays inside the connection limits (2-minute cap, 8 connections per PC) and the client's 4 MiB response limit. It must be exactly the offered size. The two files go to `updates\downloaded`.
+5. **The whole check, then the file route.** The companion runs the same check as on a chosen file (signature over the whole installer, name, version, rollback rule: `hy_core::update::check_update_file`). A changed byte is refused with "The signature does not match the file...". From here it is section 2 from step 3 on: the page shows what would happen, and Install and restart stages a copy and checks it again. The download folder is removed once staged, or when the file is refused.
+
+Only a confirmed PC is served: no token, an unknown token, a pending PC and a revoked PC are refused on all three endpoints. No endpoint was added outside the token gate. The server logs only the endpoint name (`manifest`, `update_signature`, `update_installer`), the status and the existing request fields; never the file name or the folder. No signing key is involved on the server, and production keys are still absent (section 7).
+
 ### Releasing (the owner, offline)
 
 1. Once: `npx tauri signer generate -w <offline folder>\healthieryou-update.key` (choose a password). Commit **only** the `.pub` file's single line to `release/update-keys.txt`. The secret key and its password never go in the repository, in CI or in a chat. More than one key can be listed, which allows a key change across a release.
-2. Each release: build the installer (`tauri build --config src-tauri/tauri.installer.json`, with `webview2-fixed\` fetched by `scripts/windows/Get-WebView2FixedRuntime.ps1`). Then run `npx tauri signer sign -f <key> --app-version <version> HealthierYou_<version>_x64-setup.exe`. Give staff both files.
+2. Each release: build the installer (`tauri build --config src-tauri/tauri.installer.json`, with `webview2-fixed\` fetched by `scripts/windows/Get-WebView2FixedRuntime.ps1`). Then run `npx tauri signer sign -f <key> --app-version <version> HealthierYou_<version>_x64-setup.exe`. Give staff both files, or have the server administrator place both in the server's drop folder (section 2a).
 3. CI builds with keys made for each run and thrown away. CI installers can never update a real install.
 
 ## 3. Uninstall
@@ -117,10 +129,11 @@ A CI runner is an administrator account on Windows Server, with no SmartScreen r
 6. Update from file and roll back from file in Settings, with the real UI, on a downloaded (marked) file.
 7. Uninstall from Windows Settings: the data box is unticked and shows the folder, and nothing is left in Installed apps or the registry.
 8. Antivirus or EDR on the office PCs does not quarantine the unsigned installer, the update helper copy in `updates\helper`, or the bundled runtime.
+9. Update from the office server (section 2a) on the office PCs, through the office network, with a good file and with a file missing its `.sig`, changed, or older (V1 acceptance I10).
 
 ## 7. Deviations and readings
 
-- **Updates are from a file only in V1-6a. Server-delivered updates remain required, approved work: they are deferred, not dropped.** Architecture section 8 also describes getting the update file from the office server. That needs a server endpoint and is tracked as open work for a later slice. The file format and the check are the same, so the server only has to hand over the same two files.
+- **Server-delivered updates (W1) are built** (section 2a, DEC16). V1-6a shipped updates from a file only; the office server now hands over the same two files over the paired channel, and the companion gives them the file route's whole check. A file downloaded from the server carries no downloaded-file mark (Mark of the Web), so Windows shows no SmartScreen warning for it; the signature check is what protects it, exactly as for a LAN or USB copy.
 - **No updateable release exists yet.** `release/update-keys.txt` holds no production public key, so a release build refuses every update file. CI's passing signatures use keys made for each run and thrown away. The owner must generate the key offline and commit its public half (section 2) before any release can be updated.
 - **"Rollback one release back"** is read as: the only older version accepted is the exact version this PC last updated from. After a rollback, nothing older is accepted until the next update.
 - The previous-version program copy is deleted once the new version confirms its start. Going back after that uses the old installer file and its signature.

@@ -437,6 +437,39 @@ pub const RECEIPT_HEADER: &str = "hy-receipt";
 /// Most chain entries in one state response (contract 7.4).
 pub const ENTRY_PAGE: usize = 500;
 
+/// `GET /v1/update/manifest` response (architecture 8, W1): the companion update file the
+/// office server offers, if any. Only a name and a size: the server vouches for nothing,
+/// and the companion checks the signature with its built-in keys before anything runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateManifest {
+    /// The offered installer, or `None` when the administrator has placed none.
+    pub offer: Option<UpdateOffer>,
+}
+
+/// One offered companion installer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateOffer {
+    /// The installer's file name, `HealthierYou_<version>_x64-setup.exe`.
+    pub file_name: String,
+    /// Its size in bytes.
+    pub size: u64,
+}
+
+/// `GET /v1/update/signature?file=` response: the text of the installer's `.sig` file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateSignature {
+    /// The `.sig` file's content, exactly as the administrator placed it.
+    pub signature: String,
+}
+
+/// Most bytes of the installer in one `GET /v1/update/installer?file=&offset=` answer.
+/// The installer comes in pieces so that every request fits the connection cap and the
+/// client's response limit; each piece is its own pinned, authenticated request.
+pub const UPDATE_CHUNK: usize = 4 * 1024 * 1024;
+
 #[cfg(test)]
 mod tests {
     use super::*;

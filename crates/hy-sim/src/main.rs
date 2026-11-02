@@ -91,6 +91,7 @@ fn config(port: u16) -> Config {
         pair_floor: Duration::from_millis(5),
         argon2: (256, 1, 1),
         pair_limits: (1000, 1000, 1000),
+        updates_dir: None,
     }
 }
 

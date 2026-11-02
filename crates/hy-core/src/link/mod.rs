@@ -32,8 +32,8 @@ use serde::de::DeserializeOwned;
 
 use crate::protocol::wire::{
     ControlRequest, ControlResponse, ErrorBody, HistoryResponse, PairRequest, PairResponse,
-    RECEIPT_HEADER, ReceiptRequest, ReceiptResponse, StateResponse, UploadRequest, UploadResponse,
-    WireError,
+    RECEIPT_HEADER, ReceiptRequest, ReceiptResponse, StateResponse, UPDATE_CHUNK, UpdateManifest,
+    UpdateSignature, UploadRequest, UploadResponse, WireError,
 };
 use crate::protocol::{ALPN, SNI, TOKEN_LEN, b64, ct_eq32, fingerprint, prefix8};
 use crate::secret::Secret;
@@ -479,6 +479,77 @@ impl LinkClient {
             Some(&req),
         )
         .await
+    }
+
+    /// `GET /v1/update/manifest`: the update file the office server offers, if any (W1).
+    ///
+    /// # Errors
+    /// [`LinkError`]; `device_unconfirmed` for a PC not yet confirmed.
+    pub async fn update_manifest(
+        &self,
+        token: &Secret<[u8; TOKEN_LEN]>,
+    ) -> Result<UpdateManifest, LinkError> {
+        self.call::<(), _>(
+            reqwest::Method::GET,
+            "/v1/update/manifest",
+            Some(token),
+            None,
+        )
+        .await
+    }
+
+    /// `GET /v1/update/signature?file=`: the offered installer's `.sig` text. `file` must
+    /// be an installer name ([`crate::update::parse_installer_name`]), which needs no
+    /// escaping in a query.
+    ///
+    /// # Errors
+    /// [`LinkError`]; `protocol_unsupported` when the server has no signature for it.
+    pub async fn update_signature(
+        &self,
+        token: &Secret<[u8; TOKEN_LEN]>,
+        file: &str,
+    ) -> Result<UpdateSignature, LinkError> {
+        self.call::<(), _>(
+            reqwest::Method::GET,
+            &format!("/v1/update/signature?file={file}"),
+            Some(token),
+            None,
+        )
+        .await
+    }
+
+    /// `GET /v1/update/installer?file=&offset=`: at most [`UPDATE_CHUNK`] bytes of the
+    /// offered installer from `offset`.
+    ///
+    /// # Errors
+    /// [`LinkError`]; `protocol_unsupported` when the offer changed.
+    pub async fn update_chunk(
+        &self,
+        token: &Secret<[u8; TOKEN_LEN]>,
+        file: &str,
+        offset: u64,
+    ) -> Result<Vec<u8>, LinkError> {
+        let raw = self
+            .raw(
+                reqwest::Method::GET,
+                &format!("/v1/update/installer?file={file}&offset={offset}"),
+                Some(token),
+                None,
+            )
+            .await?;
+        if (200..300).contains(&raw.status) {
+            if raw.body.len() > UPDATE_CHUNK {
+                return Err(LinkError::Protocol);
+            }
+            Ok(raw.body)
+        } else {
+            let err: ErrorBody =
+                serde_json::from_slice(&raw.body).map_err(|_| LinkError::Protocol)?;
+            Err(LinkError::Server {
+                status: raw.status,
+                error: err.error,
+            })
+        }
     }
 
     /// `POST /v1/unpair`.
