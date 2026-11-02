@@ -66,6 +66,7 @@ pub const CAMERA: &str = "camera";
 
 mod camera;
 mod data;
+mod recover;
 mod screens;
 pub use camera::{PageCommand, PageReport, start_camera_clock};
 pub(crate) use data::category_label;
@@ -328,9 +329,7 @@ impl Shell {
         }
         self.render();
         self.show_window();
-        self.install_signals();
-        let hk = lock(&self.inner).hotkey;
-        self.apply_hotkey(hk);
+        self.attach_pet_window();
         let me = Arc::downgrade(self);
         let _ = std::thread::Builder::new()
             .name("hy-layout-poll".into())
@@ -341,6 +340,15 @@ impl Shell {
                     shell.post(|s| s.on_display_change(false));
                 }
             });
+    }
+
+    /// Connect the pet window to the shell: the system signals and the hotkey on its
+    /// handle, and its scaling changes. At start-up, and again for a pet window made anew
+    /// after its webview failed ([`recover`]).
+    fn attach_pet_window(self: &Arc<Self>) {
+        self.install_signals();
+        let hk = lock(&self.inner).hotkey;
+        self.apply_hotkey(hk);
         if let Some(w) = self.pet_window() {
             let me = Arc::downgrade(self);
             w.on_window_event(move |e| {

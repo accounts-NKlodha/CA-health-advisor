@@ -1,6 +1,6 @@
 // The text of Settings > App & updates (slice V1-6), kept apart from the component so it
 // can be tested with node --test.
-import type { AppPage, ServerUpdate, UpdateCheck, UpdateOutcome } from '../shared/types';
+import type { AppPage, DiagnosticsPreview, ServerUpdate, UpdateCheck, UpdateOutcome } from '../shared/types';
 
 /** What installing the checked file will do. */
 export function checkSummary(c: UpdateCheck): string {
@@ -59,4 +59,39 @@ export function serverLine(r: ServerUpdate): string | null {
     case 'ready':
       return null;
   }
+}
+
+/** A size in bytes, for people. */
+export function sizeText(bytes: number): string {
+  if (bytes < 1024) return `${bytes} bytes`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** What the prepared diagnostics zip holds, in one paragraph (W2). */
+export function diagnosticsSummary(p: DiagnosticsPreview): string {
+  const files = p.entries.map((e) => `${e.name} (${sizeText(e.bytes)})`).join(' and ');
+  const parts = [`The zip holds ${files}, ${sizeText(p.zip_bytes)} in all.`];
+  parts.push(
+    p.kept_lines === 1 ? 'The log part has 1 line.' : `The log part has ${p.kept_lines} lines.`,
+  );
+  if (p.older_lines_left_out > 0) {
+    parts.push(`${p.older_lines_left_out} older lines were left out to keep it small.`);
+  }
+  if (p.dropped_lines > 0) {
+    parts.push(`${p.dropped_lines} lines that were not readable log lines were left out.`);
+  }
+  if (p.scrubbed > 0) {
+    parts.push(
+      `${p.scrubbed} values that looked like a path, address, id or this PC's names were replaced.`,
+    );
+  }
+  return parts.join(' ');
+}
+
+/** The log's events and how many lines each has, most first. */
+export function eventCounts(p: DiagnosticsPreview): string {
+  const rows = Object.entries(p.events).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (rows.length === 0) return 'No log lines yet.';
+  return rows.map(([name, n]) => `${name} ${n}`).join(', ');
 }

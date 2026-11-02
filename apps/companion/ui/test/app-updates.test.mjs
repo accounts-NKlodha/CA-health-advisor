@@ -1,7 +1,17 @@
 // node --test: the text of Settings > App & updates (slice V1-6).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { autostartLine, checkSummary, markNote, outcomeLine, rollbackLine, serverLine } from '../src/screens/app.ts';
+import {
+  autostartLine,
+  checkSummary,
+  diagnosticsSummary,
+  eventCounts,
+  markNote,
+  outcomeLine,
+  rollbackLine,
+  serverLine,
+  sizeText,
+} from '../src/screens/app.ts';
 
 const check = (over) => ({
   current: '0.1.0',
@@ -56,4 +66,33 @@ test('the office server check says why there is nothing to install', () => {
   );
   // A ready update is shown exactly as a checked file.
   assert.equal(serverLine({ kind: 'ready', check: check() }), null);
+});
+
+test('the diagnostics zip says what it holds before it is saved (W2)', () => {
+  const p = {
+    entries: [
+      { name: 'about.txt', bytes: 900, lines: 14, text: 'x' },
+      { name: 'companion.log', bytes: 3 * 1024 * 1024, lines: 2, text: 'y' },
+    ],
+    kept_lines: 2,
+    dropped_lines: 0,
+    older_lines_left_out: 0,
+    scrubbed: 0,
+    events: { start: 1, resources: 5, panic: 1 },
+    suggested_name: 'HealthierYou-diagnostics-2026-11-02.zip',
+    zip_bytes: 3 * 1024 * 1024 + 1200,
+  };
+  assert.equal(sizeText(900), '900 bytes');
+  assert.equal(sizeText(2048), '2.0 KB');
+  assert.equal(
+    diagnosticsSummary(p),
+    'The zip holds about.txt (900 bytes) and companion.log (3.0 MB), 3.0 MB in all. The log part has 2 lines.',
+  );
+  const more = diagnosticsSummary({ ...p, kept_lines: 1, older_lines_left_out: 7, dropped_lines: 2, scrubbed: 3 });
+  assert.match(more, /has 1 line\./);
+  assert.match(more, /7 older lines were left out/);
+  assert.match(more, /2 lines that were not readable/);
+  assert.match(more, /3 values that looked like a path/);
+  assert.equal(eventCounts(p), 'resources 5, panic 1, start 1');
+  assert.equal(eventCounts({ ...p, events: {} }), 'No log lines yet.');
 });

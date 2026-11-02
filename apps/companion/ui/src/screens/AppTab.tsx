@@ -1,17 +1,21 @@
 // Settings > App & updates (slice V1-6): the version, start at sign-in, installing a
 // signed update file chosen from a share or downloaded from the paired office server
 // (W1; the same check either way, with the previous version kept and put back if the new
-// one does not start), and where the data lives.
+// one does not start), where the data lives, and (W2) the diagnostics zip: built, shown
+// in full, and saved only where the user chooses. Nothing is uploaded.
 import { useEffect, useState } from 'preact/hooks';
 import { call, report } from '../shared/ipc';
-import type { AppPage, UpdateCheck } from '../shared/types';
+import type { AppPage, DiagnosticsPreview, UpdateCheck } from '../shared/types';
 import {
   autostartLine,
   checkSummary,
+  diagnosticsSummary,
+  eventCounts,
   markNote,
   outcomeLine,
   rollbackLine,
   serverLine,
+  sizeText,
 } from './app';
 
 export function AppTab() {
@@ -151,6 +155,8 @@ export function AppTab() {
         </p>
       </section>
 
+      <Diagnostics />
+
       <section aria-labelledby="uninstall-h">
         <h3 id="uninstall-h">Your data and uninstalling</h3>
         <p>
@@ -160,5 +166,84 @@ export function AppTab() {
         </p>
       </section>
     </main>
+  );
+}
+
+function Diagnostics() {
+  const [preview, setPreview] = useState<DiagnosticsPreview | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState('');
+
+  const prepare = () => {
+    setBusy(true);
+    setStatus('Preparing...');
+    call('diagnostics_prepare')
+      .then((p) => {
+        setPreview(p);
+        setStatus('');
+      })
+      .catch((e: unknown) => setStatus(String(e)))
+      .finally(() => setBusy(false));
+  };
+
+  const save = () => {
+    setBusy(true);
+    call('diagnostics_save')
+      .then((path) => {
+        if (path === null) return;
+        setPreview(null);
+        setStatus(`Saved to ${path}. HealthierYou does not send it anywhere.`);
+      })
+      .catch((e: unknown) => setStatus(String(e)))
+      .finally(() => setBusy(false));
+  };
+
+  const cancel = () => {
+    call('diagnostics_discard').catch(report);
+    setPreview(null);
+    setStatus('');
+  };
+
+  return (
+    <section aria-labelledby="diag-h">
+      <h3 id="diag-h">Diagnostics</h3>
+      <p>
+        If something goes wrong, you can save a zip of HealthierYou's log to give to whoever helps
+        you. The log holds event names, counts and times only: no health values, names, file paths
+        or device ids. You see everything in the zip before you save it, and HealthierYou never
+        sends it anywhere.
+      </p>
+      {preview ? (
+        <div class="notice" role="group" aria-label="Diagnostics zip contents">
+          <p>{diagnosticsSummary(preview)}</p>
+          <p class="note">Events in the log: {eventCounts(preview)}</p>
+          {preview.entries.map((e) => (
+            <details key={e.name}>
+              <summary>
+                {e.name}: {sizeText(e.bytes)}, {e.lines} lines
+              </summary>
+              <pre class="diag-text" tabIndex={0} aria-label={`Contents of ${e.name}`}>
+                {e.text}
+              </pre>
+            </details>
+          ))}
+          <div class="actions">
+            <button type="button" class="btn primary" disabled={busy} onClick={save}>
+              Save zip...
+            </button>
+            <button type="button" class="btn" disabled={busy} onClick={cancel}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button type="button" class="btn" disabled={busy} onClick={prepare}>
+          Prepare diagnostics...
+        </button>
+      )}
+      <p class="status" role="status">
+        {status}
+      </p>
+    </section>
   );
 }

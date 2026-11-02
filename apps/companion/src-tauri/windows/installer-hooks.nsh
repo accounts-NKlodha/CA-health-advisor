@@ -7,6 +7,8 @@
 ;   hy-companion.exe, uninstall.exe, webview2-fixed\   the program (template)
 ;   updates\                                           update record, staged installer,
 ;                                                      previous-version copy (program state)
+;   logs\                                              the companion's own log (W2; event
+;                                                      names and counts only: program state)
 ;   data\                                              personal data: kept unless the user
 ;                                                      ticks "Also delete my data" or a
 ;                                                      silent uninstall passes /DELETEDATA
@@ -42,6 +44,7 @@
     RMDir "$INSTDIR"
     ; Program state, not personal data.
     RMDir /r "${HY_DATA_ROOT}\updates"
+    RMDir /r "${HY_DATA_ROOT}\logs"
     ; The template removes the Run value; Windows' record of a Task Manager choice too.
     DeleteRegValue HKCU "${HY_RUN_KEY}" "${PRODUCTNAME}"
     DeleteRegValue HKCU "${HY_STARTUP_APPROVED_KEY}" "${PRODUCTNAME}"

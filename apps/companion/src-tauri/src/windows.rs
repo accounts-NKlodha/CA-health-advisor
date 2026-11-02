@@ -5,7 +5,9 @@
 //!
 //! Every window gets the camera permission guard (architecture 4.5): only the camera
 //! window may use the camera, only while the posture check wants capture, and no answer
-//! is ever saved in the WebView2 profile (all pages share one origin).
+//! is ever saved in the WebView2 profile (all pages share one origin). Every window's
+//! webview is also watched for WebView2 process failures, so a dead pet page is made
+//! again (W2, `shell::recover`).
 
 use std::sync::{Arc, OnceLock};
 
@@ -45,9 +47,38 @@ pub fn browser_args() -> &'static str {
 /// The camera page's size, logical pixels.
 pub const CAMERA_LOGICAL: (f64, f64) = (520.0, 600.0);
 
-/// Install the permission guard on a window (Windows; see the module notes). `then` runs
-/// on the UI thread once the guard is in place (with false if it could not be).
+/// Watch a window's webview for WebView2 process failures (W2): the shell makes a dead
+/// pet page again and closes another dead window (`shell::recover`). Windows only.
+fn watch_failures(w: &WebviewWindow) {
+    #[cfg(windows)]
+    {
+        let app = w.app_handle().clone();
+        let label = w.label().to_owned();
+        let watched = w.with_webview(move |pw| {
+            let on_failed: Box<dyn Fn(i32)> = Box::new(move |kind| {
+                if let Some(s) = app.try_state::<Arc<Shell>>() {
+                    let label = label.clone();
+                    // Not inside the webview's own event: the window may be destroyed.
+                    s.post(move |s| s.webview_failed(&label, kind));
+                }
+            });
+            if !crate::win32::watch_process_failed(&pw.controller(), on_failed) {
+                crate::diag::log(hy_core::diag::Level::Warn, "webview_watch_failed", &[]);
+            }
+        });
+        if let Err(e) = watched {
+            eprintln!("HealthierYou: could not reach a webview to watch it: {e}");
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = w;
+}
+
+/// Install the permission guard on a window (Windows; see the module notes), and the
+/// process-failure watch (W2). `then` runs on the UI thread once the guard is in place
+/// (with false if it could not be).
 fn guard(w: &WebviewWindow, then: impl FnOnce(bool) + Send + 'static) {
+    watch_failures(w);
     let label = w.label().to_owned();
     #[cfg(windows)]
     {

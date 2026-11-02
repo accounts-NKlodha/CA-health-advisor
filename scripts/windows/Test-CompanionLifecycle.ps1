@@ -134,7 +134,7 @@ function Assert-Clean-Registry([string]$When) {
   Check "${When}: no StartupApproved value" ($null -eq (RegValue $ApprovedKey $Product))
 }
 function Assert-No-Program-Files([string]$When) {
-  foreach ($e in 'hy-companion.exe', 'uninstall.exe', 'webview2-fixed', 'updates') {
+  foreach ($e in 'hy-companion.exe', 'uninstall.exe', 'webview2-fixed', 'updates', 'logs') {
     Check "${When}: $e removed" (-not (Test-Path (Join-Path $Root $e)))
   }
   Check "${When}: WebView2 cache removed" (-not (Test-Path $WebViewCache))

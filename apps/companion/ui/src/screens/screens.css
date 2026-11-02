@@ -456,3 +456,15 @@ kbd {
   padding: 8px 12px;
   margin: 10px 0;
 }
+
+/* Settings > App & updates > Diagnostics (W2): each file of the zip, in full. */
+.diag-text {
+  max-height: 16em;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 0.8em;
+  padding: 0.5em;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+}
