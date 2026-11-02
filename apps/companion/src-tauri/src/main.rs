@@ -567,6 +567,11 @@ mod tests {
                 serde_json::json!({ "meditation": { "at": null } }),
                 "meditation off",
             ),
+            (
+                serde_json::json!({ "reminder_style": "separate" }),
+                "reminder_style",
+            ),
+            (serde_json::json!({ "break_minutes": 45 }), "break_minutes"),
         ] {
             let change: CoachChange = serde_json::from_value(sent.clone()).unwrap();
             assert_eq!(serde_json::to_value(change).unwrap(), sent, "{field}");

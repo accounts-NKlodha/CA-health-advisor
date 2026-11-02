@@ -3,8 +3,15 @@
 // change is saved at once as that one field (never the page's cached copy, which another
 // window may have made stale); the engine follows at once.
 import { useEffect, useState } from 'preact/hooks';
+import { BREAK_MINUTES, cadenceNote } from '../shared/breaks';
 import { call } from '../shared/ipc';
-import type { CoachChange, Intensity, MovementVersion, SettingsPage } from '../shared/types';
+import type {
+  CoachChange,
+  Intensity,
+  MovementVersion,
+  ReminderStyle,
+  SettingsPage,
+} from '../shared/types';
 import type { Save } from './main';
 
 interface TabProps {
@@ -38,6 +45,11 @@ function Switch({
   );
 }
 
+const STYLES: [ReminderStyle, string][] = [
+  ['combined', 'Combined 5-minute break'],
+  ['separate', 'Separate reminders'],
+];
+
 const INTENSITIES: [Intensity, string][] = [
   ['light', 'Light'],
   ['balanced', 'Balanced'],
@@ -51,6 +63,44 @@ export function RemindersTab(props: TabProps) {
   return (
     <main class="pane">
       <h2>Reminders</h2>
+      <section aria-labelledby="style-h">
+        <h3 id="style-h">Reminder style</h3>
+        <div class="seg" role="group" aria-labelledby="style-h">
+          {STYLES.map(([value, label]) => (
+            <button
+              type="button"
+              class="seg-btn"
+              key={value}
+              aria-pressed={c.reminder_style === value}
+              onClick={() => coach({ reminder_style: value }, `Reminder style: ${label.toLowerCase()}.`)}
+            >
+              {label}
+              {value === 'combined' ? <span class="note"> (default)</span> : null}
+            </button>
+          ))}
+        </div>
+        <label class="inline">
+          <span>A break every</span>
+          <select
+            value={String(c.break_minutes)}
+            disabled={c.reminder_style !== 'combined'}
+            onChange={(e) => {
+              const minutes = Number(e.currentTarget.value);
+              coach({ break_minutes: minutes }, `A break every ${minutes} minutes.`);
+            }}
+          >
+            {BREAK_MINUTES.map((m) => (
+              <option value={String(m)} key={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+          <span>minutes at the PC</span>
+        </label>
+        <p class="note">
+          {cadenceNote(c)} These are starting values to test, not medical advice.
+        </p>
+      </section>
       <section aria-labelledby="int-h">
         <h3 id="int-h">Intensity</h3>
         <div class="seg" role="group" aria-labelledby="int-h">
@@ -67,15 +117,20 @@ export function RemindersTab(props: TabProps) {
           ))}
         </div>
         <p class="note">
-          Balanced: movement after 45 min of active work, eye rest every 20 min, water only when
-          you are behind your own pace. One reminder at a time, with at least a 5-minute calm gap
-          before the next one; snooze 10 min. These are starting values to test, not medical
-          advice.
+          {c.reminder_style === 'combined'
+            ? 'Intensity applies to separate reminders; the combined break follows its own interval above.'
+            : 'Light offers reminders less often, More often more often.'}
         </p>
       </section>
 
       <section aria-labelledby="cat-h">
         <h3 id="cat-h">What I remind you about</h3>
+        {c.reminder_style === 'combined' ? (
+          <p class="note">
+            With the combined break, these choose its steps: water, eyes and movement. Slow
+            breathing always ends the break.
+          </p>
+        ) : null}
         <Switch
           checked={c.categories.movement}
           onChange={(on) =>

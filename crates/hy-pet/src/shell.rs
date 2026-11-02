@@ -113,6 +113,20 @@ pub struct BubbleProgress {
     pub label: String,
 }
 
+/// A countdown the page runs by itself from when the card is drawn (a step of the combined
+/// break, DEC15), so the card is not redrawn every second.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BubbleCountdown {
+    /// Seconds left when the card was drawn, at most [`MAX_COUNTDOWN_S`].
+    pub seconds: u32,
+    /// What runs out, for example "Rest your eyes".
+    pub label: String,
+}
+
+/// The longest countdown a bubble shows.
+pub const MAX_COUNTDOWN_S: u32 = 600;
+
 /// Most rows in one bubble.
 pub const MAX_BUBBLE_ROWS: usize = 24;
 /// Most actions in one row.
@@ -154,6 +168,9 @@ pub struct Bubble {
     /// A list of rows with their own actions, after the lines.
     #[serde(default)]
     pub rows: Vec<BubbleRow>,
+    /// A countdown under the title (a step of the combined break).
+    #[serde(default)]
+    pub countdown: Option<BubbleCountdown>,
 }
 
 /// Most actions in one bubble.
@@ -250,6 +267,13 @@ impl Bubble {
         }
         if self.note.as_deref().is_some_and(|n| !short(n, 120)) {
             return Err("the note must be 1 to 120 characters".into());
+        }
+        if let Some(c) = &self.countdown
+            && (c.seconds > MAX_COUNTDOWN_S || !short(&c.label, 80))
+        {
+            return Err(format!(
+                "a countdown is at most {MAX_COUNTDOWN_S} s with a label of 1 to 80 characters"
+            ));
         }
         Ok(())
     }

@@ -9,21 +9,23 @@
 use std::time::Duration;
 
 use chrono::{NaiveDate, NaiveTime, Weekday};
+use hy_core::coach::break_routine::{self, BreakStep};
 use hy_core::coach::meditation::{self, MEDITATION_MINUTES, MEDITATION_PARTS};
 use hy_core::coach::movement::{
     INTRO_SAFETY, PROVISIONAL, PROVISIONAL_NOTICE, STEP_SAFETY, routine_for,
 };
 use hy_core::coach::water::{WATER_DEFAULT_SERVING_ML, WATER_STEP_ML};
 use hy_core::coach::{
-    Bubble as CoachBubble, Chip, ChipStatus, CoachView, GuideStage, GuideView, MeditationView,
-    PetMode, PomodoroPause, PomodoroPhase, PomodoroView, RecoveryPlan, ReminderReason, WaterEdit,
+    BreakStage, BreakView, Bubble as CoachBubble, Chip, ChipStatus, CoachView, GuideStage,
+    GuideView, MeditationView, PetMode, PomodoroPause, PomodoroPhase, PomodoroView, RecoveryPlan,
+    ReminderReason, WaterEdit,
 };
 use hy_core::schema::{Activity, PhoneLabel, RoutineOutcome, RoutineVariant, SessionState};
 use uuid::Uuid;
 
 use crate::shell::{
-    ActionStyle, Bubble, BubbleAction, BubbleChip, BubbleFigure, BubbleProgress, BubbleRow,
-    MAX_BUBBLE_ROWS, MenuAction,
+    ActionStyle, Bubble, BubbleAction, BubbleChip, BubbleCountdown, BubbleFigure, BubbleProgress,
+    BubbleRow, MAX_BUBBLE_ROWS, MenuAction,
 };
 use crate::state::PetState;
 
@@ -56,6 +58,17 @@ pub mod action {
     pub const DISMISS: &str = "dismiss";
     /// "Log 250 ml".
     pub const LOG_WATER: &str = "log_water";
+    /// "Skip" (the combined break's reminder).
+    pub const SKIP: &str = "skip";
+    // The combined 5-minute break (DEC15).
+    /// "Log 250 ml" on the water step.
+    pub const BREAK_LOG_WATER: &str = "break_log_water";
+    /// "Next" or "Finish" on a step.
+    pub const BREAK_NEXT: &str = "break_next";
+    /// "Skip" on a step.
+    pub const BREAK_SKIP: &str = "break_skip";
+    /// "Stop break".
+    pub const BREAK_STOP: &str = "break_stop";
     // Pomodoro cards (B6).
     /// "Start break".
     pub const START_BREAK: &str = "start_break";
@@ -289,6 +302,8 @@ pub enum BubbleKind {
     Meditation,
     /// The posture cue.
     PostureCue,
+    /// A step of the combined 5-minute break, or its last screen.
+    Break,
 }
 
 impl BubbleKind {
@@ -296,7 +311,9 @@ impl BubbleKind {
     #[must_use]
     pub const fn of(b: &CoachBubble) -> Self {
         match b {
-            CoachBubble::Reminder { offer, .. } => Self::Reminder { offer: *offer },
+            CoachBubble::Reminder { offer, .. } | CoachBubble::BreakOffer { offer, .. } => {
+                Self::Reminder { offer: *offer }
+            }
             CoachBubble::PomodoroBreak { .. } => Self::PomodoroBreak,
             CoachBubble::PomodoroRoundDone => Self::PomodoroRoundDone,
             CoachBubble::PomodoroPausedByLock => Self::PomodoroPaused,
@@ -317,11 +334,12 @@ impl BubbleKind {
             CoachBubble::MeditationInvite => Self::MeditationInvite,
             CoachBubble::Meditation(_) => Self::Meditation,
             CoachBubble::PostureCue => Self::PostureCue,
+            CoachBubble::Break(_) => Self::Break,
         }
     }
 
     /// The fixed keys (every kind but a reminder, whose key carries its offer).
-    const FIXED: [(Self, &'static str); 20] = [
+    const FIXED: [(Self, &'static str); 21] = [
         (Self::PomodoroBreak, "pomodoro-break"),
         (Self::PomodoroRoundDone, "pomodoro-round"),
         (Self::PomodoroPaused, "pomodoro-paused"),
@@ -342,6 +360,7 @@ impl BubbleKind {
         (Self::MeditationInvite, "meditation-invite"),
         (Self::Meditation, "meditation"),
         (Self::PostureCue, "posture-cue"),
+        (Self::Break, "break"),
     ];
 
     fn key(self) -> String {
@@ -456,6 +475,7 @@ pub fn pet_look(view: &CoachView, celebrating: bool) -> (PetState, Option<String
         PetMode::Pomodoro(p) => (PetState::Pomodoro, Some(pomodoro_tag(&p))),
         PetMode::Exercise => (PetState::Exercise, None),
         PetMode::Reminder(a) => (PetState::Reminder, Some(activity_name(a).to_owned())),
+        PetMode::BreakOffer => (PetState::Reminder, Some("Break".to_owned())),
         PetMode::Waiting(_) => (PetState::Waiting, None),
         PetMode::Nudge => (PetState::Cue, None),
         PetMode::Snoozed(a) => (
@@ -640,7 +660,11 @@ fn guide_card(g: &GuideView) -> Bubble {
             b.lines = vec![
                 "Sunday is optional. If you'd like to move, choose any day's routine.".to_owned(),
             ];
-            b.actions = day_actions(act(action::LATER, "Later", Link));
+            b.actions = day_actions(if g.in_break {
+                act(action::LATER, "Skip this step", Link)
+            } else {
+                act(action::LATER, "Later", Link)
+            });
         }
         (GuideStage::Intro, Some(r)) => {
             b.title = if g.day == g.today {
@@ -677,13 +701,24 @@ fn guide_card(g: &GuideView) -> Bubble {
                     act(action::STANDING, "Standing", Normal),
                 ),
             };
-            b.actions = vec![
-                first,
-                second,
-                act(action::LATER, "Later", Normal),
-                act(action::OTHER_DAY, "Other day", Normal),
-                act(action::SKIP_TODAY, "Skip today", Link),
-            ];
+            b.actions = if g.in_break {
+                // The movement step of a combined break: skipping it records nothing.
+                b.lines.insert(0, "Part of your 5-minute break.".to_owned());
+                vec![
+                    first,
+                    second,
+                    act(action::OTHER_DAY, "Other day", Normal),
+                    act(action::LATER, "Skip this step", Link),
+                ]
+            } else {
+                vec![
+                    first,
+                    second,
+                    act(action::LATER, "Later", Normal),
+                    act(action::OTHER_DAY, "Other day", Normal),
+                    act(action::SKIP_TODAY, "Skip today", Link),
+                ]
+            };
         }
         (GuideStage::ChooseDay, _) => {
             b.title = "Choose a day's routine".to_owned();
@@ -1234,6 +1269,23 @@ pub fn bubble(b: &CoachBubble, view: &CoachView) -> Bubble {
             }
         }
         CoachBubble::Meditation(m) => meditation_card(&m),
+        CoachBubble::BreakOffer { at_pc, .. } => card(
+            break_routine::OFFER_TITLE,
+            vec![
+                format!(
+                    "About {} at the PC since your last break.",
+                    hours_minutes(floor_min(at_pc))
+                ),
+                break_routine::OFFER_LINE.to_owned(),
+            ],
+            vec![
+                act(action::START, "Start break", Primary),
+                act(action::SNOOZE, "Snooze 10 min", Normal),
+                act(action::SKIP, "Skip", Normal),
+                act(action::DISMISS, "Not now", Link),
+            ],
+        ),
+        CoachBubble::Break(v) => break_card(&v),
         CoachBubble::PostureCue => card(
             POSTURE_CUE_TITLE,
             vec![POSTURE_CUE_LINE.to_owned()],
@@ -1242,6 +1294,72 @@ pub fn bubble(b: &CoachBubble, view: &CoachView) -> Bubble {
                 act(action::POSTURE_RECALIBRATE, "Recalibrate", Link),
             ],
         ),
+    }
+}
+
+/// A step of the combined 5-minute break (DEC15) with its countdown, or its last screen.
+/// The movement step is the movement guide's card.
+fn break_card(v: &BreakView) -> Bubble {
+    use ActionStyle::{Link, Normal, Primary};
+    match v.stage {
+        BreakStage::Done { done, total, .. } => Bubble {
+            title: break_routine::DONE_TITLE.to_owned(),
+            lines: vec![format!(
+                "{done} of {total} steps done (self-reported). No catch-up needed."
+            )],
+            actions: vec![act(action::OK, "OK", Primary)],
+            ..Bubble::default()
+        },
+        BreakStage::Step {
+            step,
+            index,
+            total,
+            left,
+            water_ml,
+            ..
+        } => {
+            let title = break_routine::title(step);
+            let mut lines: Vec<String> = break_routine::lines(step)
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let next = if index + 1 >= total { "Finish" } else { "Next" };
+            let mut actions = Vec::new();
+            match (step, water_ml) {
+                (BreakStep::Water, Some(ml)) => {
+                    lines.push(format!("Logged {ml} ml."));
+                    actions.push(act(action::BREAK_NEXT, next, Primary));
+                }
+                (BreakStep::Water, None) => {
+                    actions.push(act(
+                        action::BREAK_LOG_WATER,
+                        &format!("Log {WATER_SERVING_ML} ml"),
+                        Primary,
+                    ));
+                    actions.push(act(action::BREAK_NEXT, next, Normal));
+                    actions.push(act(action::BREAK_SKIP, "Skip", Normal));
+                }
+                _ => {
+                    actions.push(act(action::BREAK_NEXT, next, Primary));
+                    actions.push(act(action::BREAK_SKIP, "Skip", Normal));
+                }
+            }
+            actions.push(act(action::BREAK_STOP, "Stop break", Link));
+            Bubble {
+                title: format!("Step {} of {total}: {title}", index + 1),
+                lines,
+                actions,
+                countdown: Some(BubbleCountdown {
+                    seconds: u32::try_from(left.as_millis().div_ceil(1000))
+                        .unwrap_or(u32::MAX)
+                        .min(crate::shell::MAX_COUNTDOWN_S),
+                    label: title.to_owned(),
+                }),
+                note: provisional_note().map(str::to_owned),
+                continues: true,
+                ..Bubble::default()
+            }
+        }
     }
 }
 

@@ -14,9 +14,9 @@ use hy_core::clock::ManualClock;
 use hy_core::coach::movement::PROVISIONAL_NOTICE;
 use hy_core::coach::water::WaterPace;
 use hy_core::coach::{
-    ActiveRoutine, Bubble as CoachBubble, CheckInAnswer, Chip, ChipStatus, CoachView, GuideAction,
-    GuideStage, GuideView, HiddenReason, Input, MeditationAction, MeditationView, PauseLength,
-    PetMode, PhoneInput, PomodoroPause, PomodoroPhase, PomodoroPreset, PomodoroView,
+    ActiveRoutine, BreakAction, Bubble as CoachBubble, CheckInAnswer, Chip, ChipStatus, CoachView,
+    GuideAction, GuideStage, GuideView, HiddenReason, Input, MeditationAction, MeditationView,
+    PauseLength, PetMode, PhoneInput, PomodoroPause, PomodoroPhase, PomodoroPreset, PomodoroView,
     RecoveryAction, RecoveryPlan, RecoveryView, Reflection, ReminderReason, Response, Servings,
     WaterEdit, WaterEntry, WaterInput,
 };
@@ -94,6 +94,7 @@ fn guide(stage: GuideStage, variant: Option<RoutineVariant>) -> GuideView {
         from_reminder: true,
         open: true,
         default_variant: None,
+        in_break: false,
     }
 }
 
@@ -1178,6 +1179,13 @@ impl PetShell for FakeShell {
     }
 }
 
+fn separate() -> hy_core::coach::CoachConfig {
+    hy_core::coach::CoachConfig {
+        reminder_style: hy_core::coach::ReminderStyle::Separate,
+        ..hy_core::coach::CoachConfig::default()
+    }
+}
+
 /// Monday 26 Oct 2026, 10:00 in Kolkata (inside the default work hours).
 fn monday_ten() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 10, 26, 4, 30, 0).unwrap()
@@ -1213,6 +1221,11 @@ impl H {
     fn starting(wall: chrono::DateTime<Utc>, prepare: impl FnOnce(&Store)) -> Self {
         let clock = Arc::new(ManualClock::new(wall));
         let store = Store::open_in_memory(clock.clone()).unwrap();
+        // The separate reminders these tests were written for (DEC15 made the combined
+        // break the default; see `breaks_through_the_shell`).
+        store
+            .put_setting(hy_core::coach::config::CONFIG_KEY, &separate())
+            .unwrap();
         prepare(&store);
         let shell = Arc::new(FakeShell::default());
         let (link, _) = CoachLink::open(store, shell.clone()).unwrap();
@@ -1802,7 +1815,7 @@ fn movement_only(store: &Store) {
             eye_rest: false,
             water: false,
         },
-        ..hy_core::coach::CoachConfig::default()
+        ..separate()
     };
     store
         .put_setting(hy_core::coach::config::CONFIG_KEY, &config)
@@ -3301,4 +3314,196 @@ fn the_shell_hears_todays_screen_time_once_a_minute() {
     h.input(Input::Unlock);
     assert_eq!(*lock(&h.shell.screen), vec![0, 1, 2]);
     assert_eq!(h.link.view().screen_time, Duration::from_secs(150));
+}
+
+// ------------------------------------------------------------ the combined break (DEC15)
+
+/// The default settings: the combined 5-minute break.
+fn combined(store: &Store) {
+    store
+        .put_setting(
+            hy_core::coach::config::CONFIG_KEY,
+            &hy_core::coach::CoachConfig::default(),
+        )
+        .unwrap();
+}
+
+fn action_ids(b: &Bubble) -> Vec<&str> {
+    b.actions.iter().map(|a| a.id.as_str()).collect()
+}
+
+#[test]
+fn the_combined_break_runs_end_to_end_through_the_shell() {
+    let mut h = H::with_store(combined);
+    let (_, a) = h.work_until_reminder(31);
+    assert_eq!(a, Activity::Movement, "recorded as a movement reminder");
+    let b = h.shell.open_bubble().unwrap();
+    assert_eq!(b.title, "Time for a 5-minute break");
+    assert_eq!(b.lines[0], "About 30 min at the PC since your last break.");
+    assert_eq!(
+        action_ids(&b),
+        [action::START, action::SNOOZE, action::SKIP, action::DISMISS]
+    );
+    assert_eq!(
+        h.shell.state(),
+        (PetState::Reminder, Some("Break".to_owned()))
+    );
+    h.press(action::START);
+
+    // a. Water, with its 10-second countdown and "Log 250 ml".
+    let b = h.shell.open_bubble().unwrap();
+    assert_eq!(b.title, "Step 1 of 4: Drink some water");
+    assert_eq!(b.lines, ["Take a few sips."]);
+    let c = b.countdown.clone().unwrap();
+    assert_eq!((c.seconds, c.label.as_str()), (10, "Drink some water"));
+    assert_eq!(
+        action_ids(&b),
+        [
+            action::BREAK_LOG_WATER,
+            action::BREAK_NEXT,
+            action::BREAK_SKIP,
+            action::BREAK_STOP
+        ]
+    );
+    assert!(b.continues);
+    assert_eq!(b.note.as_deref(), Some(PROVISIONAL_NOTICE));
+    b.validate().unwrap();
+    h.press(action::BREAK_LOG_WATER);
+    assert!(
+        h.events()
+            .contains(&EventPayload::WaterLogged { amount_ml: 250 })
+    );
+    let b = h.shell.open_bubble().unwrap();
+    assert_eq!(b.lines.last().unwrap(), "Logged 250 ml.");
+    assert_eq!(action_ids(&b), [action::BREAK_NEXT, action::BREAK_STOP]);
+    // The countdown runs on the page: the card is not redrawn while only it moves.
+    let id = b.id.clone();
+    h.work(5);
+    assert_eq!(h.shell.open_bubble().unwrap().id, id);
+    h.work(5);
+
+    // b. Eyes, 15 seconds.
+    let b = h.shell.open_bubble().unwrap();
+    assert_eq!(b.title, "Step 2 of 4: Rest your eyes");
+    assert_eq!(b.countdown.unwrap().seconds, 15);
+    h.press(action::BREAK_NEXT);
+
+    // c. The movement routine in the guide, with "Skip this step".
+    let b = h.shell.open_bubble().unwrap();
+    assert_eq!(b.title, "Today's movement: Monday");
+    assert_eq!(b.lines[0], "Part of your 5-minute break.");
+    assert!(b.has_action(action::LATER) && !b.has_action(action::SKIP_TODAY));
+    assert_eq!(
+        b.actions.last().map(|a| a.label.as_str()),
+        Some("Skip this step")
+    );
+    h.press(action::SEATED);
+    for _ in 0..3 {
+        h.press(action::STEP_DONE);
+    }
+
+    // d. Closed-eye breathing, then the last screen.
+    let b = h.shell.open_bubble().unwrap();
+    assert_eq!(b.title, "Step 4 of 4: Breathe slowly with your eyes closed");
+    assert!(b.lines.iter().any(|l| l.contains("Close your eyes")));
+    assert!((60..=90).contains(&b.countdown.unwrap().seconds));
+    assert_eq!(b.actions[0].label, "Finish");
+    h.press(action::BREAK_NEXT);
+    let b = h.shell.open_bubble().unwrap();
+    assert_eq!(b.title, "Break done. Back to work whenever you are ready.");
+    assert_eq!(
+        b.lines,
+        ["4 of 4 steps done (self-reported). No catch-up needed."]
+    );
+    h.press(action::OK);
+    assert!(h.shell.open_bubble().is_none());
+    assert!(h.events().iter().any(|p| matches!(
+        p,
+        EventPayload::BreakSession {
+            outcome: RoutineOutcome::Done,
+            stopped: false,
+            ..
+        }
+    )));
+    assert!(h.events().iter().any(|p| matches!(
+        p,
+        EventPayload::MovementSession {
+            outcome: RoutineOutcome::Done,
+            ..
+        }
+    )));
+    assert_eq!(
+        h.link.view().chip(Activity::Movement).status,
+        ChipStatus::Done
+    );
+}
+
+#[test]
+fn the_break_reminder_answers_and_closing_a_break_through_the_shell() {
+    let mut h = H::with_store(combined);
+    let (offer, _) = h.work_until_reminder(31);
+    h.press(action::SKIP);
+    assert_eq!(h.responses(), [(offer, ReminderOutcome::Skipped)]);
+    assert!(h.shell.open_bubble().is_none());
+    // No other reminder comes in between: the next break is a full interval later.
+    let (next, _) = h.work_until_reminder(31);
+    assert_eq!(h.offers().len(), 2);
+    h.press(action::START);
+    assert!(
+        h.shell
+            .menu_ids()
+            .contains(&action::MOVEMENT_START.to_owned()),
+        "a break is not a movement routine the menu answers"
+    );
+    // The close button stops the break; nothing done is "none".
+    h.close_button();
+    assert!(h.shell.open_bubble().is_none());
+    assert_eq!(h.responses()[1], (next, ReminderOutcome::Started));
+    assert!(h.events().iter().any(|p| matches!(
+        p,
+        EventPayload::BreakSession {
+            outcome: RoutineOutcome::None,
+            stopped: true,
+            ..
+        }
+    )));
+    assert_eq!(
+        h.link.view().chip(Activity::Movement).status,
+        ChipStatus::NoneRecorded
+    );
+}
+
+#[test]
+fn break_cards_route_only_their_own_actions() {
+    let kind = BubbleKind::Break;
+    assert_eq!(BubbleKind::parse(&kind.id(3)), Some(kind));
+    for (id, want) in [
+        (action::BREAK_LOG_WATER, BreakAction::LogWater),
+        (action::BREAK_NEXT, BreakAction::Next),
+        (action::BREAK_SKIP, BreakAction::Skip),
+        (action::BREAK_STOP, BreakAction::Stop),
+        (action::OK, BreakAction::Close),
+    ] {
+        assert_eq!(bubble_command(kind, id), Some(Input::Break(want)));
+    }
+    assert_eq!(bubble_command(kind, action::START), None);
+    let offer = Uuid::from_u128(7);
+    assert_eq!(
+        bubble_command(BubbleKind::Reminder { offer }, action::SKIP),
+        Some(Input::Respond {
+            offer,
+            response: Response::Skip
+        })
+    );
+    // A countdown longer than the shell allows is refused.
+    let b = Bubble {
+        id: "break#1".to_owned(),
+        title: "Step".to_owned(),
+        countdown: Some(crate::shell::BubbleCountdown {
+            seconds: crate::shell::MAX_COUNTDOWN_S + 1,
+            label: "Step".to_owned(),
+        }),
+        ..Bubble::default()
+    };
+    assert!(b.validate().is_err());
 }

@@ -10,7 +10,7 @@
 use chrono::{NaiveDate, Weekday};
 use hy_core::coach::water::WATER_PANEL_RANGE_ML;
 use hy_core::coach::{
-    CheckInAnswer, GuideAction, Input, MeditationAction, PauseLength, PomodoroPreset,
+    BreakAction, CheckInAnswer, GuideAction, Input, MeditationAction, PauseLength, PomodoroPreset,
     RecoveryAction, Reflection, Response, ReviewAnswer, WaterInput,
 };
 use hy_core::schema::{PhoneLabel, RoutineOutcome, RoutineVariant};
@@ -232,6 +232,7 @@ pub fn bubble_command(kind: BubbleKind, action_id: &str) -> Option<Input> {
                 a::DONE => Response::Done,
                 a::START => Response::Start,
                 a::SNOOZE => Response::Snooze,
+                a::SKIP => Response::Skip,
                 a::DISMISS => Response::Dismiss,
                 a::LOG_WATER => Response::LogWater {
                     ml: WATER_SERVING_ML,
@@ -355,6 +356,14 @@ pub fn bubble_command(kind: BubbleKind, action_id: &str) -> Option<Input> {
             a::MEDITATE_SWITCH => MeditationAction::Switch,
             a::MEDITATE_STOP => MeditationAction::Stop,
             a::OK => MeditationAction::Close,
+            _ => return None,
+        }),
+        BubbleKind::Break => Input::Break(match action_id {
+            a::BREAK_LOG_WATER => BreakAction::LogWater,
+            a::BREAK_NEXT => BreakAction::Next,
+            a::BREAK_SKIP => BreakAction::Skip,
+            a::BREAK_STOP => BreakAction::Stop,
+            a::OK => BreakAction::Close,
             _ => return None,
         }),
         BubbleKind::PostureCue => match action_id {

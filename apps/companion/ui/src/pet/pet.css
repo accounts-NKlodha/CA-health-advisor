@@ -541,6 +541,13 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* The 5-minute break's step countdown (DEC15): text, so nothing depends on colour. */
+.countdown {
+  margin: 2px 0 8px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 .entries {
   list-style: none;
   margin: 6px 0;

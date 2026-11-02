@@ -21,7 +21,8 @@ use super::recovery::{RecoveryAction, RecoveryPlan, RecoveryView};
 use super::water::{Servings, WaterEntry, WaterPace};
 use crate::camera::HoldSources;
 use crate::schema::{
-    Activity, MeditationVersion, PhoneLabel, RoutineOutcome, RoutineVariant, SessionState,
+    Activity, BreakStep, MeditationVersion, PhoneLabel, RoutineOutcome, RoutineVariant,
+    SessionState,
 };
 
 /// How long the user paused coaching for (wireframe B5).
@@ -285,6 +286,8 @@ pub enum Input {
     Review(ReviewAnswer),
     /// An answer on the meditation invitation or in the pause (V2-4; wireframe B12).
     Meditation(MeditationAction),
+    /// An answer in the combined 5-minute break (DEC15).
+    Break(BreakAction),
     /// The posture check asks for its cue: a drift episode started (slice V2-2). Applied
     /// if the card opened; otherwise ignored with the reason
     /// ([`crate::coach::engine::CUE_FOCUS`] and the others).
@@ -310,6 +313,23 @@ pub enum MeditationAction {
     /// Switch between the breath-focused and the eyes-open, non-breath versions.
     Switch,
     /// "Stop": ends the pause (recorded as stopped).
+    Stop,
+    /// "OK" on the last screen.
+    Close,
+}
+
+/// What the user chose in the combined 5-minute break (DEC15). The break starts only from
+/// "Start" on its reminder ([`Response::Start`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BreakAction {
+    /// "Log 250 ml" on the water step: records a water entry of the default serving.
+    LogWater,
+    /// "Next" (or "Finish" on the last step): this step is done, on to the next.
+    Next,
+    /// "Skip": this step is skipped, on to the next. Never counted as done.
+    Skip,
+    /// "Stop break": the steps done so far are recorded; none done is "none".
     Stop,
     /// "OK" on the last screen.
     Close,
@@ -599,6 +619,54 @@ pub enum Bubble {
     /// The posture cue (slice V2-2): a sustained change from the calibration. OK, or
     /// Recalibrate (the shell opens the camera page).
     PostureCue,
+    /// "Time for a 5-minute break" (DEC15): the combined break's reminder, with Start,
+    /// Snooze, Skip and Not now. It is recorded as a movement reminder.
+    BreakOffer {
+        /// Offer id: echo it back in [`Input::Respond`].
+        offer: Uuid,
+        /// Time at the PC counted since the last break.
+        at_pc: Duration,
+    },
+    /// The combined break's steps other than movement, which runs in the movement guide
+    /// ([`Bubble::MovementGuide`] with [`GuideView::in_break`]).
+    Break(BreakView),
+}
+
+/// Where the combined 5-minute break is (DEC15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BreakStage {
+    /// One timed step: Next, Skip, Stop break (and "Log 250 ml" on the water step).
+    Step {
+        /// The step.
+        step: BreakStep,
+        /// Its place in the break, from 0.
+        index: u32,
+        /// Steps in this break.
+        total: u32,
+        /// The step's time on screen.
+        length: Duration,
+        /// Time left; when it runs out the step counts as done and the next one starts.
+        left: Duration,
+        /// Water logged on this step, in ml.
+        water_ml: Option<u32>,
+    },
+    /// The last screen: "Break done".
+    Done {
+        /// Done, partial or none.
+        outcome: RoutineOutcome,
+        /// Steps done.
+        done: u32,
+        /// Steps in this break.
+        total: u32,
+    },
+}
+
+/// The combined break's card (DEC15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BreakView {
+    /// Where the break is.
+    pub stage: BreakStage,
 }
 
 /// The meditation pause, for its card (V2-4).
@@ -670,6 +738,10 @@ pub struct GuideView {
     /// the other one instead of asking. `None`: ask each time.
     #[serde(default)]
     pub default_variant: Option<RoutineVariant>,
+    /// The movement step of a combined break (DEC15): "Skip this step" replaces Later and
+    /// Skip today, and the result goes on to the break's next step.
+    #[serde(default)]
+    pub in_break: bool,
 }
 
 /// Why the pet is hidden.
@@ -711,6 +783,8 @@ pub enum PetMode {
     Exercise,
     /// The reminder card is open.
     Reminder(Activity),
+    /// The combined break's reminder is open (DEC15).
+    BreakOffer,
     /// "1 reminder waiting" badge.
     Waiting(Activity),
     /// A check-in or offer is open ("!").
@@ -806,13 +880,15 @@ impl CoachView {
         self.chips[i]
     }
 
-    /// The reminder offer in the bubble, if the bubble is a reminder.
+    /// The reminder offer in the bubble, if the bubble is a reminder (the combined
+    /// break's reminder is recorded as movement).
     #[must_use]
     pub fn reminder(&self) -> Option<(Uuid, Activity)> {
         match self.bubble {
             Some(Bubble::Reminder {
                 offer, activity, ..
             }) => Some((offer, activity)),
+            Some(Bubble::BreakOffer { offer, .. }) => Some((offer, Activity::Movement)),
             _ => None,
         }
     }
