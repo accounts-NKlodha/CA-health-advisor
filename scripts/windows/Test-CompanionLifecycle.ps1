@@ -18,23 +18,113 @@
                     no registry entry or program file; reinstall keeps a start-at-sign-in
                     "off" choice; uninstall with /DELETEDATA removes everything.
 
+  -Phase UninstallLoop  (I9a, docs/V1_Acceptance.md) install A, run it until its WebView2
+                    processes are up, uninstall with /S, and check that the WebView2 cache
+                    (%LOCALAPPDATA%\app.healthieryou.companion) is gone, -Iterations times.
+                    Odd rounds quit the app first (as the lifecycle does), even rounds
+                    uninstall while it runs (the uninstaller closes it, as Windows Settings
+                    would). Each round's timings and, when the cache is left, what holds it
+                    are written to uninstall-loop.csv; it ends with nothing installed.
+  -Phase SelfTest   checks this script's own helpers (which processes count as the app's
+                    WebView2, the loop summary) on synthetic data; runs anywhere.
+
   A runner is not an office PC: SmartScreen, Smart App Control and a standard user's
   rights are not exercised here (see docs/V1-6_Install_Update.md, physical tests).
 #>
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)][ValidateSet('Install', 'Lifecycle')][string]$Phase,
+  [Parameter(Mandatory = $true)][ValidateSet('Install', 'Lifecycle', 'UninstallLoop', 'SelfTest')][string]$Phase,
   # Folder with A, B and C installers and their .sig files.
-  [Parameter(Mandatory = $true)][string]$Installers,
+  [string]$Installers,
   # Folder with the wrongly-signed copy of B (same name, signed with another key).
   [string]$OtherKeyDir,
-  [Parameter(Mandatory = $true)][string]$Work,
+  [string]$Work,
   [string]$VersionA = '0.1.0',
   [string]$VersionB = '0.1.1',
-  [string]$VersionC = '0.1.2'
+  [string]$VersionC = '0.1.2',
+  [int]$Iterations = 20
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3
+
+# The WebView2 user-data folder of this app (WebView2 names it after the bundle id). Its
+# path is on the command line of every WebView2 process of the app, whichever runtime copy
+# runs it, so that is how they are found (not only by the runtime's path).
+$UserDataName = 'app.healthieryou.companion'
+
+# A process is one of this app's WebView2 processes when it is msedgewebview2.exe and runs
+# from the install folder or names the app's user-data folder on its command line.
+function Test-AppWebView2([object]$Process, [string]$InstallRoot) {
+  if ("$($Process.Name)" -ne 'msedgewebview2.exe') { return $false }
+  $path = "$($Process.ExecutablePath)"
+  if ($InstallRoot -and $path -and $path.StartsWith($InstallRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+  $cmd = "$($Process.CommandLine)"
+  $cmd.IndexOf("\$UserDataName", [StringComparison]::OrdinalIgnoreCase) -ge 0
+}
+
+# True for the NSIS uninstaller's temp copy working on this install: Un.exe (NSIS 3) or
+# Au_.exe (NSIS 2) started with "_?=<install folder>", or, when the command line cannot be
+# read, run from a ~nsu*.tmp folder.
+function Test-UninstallerCopy([object]$Process, [string]$InstallRoot) {
+  if (@('Un.exe', 'Au_.exe') -notcontains "$($Process.Name)") { return $false }
+  $cmd = "$($Process.CommandLine)"
+  if ($cmd) {
+    $root = $InstallRoot.TrimEnd('\')
+    $i = $cmd.IndexOf('_?=', [StringComparison]::OrdinalIgnoreCase)
+    if ($i -lt 0) { return $false }
+    $dir = $cmd.Substring($i + 3).Trim().Trim('"').TrimEnd('\')
+    return [string]::Equals($dir, $root, [StringComparison]::OrdinalIgnoreCase)
+  }
+  "$($Process.ExecutablePath)" -match '\\~nsu[0-9A-Fa-f]*\.tmp\\[^\\]+$'
+}
+
+# One line per uninstall-loop round, then the verdict: every round must leave no cache.
+function Get-LoopSummary([object[]]$Rounds) {
+  $left = @($Rounds | Where-Object { $_.cache_left })
+  $forced = @($Rounds | Where-Object { $_.webview2_forced })
+  $waits = @($Rounds | ForEach-Object { [double]$_.webview2_exit_s })
+  $maxWait = if ($waits.Count) { ($waits | Measure-Object -Maximum).Maximum } else { 0 }
+  [pscustomobject]@{
+    rounds = $Rounds.Count; cache_left = $left.Count; webview2_forced = $forced.Count
+    max_webview2_exit_s = $maxWait
+    ok = ($Rounds.Count -gt 0 -and $left.Count -eq 0)
+  }
+}
+
+if ($Phase -eq 'SelfTest') {
+  $fails = 0
+  function T([string]$Name, [bool]$Ok) {
+    if ($Ok) { Write-Host "[PASS] $Name" } else { Write-Host "[FAIL] $Name"; $script:fails++ }
+  }
+  $root = 'C:\Users\u\AppData\Local\HealthierYou'
+  $p = { param($n, $path, $cmd) [pscustomobject]@{ Name = $n; ExecutablePath = $path; CommandLine = $cmd } }
+  T 'bundled runtime process counts' (Test-AppWebView2 (& $p 'msedgewebview2.exe' "$root\webview2-fixed\msedgewebview2.exe" '') $root)
+  T 'path match is case-insensitive' (Test-AppWebView2 (& $p 'msedgewebview2.exe' "C:\USERS\U\APPDATA\LOCAL\healthieryou\webview2-fixed\msedgewebview2.exe" $null) $root)
+  T 'another runtime with this app''s user-data folder counts (crashpad handler)' (Test-AppWebView2 (& $p 'msedgewebview2.exe' 'C:\Program Files (x86)\Microsoft\EdgeWebView\Application\1.0\msedgewebview2.exe' '"msedgewebview2.exe" --type=crashpad-handler --database=C:\Users\u\AppData\Local\app.healthieryou.companion\EBWebView\Crashpad') $root)
+  T 'path not readable, command line names the folder: counts' (Test-AppWebView2 (& $p 'msedgewebview2.exe' $null '--user-data-dir="C:\Users\u\AppData\Local\app.healthieryou.companion\EBWebView"') $root)
+  T 'another app''s WebView2 does not count' (-not (Test-AppWebView2 (& $p 'msedgewebview2.exe' 'C:\Program Files (x86)\Microsoft\EdgeWebView\Application\1.0\msedgewebview2.exe' '--user-data-dir="C:\Users\u\AppData\Local\Packages\Teams\EBWebView"') $root))
+  T 'a folder that only starts like the install folder does not count' (-not (Test-AppWebView2 (& $p 'msedgewebview2.exe' 'C:\Users\u\AppData\Local\HealthierYouOld\msedgewebview2.exe' '') $root))
+  T 'a folder that only ends like the user-data name does not count' (-not (Test-AppWebView2 (& $p 'msedgewebview2.exe' 'C:\x\msedgewebview2.exe' '--user-data-dir=C:\x\notapp.healthieryou.companion') $root))
+  T 'other process names never count' (-not (Test-AppWebView2 (& $p 'hy-companion.exe' "$root\hy-companion.exe" "--user-data-dir=$UserDataName") $root))
+  $r = { param($left, $forced, $wait) [pscustomobject]@{ cache_left = $left; webview2_forced = $forced; webview2_exit_s = $wait } }
+  $s = Get-LoopSummary @((& $r $false $false 1.5), (& $r $false $true 31), (& $r $false $false 0))
+  T 'loop summary: all rounds clean passes, forced and slowest exit reported' ($s.ok -and $s.rounds -eq 3 -and $s.webview2_forced -eq 1 -and $s.max_webview2_exit_s -eq 31)
+  $s = Get-LoopSummary @((& $r $false $false 1), (& $r $true $false 2))
+  T 'loop summary: one round with the cache left fails' (-not $s.ok -and $s.cache_left -eq 1)
+  T 'loop summary: no rounds is not a pass' (-not (Get-LoopSummary @()).ok)
+  $u = { param($n, $path, $cmd) [pscustomobject]@{ Name = $n; ExecutablePath = $path; CommandLine = $cmd } }
+  $tmp = 'C:\Users\u\AppData\Local\Temp'
+  T 'uninstaller copy (NSIS 3 Un.exe) for this install counts' (Test-UninstallerCopy (& $u 'Un.exe' "$tmp\~nsu1.tmp\Un.exe" "`"$tmp\~nsu1.tmp\Un.exe`" /S _?=$root\") $root)
+  T 'uninstaller copy: case-insensitive, NSIS 2 Au_.exe, /DELETEDATA' (Test-UninstallerCopy (& $u 'Au_.exe' "$tmp\~nsu.tmp\Au_.exe" "`"$tmp\~nsu.tmp\Au_.exe`" /S /DELETEDATA _?=C:\USERS\U\APPDATA\LOCAL\HEALTHIERYOU\") $root)
+  T 'uninstaller copy: command line not readable, ~nsu folder counts' (Test-UninstallerCopy (& $u 'Un.exe' "$tmp\~nsuA.tmp\Un.exe" $null) $root)
+  T 'another program''s uninstaller copy does not count' (-not (Test-UninstallerCopy (& $u 'Un.exe' "$tmp\~nsu2.tmp\Un.exe" "`"$tmp\~nsu2.tmp\Un.exe`" /S _?=C:\Program Files\Other\") $root))
+  T 'a folder that only starts like the install folder does not count' (-not (Test-UninstallerCopy (& $u 'Un.exe' "$tmp\~nsu1.tmp\Un.exe" "`"x`" _?=${root}Old\") $root))
+  T 'other processes named Un.exe elsewhere do not count' (-not (Test-UninstallerCopy (& $u 'Un.exe' 'C:\tools\Un.exe' $null) $root))
+  T 'the original uninstall.exe does not count' (-not (Test-UninstallerCopy (& $u 'uninstall.exe' "$root\uninstall.exe" "`"$root\uninstall.exe`" /S") $root))
+  Write-Host "self-test: $fails failed"
+  exit $(if ($fails -eq 0) { 0 } else { 1 })
+}
+if (-not $Installers -or -not $Work) { throw "-Installers and -Work are required for -Phase $Phase" }
 
 $Product = 'HealthierYou'
 $Root = Join-Path $env:LOCALAPPDATA $Product
@@ -46,7 +136,7 @@ $MachineUninstallKey = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstal
 $ManuKey = "HKCU:\Software\$Product"
 $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $ApprovedKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'
-$WebViewCache = Join-Path $env:LOCALAPPDATA 'app.healthieryou.companion'
+$WebViewCache = Join-Path $env:LOCALAPPDATA $UserDataName
 New-Item -ItemType Directory -Force $Work | Out-Null
 
 $script:Results = [System.Collections.Generic.List[object]]::new()
@@ -61,15 +151,73 @@ function RegValue([string]$Key, [string]$Name) {
   if ($p) { $p.$Name } else { $null }
 }
 function DisplayVersion { RegValue $UninstallKey 'DisplayVersion' }
-function Stop-Companion {
+function Get-AppWebView2 {
+  @(Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" -ErrorAction SilentlyContinue | Where-Object { Test-AppWebView2 $_ $Root })
+}
+function Format-Processes([object[]]$Processes) {
+  ($Processes | ForEach-Object {
+      $cmd = "$($_.CommandLine)"; if ($cmd.Length -gt 220) { $cmd = $cmd.Substring(0, 220) + '...' }
+      "pid $($_.ProcessId) parent $($_.ParentProcessId) $($_.ExecutablePath) :: $cmd"
+    }) -join ' | '
+}
+# Quit the app and wait for every one of its WebView2 processes to end (they end on their
+# own shortly after the app). Waits at most -Seconds; then names the ones left, closes
+# them, and waits again. Returns what happened, for the loop's log.
+function Stop-Companion([int]$Seconds = 60) {
   Get-Process -Name 'hy-companion', 'hy-update-helper' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  # The WebView2 processes of the bundled runtime end shortly after the app.
-  $deadline = (Get-Date).AddSeconds(30)
-  while ((Get-Date) -lt $deadline) {
-    $left = @(Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase) })
-    if ($left.Count -eq 0) { return }
+  $start = Get-Date
+  $deadline = $start.AddSeconds($Seconds)
+  $left = @(Get-AppWebView2)
+  while ($left.Count -gt 0 -and (Get-Date) -lt $deadline) {
+    Start-Sleep -Milliseconds 500
+    $left = @(Get-AppWebView2)
+  }
+  $result = [pscustomobject]@{ exit_s = [math]::Round(((Get-Date) - $start).TotalSeconds, 1); forced = $false; holders = '' }
+  if ($left.Count -gt 0) {
+    $result.forced = $true
+    $result.holders = Format-Processes $left
+    Write-Host "::warning title=Lifecycle::$($left.Count) WebView2 process(es) of the app still running $Seconds s after it quit; closing them: $($result.holders)"
+    $left | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $deadline = (Get-Date).AddSeconds(15)
+    while (@(Get-AppWebView2).Count -gt 0 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+    $still = @(Get-AppWebView2)
+    if ($still.Count -gt 0) { Write-Host "::error title=Lifecycle::WebView2 processes of the app could not be closed: $(Format-Processes $still)" }
+  }
+  $result
+}
+# When the WebView2 cache is still there after an uninstall: what holds it (processes that
+# name it, files that cannot be opened for exclusive access, and Sysinternals handle.exe's
+# view if it is on the PATH), then how long it takes to go once nothing is touched
+# (polled every 500 ms for at most 60 s; the folder is removed by hand if it frees up, to
+# see whether a retry would have succeeded).
+function Trace-CacheHolders {
+  if (-not (Test-Path $WebViewCache)) { return $null }
+  $procs = @(Get-AppWebView2)
+  $files = @(Get-ChildItem -Recurse -Force -File $WebViewCache -ErrorAction SilentlyContinue)
+  $locked = @()
+  foreach ($f in $files) {
+    try { $s = [IO.File]::Open($f.FullName, 'Open', 'ReadWrite', 'None'); $s.Close() }
+    catch { $locked += $f.FullName.Substring($WebViewCache.Length + 1) }
+  }
+  $handle = ''
+  $h = Get-Command handle64.exe, handle.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($h) { $handle = ((& $h.Source -accepteula -nobanner $WebViewCache 2>&1) | Out-String).Trim() }
+  $start = Get-Date
+  $goneAfter = $null
+  while (((Get-Date) - $start).TotalSeconds -lt 60) {
+    Remove-Item -Recurse -Force $WebViewCache -ErrorAction SilentlyContinue
+    if (-not (Test-Path $WebViewCache)) { $goneAfter = [math]::Round(((Get-Date) - $start).TotalSeconds, 1); break }
     Start-Sleep -Milliseconds 500
   }
+  $t = [pscustomobject]@{
+    processes = Format-Processes $procs
+    files_left = $files.Count
+    locked = ($locked | Select-Object -First 10) -join ', '
+    handle = $handle
+    gone_after_s = $goneAfter
+  }
+  Write-Host "::warning title=Lifecycle::WebView2 cache left after uninstall: $($t.files_left) file(s), locked: [$($t.locked)], processes: [$($t.processes)], removable after: $(if ($null -ne $goneAfter) { "$goneAfter s" } else { 'not within 60 s' })$(if ($handle) { "; handle.exe: $($handle -replace '[\r\n]+', ' ')" })"
+  $t
 }
 # Start a program and wait for it alone. Start-Process -Wait would also wait for every
 # process it starts (the update helper, the restarted app), which never all end.
@@ -88,14 +236,23 @@ function Run-Installer([string]$Path, [string]$Arguments = '/S') {
 function Invoke-Uninstall([string]$Arguments = '/S') {
   $u = Join-Path $Root 'uninstall.exe'
   if (-not (Test-Path $u)) { return $false }
-  # The NSIS uninstaller copies itself to the temp folder and exits at once; wait for
-  # the copy (Au_.exe) to finish and the entry to go, as Windows Settings would.
+  # The NSIS uninstaller copies itself to %TEMP%\~nsu<N>.tmp\Un.exe (Au_.exe before NSIS
+  # 3), starts the copy with "_?=<install folder>" and exits at once; the copy does the
+  # work. Wait for the copy to end, as Windows Settings would: the uninstall entry and the
+  # program go early in the copy's run, before the installer hooks (the WebView2 wait
+  # and the cache removal), so they alone do not say it has finished (I9a). The install
+  # key HKCU\Software\HealthierYou, removed by the hook after the cache, must be gone too.
   $null = Start-AndWait $u $Arguments
+  $seen = $false
   $deadline = (Get-Date).AddMinutes(3)
   while ((Get-Date) -lt $deadline) {
-    $running = @(Get-Process -Name 'Au_' -ErrorAction SilentlyContinue).Count -gt 0
-    if (-not $running -and -not (Test-Path $UninstallKey) -and -not (Test-Path $Exe)) { return $true }
-    Start-Sleep -Milliseconds 500
+    $copies = @(Get-CimInstance Win32_Process -Filter "Name = 'Un.exe' OR Name = 'Au_.exe'" -ErrorAction SilentlyContinue | Where-Object { Test-UninstallerCopy $_ $Root })
+    if ($copies.Count -gt 0) { $seen = $true }
+    if ($copies.Count -eq 0 -and -not (Test-Path $UninstallKey) -and -not (Test-Path $Exe) -and -not (Test-Path $ManuKey)) {
+      if (-not $seen) { Write-Host "::warning title=Lifecycle::the uninstaller's temp copy was never seen running; finished judged by the registry and files only" }
+      return $true
+    }
+    Start-Sleep -Milliseconds 250
   }
   $false
 }
@@ -137,11 +294,70 @@ function Assert-No-Program-Files([string]$When) {
   foreach ($e in 'hy-companion.exe', 'uninstall.exe', 'webview2-fixed', 'updates', 'logs') {
     Check "${When}: $e removed" (-not (Test-Path (Join-Path $Root $e)))
   }
-  Check "${When}: WebView2 cache removed" (-not (Test-Path $WebViewCache))
+  $null = Assert-Cache-Removed $When
+}
+# The I9a check, with what held the cache when it is left.
+function Assert-Cache-Removed([string]$When) {
+  $gone = -not (Test-Path $WebViewCache)
+  $detail = ''
+  if (-not $gone) {
+    $t = Trace-CacheHolders
+    $detail = "files $($t.files_left); locked [$($t.locked)]; processes [$($t.processes)]; removable after $(if ($null -ne $t.gone_after_s) { "$($t.gone_after_s) s" } else { 'more than 60 s' })"
+  }
+  Check "${When}: WebView2 cache removed" $gone $detail
+  $gone
 }
 
 try {
-  if ($Phase -eq 'Install') {
+  if ($Phase -eq 'UninstallLoop') {
+    $rounds = [System.Collections.Generic.List[object]]::new()
+    for ($i = 1; $i -le $Iterations; $i++) {
+      $quitFirst = ($i % 2) -eq 1
+      $t0 = Get-Date
+      $code = Run-Installer (Installer $VersionA)
+      $installS = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
+      Check "round ${i}: install A exit code 0" ($code -eq 0 -and (Test-Path $Exe)) "exit $code"
+      # Run the app until its WebView2 processes are up and have had time to write the cache.
+      $null = Start-Process -FilePath $Exe -PassThru
+      $deadline = (Get-Date).AddSeconds(60)
+      while (@(Get-AppWebView2).Count -eq 0 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+      $procs = @(Get-AppWebView2).Count
+      Start-Sleep -Seconds 5
+      Check "round ${i}: the app's WebView2 started and made its cache" ($procs -gt 0 -and (Test-Path $WebViewCache)) "$procs process(es)"
+      $stop = [pscustomobject]@{ exit_s = 0; forced = $false; holders = '' }
+      if ($quitFirst) { $stop = Stop-Companion }
+      $t0 = Get-Date
+      $ok = Invoke-Uninstall '/S'
+      $uninstallS = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
+      Check "round ${i}: uninstall finished ($(if ($quitFirst) { 'app quit first' } else { 'app running' }))" $ok "$uninstallS s"
+      $leftNow = @(Get-AppWebView2)
+      $trace = $null
+      $gone = -not (Test-Path $WebViewCache)
+      if (-not $gone) { $trace = Trace-CacheHolders }
+      Check "round ${i}: WebView2 cache removed" $gone $(if ($trace) { "locked [$($trace.locked)] processes [$($trace.processes)]" } else { '' })
+      Check "round ${i}: no WebView2 process of the app left" ($leftNow.Count -eq 0) (Format-Processes $leftNow)
+      $rounds.Add([pscustomobject]@{
+          round = $i; mode = $(if ($quitFirst) { 'quit_first' } else { 'running' })
+          install_s = $installS; webview2_processes = $procs
+          webview2_exit_s = $stop.exit_s; webview2_forced = $stop.forced; holders_at_stop = $stop.holders
+          uninstall_s = $uninstallS; cache_left = (-not $gone)
+          cache_files_left = $(if ($trace) { $trace.files_left } else { 0 })
+          cache_locked = $(if ($trace) { $trace.locked } else { '' })
+          cache_processes = $(if ($trace) { $trace.processes } else { '' })
+          cache_gone_after_s = $(if ($trace) { $trace.gone_after_s } else { $null })
+          handle = $(if ($trace) { $trace.handle } else { '' })
+        })
+      # Start the next round from nothing: the uninstall keeps the data folder.
+      $null = Stop-Companion
+      Remove-Item -Recurse -Force $Root -ErrorAction SilentlyContinue
+      Remove-Item -Recurse -Force $WebViewCache -ErrorAction SilentlyContinue
+    }
+    $rounds | Export-Csv -NoTypeInformation -Path (Join-Path $Work 'uninstall-loop.csv')
+    $rounds | Format-Table round, mode, install_s, webview2_processes, webview2_exit_s, webview2_forced, uninstall_s, cache_left, cache_gone_after_s -AutoSize | Out-String -Width 200 | Write-Host
+    $sum = Get-LoopSummary $rounds.ToArray()
+    Check "uninstall loop: the cache was removed in every one of $($sum.rounds) rounds" $sum.ok "left in $($sum.cache_left); WebView2 closed by force after the wait in $($sum.webview2_forced); slowest WebView2 exit $($sum.max_webview2_exit_s) s"
+  }
+  elseif ($Phase -eq 'Install') {
     Check 'clean runner: not installed before' (-not (Test-Path $UninstallKey) -and -not (Test-Path $Exe))
     $code = Run-Installer (Installer $VersionA)
     Check 'install A: silent installer exit code 0' ($code -eq 0) "exit $code"
@@ -157,7 +373,7 @@ try {
   }
   else {
     # ------------------------------------------------------------ update A -> B
-    Stop-Companion
+    $null = Stop-Companion
     $exeA = Hash $Exe
     $r = Update-Step '--hy-update-install' (Installer $VersionB)
     Check 'update A->B: accepted and started' ($r.Code -eq 0) "exit $($r.Code) $($r.Report.error)"
@@ -172,7 +388,7 @@ try {
     Check 'update A->B: data folder created by B' (Test-Path (Join-Path $Data 'hy.db'))
 
     # ------------------------------------------------------ C does not start: roll back
-    Stop-Companion
+    $null = Stop-Companion
     $exeB = Hash $Exe
     $uninstB = Hash (Join-Path $Root 'uninstall.exe')
     $r = Update-Step '--hy-update-install' (Installer $VersionC)
@@ -189,7 +405,7 @@ try {
     Check 'update B->C: B started again' (@(Get-Process -Name 'hy-companion' -ErrorAction SilentlyContinue).Count -gt 0)
 
     # ------------------------------------------------------------- refused files
-    Stop-Companion
+    $null = Stop-Companion
     $exeBefore = Hash $Exe
     $tamper = Join-Path $Work 'tampered'; New-Item -ItemType Directory -Force $tamper | Out-Null
     $nameA = Split-Path -Leaf (Installer $VersionA)
@@ -220,7 +436,7 @@ try {
     Start-Sleep -Seconds 8
     $r = Update-Step '--hy-update-install' (Installer $VersionA)
     Check 'refuse: install while the app runs' ($r.Code -eq 3) "exit $($r.Code)"
-    Stop-Companion
+    $null = Stop-Companion
 
     # ------------------------------------------------- the downloaded-file mark is seen
     $marked = Join-Path $Work 'marked'; New-Item -ItemType Directory -Force $marked | Out-Null
@@ -242,7 +458,7 @@ try {
     Check 'rollback B->A: data kept' (Test-Path (Join-Path $Data 'hy.db'))
 
     # --------------------------------------------- uninstall keeps data, no residue
-    Stop-Companion
+    $null = Stop-Companion
     # As if the user had switched start at sign-in off in Task Manager.
     New-Item -Path $ApprovedKey -Force | Out-Null
     New-ItemProperty -Path $ApprovedKey -Name $Product -PropertyType Binary -Value ([byte[]](3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) -Force | Out-Null
@@ -268,7 +484,7 @@ try {
     Check 'uninstall /DELETEDATA: finished' $ok
     Assert-Clean-Registry 'uninstall /DELETEDATA'
     Check 'uninstall /DELETEDATA: %LOCALAPPDATA%\HealthierYou removed' (-not (Test-Path $Root))
-    Check 'uninstall /DELETEDATA: WebView2 cache removed' (-not (Test-Path $WebViewCache))
+    $null = Assert-Cache-Removed 'uninstall /DELETEDATA'
     $rest = @(Get-ChildItem 'HKCU:\Software' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match 'HealthierYou|healthieryou' })
     Check 'uninstall /DELETEDATA: no HKCU\Software key mentions the product' ($rest.Count -eq 0) (($rest | ForEach-Object PSChildName) -join ',')
   }
@@ -277,7 +493,7 @@ catch {
   Check 'script error' $false $_.Exception.Message
 }
 finally {
-  Stop-Companion
+  $null = Stop-Companion
   $log = Join-Path $Updates 'update.log'
   if (Test-Path $log) { Write-Host '--- update.log ---'; Get-Content $log | Write-Host }
 }

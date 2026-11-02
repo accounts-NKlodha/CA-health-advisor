@@ -85,6 +85,8 @@ The uninstall can be started from Windows Settings > Installed apps, or by `unin
 
 `%LOCALAPPDATA%\HealthierYou` itself goes only when nothing is left in it. If the data is kept, only `data\` remains.
 
+The app's WebView2 processes end a moment after the app (the uninstaller closes a running app first), and until then they keep files of the bundled runtime and of the WebView2 cache open (I9a). So the uninstaller asks the Restart Manager, every 500 ms for up to 30 s, whether any process still runs this install's own runtime copy (`webview2-fixed\msedgewebview2.exe`, so other apps' WebView2 processes are never counted) or holds the WebView2 user-data folder's `lockfile`, `Local State`, `Last Version` or `Variations` open (any process tied to that folder, whichever runtime it runs). It closes any process still running the bundled runtime after that, and then retries removing the runtime and the cache until each folder itself is gone (not merely emptied), for up to 30 s more.
+
 Batch 1's residue may also have been partly a measurement race. The NSIS uninstaller copies itself to the temp folder (`Au_.exe`) and returns at once. The CI test waits for that copy to finish before checking.
 
 ## 4. Unsigned installer: what staff will see

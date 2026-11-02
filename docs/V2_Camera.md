@@ -116,7 +116,7 @@ again reads frames.
 | Budget (4.5) | Check |
 | --- | --- |
 | Camera at most 10% of the PC's CPU | Self-test `camera_budget_cpu`: process-tree CPU time (Toolhelp + `GetProcessTimes`) over 10 s, on minus off. Informational on the CI runner (shared, no GPU, synthetic camera). Physical: `Test-HealthierYou-Camera.ps1`. |
-| Camera at most 350 MB | Self-test `camera_budget_memory`: process-tree working set (`GetProcessMemoryInfo`), on minus off. Informational on CI. Physical: the same script. |
+| Camera at most 350 MB | Self-test `camera_budget_memory`: process-tree working set (`GetProcessMemoryInfo`), on minus off. Informational on CI, and a different measure from DEC14's. Physical: `Test-HealthierYou-Camera.ps1 -Phase Session` check `budget-memory` follows DEC14: the app's own memory (private working set summed over the process tree, every process read) at every sample with the camera on, at most 350 MB (the highest counts, the median is reported). A reading over the cap fails; readings covering fewer than 80% of the samples, or missing 3 in a row, give INCONCLUSIVE. The note also gives the added whole-tree working set (on minus off), labelled "informational vs DEC14". |
 | Memory returned after off | Self-test `camera_memory_returned`: working set after off is within 60 MB of before (informational). |
 | Off within 2 s | Self-test `camera_off_releases_within_2s` and `camera_presentation_releases` (required). |
 | Inference time | Self-test `camera_inference_ms`: the mean model time per frame (batch 1 measured 37 ms). Informational. |
@@ -168,7 +168,7 @@ or pictures).
 | Item | Slice | Script phase |
 | --- | --- | --- |
 | Reading at a real desk with a real person and room light; "no reading" when away or covered | V2-1 / V2-3 | `-Phase Session` |
-| Camera budget on the office PC (CPU at most 10%, memory at most 350 MB, memory returned after off) | V2-1 | `-Phase Session` |
+| Camera budget on the office PC (CPU at most 10%; the app's own memory, private working set over the process tree, at most 350 MB with the camera on, by DEC14, with the added whole-tree working set shown as information; memory returned after off) | V2-1 | `-Phase Session` |
 | Camera taken by Teams or Camera app; Windows camera access off and back on | V2-1 | `-Phase Session` |
 | Meeting and presentation holds with real Teams/Zoom and PowerPoint; lock and sleep | V2-1 | `-Phase Session` |
 | Webcam light off within 2 s of Off | V2-1 | `-Phase Session` |

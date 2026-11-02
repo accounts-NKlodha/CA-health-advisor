@@ -230,17 +230,19 @@ function Get-SoakVerdict([string]$JsonPath, [int]$ExitCode) {
   return @{ verdict = 'FAIL'; detail = "Overall FAIL: $($failed -join '; ')" }
 }
 
-# Guided reports ([PASS] / [FAIL] / [SKIP] lines): FAIL if any FAIL; PASS only when every
-# question was answered and passed; skipped questions leave it INCONCLUSIVE.
+# Guided reports ([PASS] / [FAIL] / [SKIP] / [INCONCLUSIVE] lines): FAIL if any FAIL; PASS
+# only when every question was answered and passed and no measured check was left without
+# its evidence; skipped questions and inconclusive checks leave it INCONCLUSIVE.
 function Get-GuidedVerdict([string]$ReportPath) {
   if (-not (Test-Path -LiteralPath $ReportPath)) { return @{ verdict = 'INCONCLUSIVE'; detail = 'no report was written' } }
   $lines = @(Get-Content -LiteralPath $ReportPath)
   $pass = @($lines | Where-Object { $_ -like '`[PASS`]*' }).Count
   $fail = @($lines | Where-Object { $_ -like '`[FAIL`]*' }).Count
   $skip = @($lines | Where-Object { $_ -like '`[SKIP`]*' }).Count
-  $d = "$pass passed, $fail failed, $skip skipped"
+  $inc = @($lines | Where-Object { $_ -like '`[INCONCLUSIVE`]*' }).Count
+  $d = "$pass passed, $fail failed, $skip skipped$(if ($inc) { ", $inc inconclusive" })"
   if ($fail -gt 0) { return @{ verdict = 'FAIL'; detail = $d } }
-  if ($pass -gt 0 -and $skip -eq 0) { return @{ verdict = 'PASS'; detail = $d } }
+  if ($pass -gt 0 -and $skip -eq 0 -and $inc -eq 0) { return @{ verdict = 'PASS'; detail = $d } }
   return @{ verdict = 'INCONCLUSIVE'; detail = $d }
 }
 
@@ -2103,6 +2105,8 @@ function Invoke-SelfTest {
     Check 'guided: a skipped question is INCONCLUSIVE' ((Get-GuidedVerdict $g).verdict -eq 'INCONCLUSIVE')
     @('[PASS] a', '[FAIL] b - seen') | Set-Content $g
     Check 'guided: a failed question is FAIL' ((Get-GuidedVerdict $g).verdict -eq 'FAIL')
+    @('[PASS] a', '[INCONCLUSIVE] budget-memory - not proven') | Set-Content $g
+    Check 'guided: an inconclusive measured check is INCONCLUSIVE' ((Get-GuidedVerdict $g).verdict -eq 'INCONCLUSIVE')
     @('[INFO] a') | Set-Content $g
     Check 'guided: no answer at all is INCONCLUSIVE' ((Get-GuidedVerdict $g).verdict -eq 'INCONCLUSIVE')
     Write-JsonFile $j @{ pass = $false; setups = @(@{ setup = 1; sessions = 2; pass = $true }) }
