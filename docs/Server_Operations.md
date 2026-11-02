@@ -41,3 +41,7 @@ Limits that remain:
 ## 4. Stopping the server
 
 Stopping the service stops both listeners. Each one stops its open connections, then waits until every database operation a request had already started has finished. Only then does it return. The Windows service must not replace the database (for example to restore a backup) until it has fully stopped; use `hy-server restore` with the service stopped.
+
+## 5. Offering a companion update to the PCs (W1)
+
+Copy the release's two files, `HealthierYou_<version>_x64-setup.exe` and the same name ending in `.sig`, unchanged, into `%ProgramData%\HealthierYou\Server\updates` from a command prompt or PowerShell **run as administrator** (not with Explorer's "Continue" button, which adds your account to the folder's rights). The admin page's "Updates for the PCs" shows what is offered. Paired, confirmed PCs then get it from Settings > App & updates > "Check the office server for an update". The server does not check the signature: each PC checks it with its built-in release key and refuses a changed, unsigned or older file. To stop offering an update, delete the files. Details: `docs/V1-6_Install_Update.md` section 2a.

@@ -408,7 +408,15 @@ async fn t_s23_only_tls13_with_nothing_in_clear_and_nothing_for_a_category_that_
     assert_eq!(pc.sync().await.unwrap(), SyncOutcome::Pending);
     let log = log_now();
     assert_eq!(endpoint_count(&log, "pair"), 1);
-    for e in ["history", "control", "upload", "receipt", "manifest"] {
+    for e in [
+        "history",
+        "control",
+        "upload",
+        "receipt",
+        "manifest",
+        "update_signature",
+        "update_installer",
+    ] {
         assert_eq!(endpoint_count(&log, e), 0, "{e} while pending");
     }
 

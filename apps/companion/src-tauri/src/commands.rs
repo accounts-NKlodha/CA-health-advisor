@@ -1,8 +1,9 @@
 //! IPC commands. Each window may call only the commands its capability file grants
 //! (`capabilities/*.json`). The commands are synchronous, so Tauri runs them on the main
 //! thread, which the shell requires; the exceptions are the server-link commands that
-//! wait on the network, which are async and touch only the store, and the update-file
-//! dialog, which waits on the user.
+//! wait on the network, which are async and touch only the store, the update-file
+//! dialog, which waits on the user, and the office-server update check, which waits on
+//! the network.
 
 use std::sync::Arc;
 
@@ -21,7 +22,7 @@ use uuid::Uuid;
 
 use crate::server_link::{self, LinkView};
 use crate::shell::{BackupDone, ImportOutcome, PageReport, Shell, SuggestionAnswer};
-use crate::update::{AppPage, UpdateCheck, Updater};
+use crate::update::{AppPage, ServerUpdate, UpdateCheck, Updater};
 use crate::view::{
     CameraPage, PanelView, PetView, PlanPage, ReviewPage, SettingsPage, SettingsView,
 };
@@ -524,6 +525,20 @@ fn choose_installer(owner: isize) -> Option<std::path::PathBuf> {
 #[cfg(not(windows))]
 fn choose_installer(_owner: isize) -> Option<std::path::PathBuf> {
     None
+}
+
+/// "Check the office server for an update" (W1): download the update the paired server
+/// offers and check it exactly as a chosen file. Async: it waits on the network and
+/// hashes the whole installer.
+///
+/// # Errors
+/// Why there is nothing to install, worded for the page; nothing changed.
+#[tauri::command]
+pub async fn update_from_server(
+    shell: ShellState<'_>,
+    updater: UpdaterState<'_>,
+) -> Result<ServerUpdate, String> {
+    crate::update::check_server(shell.inner().clone(), Arc::clone(&updater)).await
 }
 
 /// "Install and restart": stage the checked file, start the update helper, then close

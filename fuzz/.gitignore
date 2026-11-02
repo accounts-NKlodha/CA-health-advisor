@@ -1,0 +1,6 @@
+target/
+artifacts/
+coverage/
+# Inputs the fuzzer finds stay local; only the seeds are committed.
+corpus/*/*
+!corpus/*/seed-*

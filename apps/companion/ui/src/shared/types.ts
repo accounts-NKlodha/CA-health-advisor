@@ -571,6 +571,12 @@ export interface UpdateCheck {
   marked_from_internet: boolean;
 }
 
+/** "Check the office server for an update" (ServerUpdate in update.rs). */
+export type ServerUpdate =
+  | { kind: 'none_offered' }
+  | { kind: 'up_to_date'; version: string }
+  | { kind: 'ready'; check: UpdateCheck };
+
 export interface UpdateOutcome {
   kind: UpdateOutcomeKind;
   from: string;
