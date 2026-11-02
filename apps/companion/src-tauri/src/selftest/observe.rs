@@ -67,15 +67,17 @@ pub fn observability_end_to_end(r: &mut Report, shell: &Arc<Shell>) {
             .private_working_set
             .is_some_and(|p| p > 0 && p <= now.working_set * 2)
         && now.handles > 0
-        && now.threads > 0;
+        && now.threads > 0
+        && now.unreadable == 0;
     #[cfg(not(windows))]
     let sane = true;
     r.check(
         "resource_summary",
         sane && logged && summary.cpu_pct.is_some(),
         format!(
-            "{} processes, working set {} MB, private working set {:?} MB, private bytes {} MB, {} handles, {} threads, CPU {:.2}%; logged {logged}",
+            "{} processes ({} unreadable), working set {} MB, private working set {:?} MB, private bytes {} MB, {} handles, {} threads, CPU {:.2}%; logged {logged}",
             now.processes,
+            now.unreadable,
             now.working_set >> 20,
             now.private_working_set.map(|p| p >> 20),
             now.private_bytes >> 20,

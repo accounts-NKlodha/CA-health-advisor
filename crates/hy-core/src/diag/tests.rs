@@ -6,11 +6,11 @@ use serde_json::Value;
 use super::bundle::{self, MAX_LOG_BYTES, Stamp};
 use super::log::{self, LOG_NAME, Limits, RotatingLog};
 use super::redact::{redact_line, redact_log, scrub};
-use super::resources::{Summary, TreeSample};
+use super::resources::{ProcessReading, ProcessUse, Summary, TreeSample};
 use super::zip::{self, DosTime};
 use super::{
-    Level, RESTART_GAP_S, RecoveryBudget, V, line, panic_line, restart_allowed, short_location,
-    webview_failure,
+    Level, MarkerFile, RESTART_GAP_S, RecoveryBudget, RestartGuard, RestartMarker, V, line,
+    panic_line, reserve_restart, restart_allowed, short_location, webview_failure,
 };
 
 const T0: u64 = 1_793_000_000; // November 2026
@@ -90,6 +90,139 @@ fn a_restart_after_a_panic_waits_ten_minutes_from_the_last() {
     assert!(restart_allowed(Some(T0), T0 + RESTART_GAP_S));
     // A clock set back does not block for ever.
     assert!(restart_allowed(Some(T0 + 10_000), T0));
+}
+
+/// A restart marker that can be made to fail, standing in for the marker file.
+#[derive(Default)]
+struct FakeMarker {
+    text: std::cell::RefCell<Option<String>>,
+    read_fails: bool,
+    write_fails: bool,
+    /// The write reports success but nothing is kept (a write the disk lost).
+    write_lost: bool,
+}
+
+impl RestartMarker for FakeMarker {
+    fn read(&self) -> std::io::Result<Option<String>> {
+        if self.read_fails {
+            return Err(std::io::Error::other("injected read fault"));
+        }
+        Ok(self.text.borrow().clone())
+    }
+
+    fn write(&self, text: &str) -> std::io::Result<()> {
+        if self.write_fails {
+            return Err(std::io::Error::other("injected write fault (disk full)"));
+        }
+        if !self.write_lost {
+            *self.text.borrow_mut() = Some(text.to_owned());
+        }
+        Ok(())
+    }
+}
+
+/// Panics at start-up, one process after another, `gap` seconds apart: how many of them
+/// started the app again (each panic is a fresh process reading the same marker).
+fn relaunches(marker: &impl RestartMarker, panics: u64, gap: u64) -> u64 {
+    (0..panics)
+        .filter(|i| reserve_restart(marker, T0 + i * gap) == RestartGuard::Reserved)
+        .count() as u64
+}
+
+#[test]
+fn a_panic_restart_is_refused_when_its_marker_cannot_be_saved() {
+    // The marker cannot be written: no restart at all, panic after panic.
+    let full = FakeMarker {
+        write_fails: true,
+        ..FakeMarker::default()
+    };
+    assert_eq!(
+        reserve_restart(&full, T0),
+        RestartGuard::Refused("marker_not_saved")
+    );
+    assert_eq!(relaunches(&full, 20, 1), 0);
+    // A write that reports success but is not there on reading back is refused too.
+    let lost = FakeMarker {
+        write_lost: true,
+        ..FakeMarker::default()
+    };
+    assert_eq!(
+        reserve_restart(&lost, T0),
+        RestartGuard::Refused("marker_not_saved")
+    );
+    assert_eq!(relaunches(&lost, 20, 1), 0);
+    // A working marker allows the first restart only, then one per 10 minutes.
+    let ok = FakeMarker::default();
+    assert_eq!(relaunches(&ok, 20, 1), 1);
+    assert_eq!(*ok.text.borrow(), Some(T0.to_string()));
+    let ok = FakeMarker::default();
+    assert_eq!(relaunches(&ok, 3, RESTART_GAP_S), 3);
+}
+
+#[test]
+fn a_panic_restart_is_refused_when_its_marker_is_unreadable_or_corrupt() {
+    let unreadable = FakeMarker {
+        read_fails: true,
+        ..FakeMarker::default()
+    };
+    assert_eq!(
+        reserve_restart(&unreadable, T0),
+        RestartGuard::Refused("marker_unreadable")
+    );
+    assert_eq!(relaunches(&unreadable, 5, RESTART_GAP_S), 0);
+    for bad in ["", "soon", "-5", "1.5", "99999999999999999999999"] {
+        let corrupt = FakeMarker {
+            text: std::cell::RefCell::new(Some(bad.to_owned())),
+            ..FakeMarker::default()
+        };
+        assert_eq!(
+            reserve_restart(&corrupt, T0),
+            RestartGuard::Refused("marker_corrupt"),
+            "{bad:?}"
+        );
+        // Not overwritten: it stays refused.
+        assert_eq!(*corrupt.text.borrow(), Some(bad.to_owned()));
+    }
+    // Only an absent marker counts as never restarted.
+    assert_eq!(
+        reserve_restart(&FakeMarker::default(), T0),
+        RestartGuard::Reserved
+    );
+}
+
+#[test]
+fn the_panic_restart_marker_file_guards_across_processes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("last-panic-restart");
+    // Each panic is a fresh process with its own handle on the same file.
+    assert_eq!(
+        reserve_restart(&MarkerFile(path.clone()), T0),
+        RestartGuard::Reserved
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), T0.to_string());
+    assert_eq!(
+        reserve_restart(&MarkerFile(path.clone()), T0 + 60),
+        RestartGuard::Refused("too_soon")
+    );
+    assert_eq!(
+        reserve_restart(&MarkerFile(path.clone()), T0 + RESTART_GAP_S),
+        RestartGuard::Reserved
+    );
+    // The marker's folder is gone (so the marker cannot be created): the marker reads as
+    // absent but the reservation cannot be saved, so no restart, however often it panics.
+    let missing = MarkerFile(dir.path().join("gone").join("last-panic-restart"));
+    assert_eq!(
+        reserve_restart(&missing, T0),
+        RestartGuard::Refused("marker_not_saved")
+    );
+    assert_eq!(relaunches(&missing, 20, RESTART_GAP_S), 0);
+    // Something that is not a readable file where the marker should be: refused.
+    let blocked = dir.path().join("blocked");
+    std::fs::create_dir(&blocked).unwrap();
+    assert_eq!(
+        reserve_restart(&MarkerFile(blocked), T0),
+        RestartGuard::Refused("marker_unreadable")
+    );
 }
 
 #[test]
@@ -247,6 +380,7 @@ fn the_resource_summary_formats_megabytes_and_cpu() {
         handles: 1500,
         threads: 140,
         cpu: Duration::from_secs(10 + 36),
+        unreadable: 0,
     };
     // 36 s of CPU in an hour on 4 logical processors: 0.25%.
     let s = Summary::between(
@@ -279,6 +413,66 @@ fn the_resource_summary_formats_megabytes_and_cpu() {
     // A process that ended makes the CPU sum drop: never negative.
     let s = Summary::between(&now, &prev, Duration::from_secs(60), 4, Duration::ZERO);
     assert_eq!(s.cpu_pct, Some(0.0));
+}
+
+#[test]
+fn an_unreadable_process_leaves_the_private_working_set_out() {
+    let mib = 1024 * 1024;
+    let p = |ws: u64, private: Option<u64>| {
+        ProcessReading::Read(ProcessUse {
+            working_set: ws * mib,
+            private_working_set: private.map(|v| v * mib),
+            private_bytes: ws * mib,
+            handles: 100,
+            threads: 10,
+            cpu: Duration::from_secs(1),
+        })
+    };
+    // Every process read: the private working set is the whole tree's.
+    let all = TreeSample::sum([p(100, Some(40)), p(80, Some(30)), p(50, Some(20))]);
+    assert_eq!(all.processes, 3);
+    assert_eq!(all.private_working_set, Some(90 * mib));
+    assert_eq!(all.unreadable, 0);
+    // One live WebView2 descendant cannot be opened: no private total, not a smaller one.
+    let one_closed = TreeSample::sum([
+        p(100, Some(40)),
+        ProcessReading::Unreadable,
+        p(50, Some(20)),
+    ]);
+    assert_eq!(one_closed.private_working_set, None);
+    assert_eq!(one_closed.unreadable, 1);
+    assert_eq!(one_closed.processes, 2);
+    let s = Summary::between(
+        &TreeSample::default(),
+        &one_closed,
+        Duration::from_secs(3600),
+        4,
+        Duration::ZERO,
+    );
+    let d = detail(&line(at(T0), Level::Info, "resources", &s.fields()));
+    assert!(d.get("private_ws_mb").is_none());
+    assert_eq!(d["unreadable"], 1);
+    // A process that ended before it could be opened is not part of the tree any more.
+    let ended = TreeSample::sum([p(100, Some(40)), ProcessReading::Exited, p(50, Some(20))]);
+    assert_eq!(ended.private_working_set, Some(60 * mib));
+    assert_eq!(ended.unreadable, 0);
+    let d = detail(&line(
+        at(T0),
+        Level::Info,
+        "resources",
+        &Summary::between(&ended, &ended, Duration::ZERO, 4, Duration::ZERO).fields(),
+    ));
+    assert!(d.get("unreadable").is_none());
+    // A process without the newer counters, or nothing read at all: no private total.
+    assert_eq!(
+        TreeSample::sum([p(100, Some(40)), p(50, None)]).private_working_set,
+        None
+    );
+    assert_eq!(TreeSample::sum([]).private_working_set, None);
+    assert_eq!(
+        TreeSample::sum([ProcessReading::Exited]).private_working_set,
+        None
+    );
 }
 
 // ------------------------------------------------------------------ redaction

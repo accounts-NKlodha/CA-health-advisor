@@ -17,8 +17,9 @@ pub struct TreeSample {
     pub processes: u32,
     /// Working set, bytes.
     pub working_set: u64,
-    /// Private working set, bytes; `None` if a process of the tree could not report it
-    /// (Windows before 10 1809), so a partial sum is never shown as the whole.
+    /// Private working set, bytes; `None` unless every process of the tree reported it
+    /// (a process that could not be opened or read, or Windows before 10 1809), so a
+    /// partial sum is never shown as the whole.
     pub private_working_set: Option<u64>,
     /// Private bytes (commit charge).
     pub private_bytes: u64,
@@ -28,6 +29,70 @@ pub struct TreeSample {
     pub threads: u64,
     /// Kernel plus user CPU time since each process started.
     pub cpu: Duration,
+    /// Processes of the tree that were still running but could not be opened or read:
+    /// the sums above leave them out, so any here means the reading is incomplete.
+    pub unreadable: u32,
+}
+
+/// One process of the tree's use, as read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProcessUse {
+    /// Working set, bytes.
+    pub working_set: u64,
+    /// Private working set, bytes; `None` if the system could not report it.
+    pub private_working_set: Option<u64>,
+    /// Private bytes (commit charge).
+    pub private_bytes: u64,
+    /// Open handles.
+    pub handles: u64,
+    /// Threads.
+    pub threads: u64,
+    /// Kernel plus user CPU time since the process started.
+    pub cpu: Duration,
+}
+
+/// What reading one process of the tree found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessReading {
+    /// Opened and its memory read.
+    Read(ProcessUse),
+    /// It ended between listing the tree and opening it (the system says its id names
+    /// no process): it is not part of the tree any more.
+    Exited,
+    /// Still running (or not known to have ended) but it could not be opened or its
+    /// memory could not be read.
+    Unreadable,
+}
+
+impl TreeSample {
+    /// The sum of one reading per process of the tree. The private working set is only
+    /// given when every process still in the tree reported one: an unreadable process
+    /// leaves it out rather than publishing a smaller total as the whole.
+    #[must_use]
+    pub fn sum(readings: impl IntoIterator<Item = ProcessReading>) -> Self {
+        let mut t = Self::default();
+        let mut private_ws = Some(0u64);
+        for r in readings {
+            match r {
+                ProcessReading::Read(p) => {
+                    t.processes += 1;
+                    t.working_set += p.working_set;
+                    t.private_bytes += p.private_bytes;
+                    t.handles += p.handles;
+                    t.threads += p.threads;
+                    t.cpu += p.cpu;
+                    private_ws = private_ws.zip(p.private_working_set).map(|(a, b)| a + b);
+                }
+                ProcessReading::Exited => {}
+                ProcessReading::Unreadable => {
+                    t.unreadable += 1;
+                    private_ws = None;
+                }
+            }
+        }
+        t.private_working_set = private_ws.filter(|_| t.processes > 0);
+        t
+    }
 }
 
 /// One summary line's numbers.
@@ -86,6 +151,9 @@ impl Summary {
         f.push(("private_bytes_mb", V::Dec(mb(n.private_bytes))));
         f.push(("handles", V::N(n.handles)));
         f.push(("threads", V::N(n.threads)));
+        if n.unreadable > 0 {
+            f.push(("unreadable", V::N(u64::from(n.unreadable))));
+        }
         if let Some(c) = self.cpu_pct {
             f.push(("cpu_pct", V::Dec(c)));
         }

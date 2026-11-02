@@ -121,7 +121,7 @@ These are required by the approved architecture and not dropped. Each is outside
 | OB2 | A crashed pet page comes back | With the pet showing, open Task Manager > Details, add the "Command line" column, and end the `msedgewebview2.exe` process whose command line has `--type=renderer` and belongs to HealthierYou (end each such process in turn if unsure; the settings window, if open, closes and can be reopened). Then end the WebView2 process without `--type=` (the browser process) | Within a few seconds the pet is back where it was, still never takes focus when clicked, and Ctrl+Alt+H still opens the panel. `companion.log` has a `webview_failed` line (`render_process_exited` or `browser_process_exited`) followed by `webview_recreated` | Owner |
 | OB3 | The log over a week | Leave HealthierYou running across a week (S1 covers 8 hours) | `%LOCALAPPDATA%\HealthierYou\logs` holds `companion.log` and at most 4 rotated `companion.log.<number>` files, none older than 7 days; one `resources` line an hour while the app ran | Owner |
 
-A panic cannot be caused on purpose in a release build, so the restart after a panic is proven by the unit tests of its rule (`hy_core::diag::restart_allowed`) and by reading the code; the log's `panic` and `panic_restart` lines would show one in S1 or OB3.
+A panic cannot be caused on purpose in a release build, so the restart after a panic is proven by the unit tests of its rule (`hy_core::diag::restart_allowed`, and `hy_core::diag::reserve_restart`, which refuses the restart when its marker cannot be read or saved) and by reading the code; the log's `panic` and `panic_restart` lines would show one in S1 or OB3.
 
 ## 8. Filing results
 

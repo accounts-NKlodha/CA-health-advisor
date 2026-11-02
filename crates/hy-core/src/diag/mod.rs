@@ -162,6 +162,80 @@ pub fn restart_allowed(last: Option<u64>, now: u64) -> bool {
     last.is_none_or(|t| t > now || now - t >= RESTART_GAP_S)
 }
 
+/// Where the time of the last restart after a panic is kept (the companion keeps it in a
+/// file next to its log; tests use a store that can be made to fail).
+pub trait RestartMarker {
+    /// The marker's text. `Ok(None)` only when there is no marker at all; anything that
+    /// stops the marker being read is an error.
+    ///
+    /// # Errors
+    /// The marker exists but could not be read.
+    fn read(&self) -> std::io::Result<Option<String>>;
+    /// Replace the marker's text.
+    ///
+    /// # Errors
+    /// The text could not be saved.
+    fn write(&self, text: &str) -> std::io::Result<()>;
+}
+
+/// The restart marker as a file.
+#[derive(Debug, Clone)]
+pub struct MarkerFile(pub std::path::PathBuf);
+
+impl RestartMarker for MarkerFile {
+    fn read(&self) -> std::io::Result<Option<String>> {
+        match std::fs::read_to_string(&self.0) {
+            Ok(s) => Ok(Some(s)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn write(&self, text: &str) -> std::io::Result<()> {
+        std::fs::write(&self.0, text)
+    }
+}
+
+/// Whether a restart after a panic may go ahead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartGuard {
+    /// The restart is recorded in the marker: start the app again.
+    Reserved,
+    /// No restart; the reason's fixed name is logged (`too_soon`, `marker_unreadable`,
+    /// `marker_corrupt`, `marker_not_saved`).
+    Refused(&'static str),
+}
+
+/// Decide a restart after a panic at `now` (Unix seconds) and, if it may go ahead, record
+/// it in `marker` first. Fails closed: a marker that exists but cannot be read or parsed,
+/// or a reservation that cannot be saved and read back, refuses the restart, because
+/// without a saved marker the next process could not see this restart and a fault at
+/// start-up would loop. Only a marker that is absent counts as "never restarted". A
+/// corrupt marker therefore stops automatic restarts until it is removed (the app still
+/// starts by hand; the log folder is program state).
+#[must_use]
+pub fn reserve_restart(marker: &impl RestartMarker, now: u64) -> RestartGuard {
+    let last = match marker.read() {
+        Ok(None) => None,
+        Ok(Some(text)) => match text.trim().parse::<u64>() {
+            Ok(t) => Some(t),
+            Err(_) => return RestartGuard::Refused("marker_corrupt"),
+        },
+        Err(_) => return RestartGuard::Refused("marker_unreadable"),
+    };
+    if !restart_allowed(last, now) {
+        return RestartGuard::Refused("too_soon");
+    }
+    let text = now.to_string();
+    if marker.write(&text).is_err() {
+        return RestartGuard::Refused("marker_not_saved");
+    }
+    match marker.read() {
+        Ok(Some(saved)) if saved.trim() == text => RestartGuard::Reserved,
+        _ => RestartGuard::Refused("marker_not_saved"),
+    }
+}
+
 /// What a WebView2 process failure means for the window it was reported on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebviewFailure {

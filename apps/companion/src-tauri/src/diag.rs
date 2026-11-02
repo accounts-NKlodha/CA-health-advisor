@@ -11,7 +11,9 @@
 //!   window thread, never its message. A release build ends the process on a panic
 //!   (`panic = "abort"`), so the hook then starts the app again (`--hy-after-panic`,
 //!   which waits for this process to end first), at most once in 10 minutes
-//!   (`hy_core::diag::restart_allowed`) so a fault at start-up cannot loop. A pet page
+//!   (`hy_core::diag::reserve_restart`, which saves the restart in a marker before the
+//!   new process starts and refuses if the marker cannot be read or saved) so a fault at
+//!   start-up cannot loop. A pet page
 //!   whose webview died is made again by the shell (`shell::recover`).
 //! - Every hour one `resources` line sums the process tree (the app and its WebView2
 //!   processes): working set, private working set, private bytes, handles, threads, CPU.
@@ -117,18 +119,22 @@ fn try_log(level: Level, event: &'static str, fields: &[(&'static str, V)]) {
 }
 
 /// Start the app again after a panic, unless it already did within the last 10 minutes.
+/// The restart is recorded in the marker before the new process starts; if the marker
+/// cannot be read, parsed or saved, there is no restart (`hy_core::diag::reserve_restart`
+/// fails closed), so a fault at start-up cannot loop.
 fn restart_after_panic() {
     let Some(dir) = log_dir() else { return };
-    let marker = dir.join(RESTART_MARKER);
-    let last = std::fs::read_to_string(&marker)
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok());
-    let now = now_s();
-    if !hy_core::diag::restart_allowed(last, now) {
-        try_log(Level::Error, "panic_restart_skipped", &[]);
+    let marker = hy_core::diag::MarkerFile(dir.join(RESTART_MARKER));
+    if let hy_core::diag::RestartGuard::Refused(reason) =
+        hy_core::diag::reserve_restart(&marker, now_s())
+    {
+        try_log(
+            Level::Error,
+            "panic_restart_skipped",
+            &[("reason", V::Name(reason))],
+        );
         return;
     }
-    let _ = std::fs::write(&marker, now.to_string());
     let Ok(exe) = std::env::current_exe() else {
         return;
     };

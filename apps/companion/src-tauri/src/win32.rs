@@ -837,21 +837,17 @@ pub fn dpi_awareness() -> i32 {
 pub use hy_core::diag::resources::TreeSample as TreeUsage;
 
 /// The process tree's memory, handles, threads and CPU time (architecture 4.5's camera
-/// budget is checked from two samples; architecture 10's hourly summary logs one).
-/// Processes that cannot be opened are skipped. The private working set is `None` unless
-/// every process counted reported it (Windows 10 1809 and later).
+/// budget is checked from two samples; architecture 10's hourly summary logs one). Each
+/// process is read on its own (`read_process`) and the readings are summed by
+/// `hy_core::diag::resources::TreeSample::sum`: a process that ended before it could be
+/// opened is left out, and one that is still running but cannot be opened or read is
+/// counted as unreadable, which leaves the private working set out of the sample (never a
+/// partial sum shown as the whole). The private working set needs Windows 10 1809 or later.
 pub fn process_tree_usage() -> TreeUsage {
-    use windows_sys::Win32::Foundation::{FILETIME, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
-    };
-    use windows_sys::Win32::System::ProcessStatus::{
-        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
-        PROCESS_MEMORY_COUNTERS_EX2,
-    };
-    use windows_sys::Win32::System::Threading::{
-        GetProcessHandleCount, GetProcessTimes, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
     // (process, parent, threads)
@@ -878,62 +874,79 @@ pub fn process_tree_usage() -> TreeUsage {
     let pairs: Vec<(u32, u32)> = entries.iter().map(|&(p, pp, _)| (p, pp)).collect();
     // SAFETY: no arguments.
     let me = unsafe { GetCurrentProcessId() };
-    let tree = tree_of(me, &pairs);
-    let mut usage = TreeUsage::default();
-    let mut private_ws: Option<u64> = Some(0);
+    TreeUsage::sum(tree_of(me, &pairs).into_iter().map(|pid| {
+        let threads = entries
+            .iter()
+            .find(|e| e.0 == pid)
+            .map_or(0, |e| u64::from(e.2));
+        read_process(pid, threads)
+    }))
+}
+
+/// Read one process's memory, handles and CPU time. `Exited` only when the system says
+/// the id names no process (`ERROR_INVALID_PARAMETER` from `OpenProcess`); any other
+/// failure to open it, or to read its memory, is `Unreadable`.
+fn read_process(pid: u32, threads: u64) -> hy_core::diag::resources::ProcessReading {
+    use hy_core::diag::resources::{ProcessReading, ProcessUse};
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, FILETIME};
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+        PROCESS_MEMORY_COUNTERS_EX2,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetProcessHandleCount, GetProcessTimes, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
     let ft = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
-    for pid in tree {
-        // SAFETY: OpenProcess has no pointer arguments; the counters, handle count and
-        // times are written into live locals of the stated sizes; the handle is closed
-        // once.
-        unsafe {
-            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if h.is_null() {
-                continue;
-            }
-            let mut m2: PROCESS_MEMORY_COUNTERS_EX2 = std::mem::zeroed();
-            let cb2 =
-                u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX2>()).unwrap_or(0);
-            if GetProcessMemoryInfo(h, (&raw mut m2).cast::<PROCESS_MEMORY_COUNTERS>(), cb2) != 0 {
-                usage.working_set += m2.WorkingSetSize as u64;
-                usage.private_bytes += m2.PrivateUsage as u64;
-                private_ws = private_ws.map(|p| p + m2.PrivateWorkingSetSize as u64);
+    // SAFETY: OpenProcess has no pointer arguments and GetLastError is read straight
+    // after it; the counters, handle count and times are written into live locals of the
+    // stated sizes; the handle is closed once on every path after it was opened.
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return if GetLastError() == ERROR_INVALID_PARAMETER {
+                ProcessReading::Exited
             } else {
-                // Windows before 10 1809 knows only the shorter structure.
-                private_ws = None;
-                let mut m: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
-                let cb =
-                    u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>()).unwrap_or(0);
-                if GetProcessMemoryInfo(h, (&raw mut m).cast::<PROCESS_MEMORY_COUNTERS>(), cb) != 0
-                {
-                    usage.working_set += m.WorkingSetSize as u64;
-                    usage.private_bytes += m.PrivateUsage as u64;
-                }
-            }
-            let mut handles = 0u32;
-            if GetProcessHandleCount(h, &raw mut handles) != 0 {
-                usage.handles += u64::from(handles);
-            }
-            let zero = FILETIME {
-                dwLowDateTime: 0,
-                dwHighDateTime: 0,
+                ProcessReading::Unreadable
             };
-            let (mut c, mut x, mut k, mut u) = (zero, zero, zero, zero);
-            if GetProcessTimes(h, &raw mut c, &raw mut x, &raw mut k, &raw mut u) != 0 {
-                // FILETIME counts 100 ns units.
-                usage.cpu += Duration::from_nanos((ft(k) + ft(u)).saturating_mul(100));
-            }
-            usage.threads += entries
-                .iter()
-                .find(|e| e.0 == pid)
-                .map_or(0, |e| u64::from(e.2));
-            usage.processes += 1;
-            CloseHandle(h);
         }
+        let mut p = ProcessUse {
+            threads,
+            ..ProcessUse::default()
+        };
+        let mut m2: PROCESS_MEMORY_COUNTERS_EX2 = std::mem::zeroed();
+        let cb2 = u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX2>()).unwrap_or(0);
+        if GetProcessMemoryInfo(h, (&raw mut m2).cast::<PROCESS_MEMORY_COUNTERS>(), cb2) != 0 {
+            p.working_set = m2.WorkingSetSize as u64;
+            p.private_bytes = m2.PrivateUsage as u64;
+            p.private_working_set = Some(m2.PrivateWorkingSetSize as u64);
+        } else {
+            // Windows before 10 1809 knows only the shorter structure.
+            let mut m: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
+            let cb = u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>()).unwrap_or(0);
+            if GetProcessMemoryInfo(h, (&raw mut m).cast::<PROCESS_MEMORY_COUNTERS>(), cb) == 0 {
+                CloseHandle(h);
+                return ProcessReading::Unreadable;
+            }
+            p.working_set = m.WorkingSetSize as u64;
+            p.private_bytes = m.PrivateUsage as u64;
+        }
+        let mut handles = 0u32;
+        if GetProcessHandleCount(h, &raw mut handles) != 0 {
+            p.handles = u64::from(handles);
+        }
+        let zero = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let (mut c, mut x, mut k, mut u) = (zero, zero, zero, zero);
+        if GetProcessTimes(h, &raw mut c, &raw mut x, &raw mut k, &raw mut u) != 0 {
+            // FILETIME counts 100 ns units.
+            p.cpu = Duration::from_nanos((ft(k) + ft(u)).saturating_mul(100));
+        }
+        CloseHandle(h);
+        ProcessReading::Read(p)
     }
-    let counted = usage.processes > 0;
-    usage.private_working_set = private_ws.filter(|_| counted);
-    usage
 }
 
 /// `root` and its descendants, from (process, parent) pairs. A recycled parent id can
