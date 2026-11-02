@@ -97,6 +97,7 @@ jobs:
           pwsh -NoProfile -File scripts/windows/Test-Soak.ps1 -SelfTest
           pwsh -NoProfile -File scripts/windows/Test-HealthierYou-Camera.ps1 -SelfTest
           pwsh -NoProfile -File scripts/windows/Test-CameraSoak.ps1 -SelfTest
+          pwsh -NoProfile -File scripts/windows/Test-CompanionLifecycle.ps1 -Phase SelfTest
           # The office test kit: step order, resume, administrator jobs, verdicts, zip and redaction.
           pwsh -NoProfile -File scripts/windows/kit/Invoke-OfficeTestKit.ps1 -SelfTest
 
@@ -124,7 +125,8 @@ jobs:
   windows:
     name: Windows - clippy, tests, companion build
     runs-on: windows-latest
-    timeout-minutes: 100
+    # 100 minutes before I9a's uninstall loop (about 20 minutes) was added.
+    timeout-minutes: 130
     defaults:
       run:
         shell: pwsh
@@ -318,12 +320,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Test-HealthierYou-Camera.ps1 -SelfTest failed under Windows PowerShell 5.1' }
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Test-CameraSoak.ps1 -SelfTest
           if ($LASTEXITCODE -ne 0) { throw 'Test-CameraSoak.ps1 -SelfTest failed under Windows PowerShell 5.1' }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Test-CompanionLifecycle.ps1 -Phase SelfTest
+          if ($LASTEXITCODE -ne 0) { throw 'Test-CompanionLifecycle.ps1 -Phase SelfTest failed under Windows PowerShell 5.1' }
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/kit/Invoke-OfficeTestKit.ps1 -SelfTest
           if ($LASTEXITCODE -ne 0) { throw 'Invoke-OfficeTestKit.ps1 -SelfTest failed under Windows PowerShell 5.1' }
 
       - name: Update, rollback, refusals and uninstall of the installed app
         timeout-minutes: 25
         run: ./scripts/windows/Test-CompanionLifecycle.ps1 -Phase Lifecycle -Installers (Join-Path $env:RUNNER_TEMP 'hy-installers') -OtherKeyDir (Join-Path $env:RUNNER_TEMP 'hy-other-key') -Work (Join-Path $env:RUNNER_TEMP 'hy-lifecycle')
+
+      # I9a (docs/V1_Acceptance.md): the uninstall's WebView2 cache check, 20 times in a row
+      # (install A, run it, uninstall with the app quit first or still running). Each
+      # round's timings, and what held the cache if it was left, go to
+      # hy-lifecycle/uninstall-loop.csv in the installers-ci artifact.
+      - name: Uninstall loop, WebView2 cache removed every time (I9a, 20 rounds)
+        timeout-minutes: 40
+        run: ./scripts/windows/Test-CompanionLifecycle.ps1 -Phase UninstallLoop -Iterations 20 -Installers (Join-Path $env:RUNNER_TEMP 'hy-installers') -Work (Join-Path $env:RUNNER_TEMP 'hy-lifecycle')
 
       # V1-6b: the office server's per-machine installer and Windows service.
       - name: Build and sign server installers S1 to S4 (S3 cannot start, S4 changes the database then fails)

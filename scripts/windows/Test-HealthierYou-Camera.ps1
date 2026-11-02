@@ -41,7 +41,11 @@
   on this PC. Nothing is sent anywhere. The thresholds it measures are provisional until
   these sessions pass and the owner approves them (docs/V2_Quality.md).
 
-  Budget (architecture 4.5): the camera adds at most 10% of the PC's CPU and 350 MB.
+  Budget (architecture 4.5, PRD V2): the camera adds at most 10% of the PC's CPU, and the
+  app's own memory with the camera on is at most 350 MB, counted by DEC14 as the private
+  working set summed over the process tree (every process read, readings covering the
+  samples). The whole-tree working set the camera adds (on minus off) is reported beside
+  it as information only.
 
 .EXAMPLE
   .\Test-HealthierYou-Camera.ps1 -Phase Session -Report .\hy-camera-session.txt
@@ -119,6 +123,65 @@ function Initialize-ReportPath([string]$Path) {
   $full
 }
 
+# ------------------------------------------------------------------ memory budget (DEC14)
+
+# The app's own memory in one sample (DEC14), as Test-CameraSoak.ps1 counts it: the private
+# working set summed over the process tree, only when EVERY process of the tree has a
+# reading (a process missing from the counters would lower the sum unseen). Same rule as
+# Get-PrivateWsSum there; keep the two in step.
+function Get-PrivateWsSum([int[]]$Ids, $Rows) {
+  $read = @{}
+  foreach ($r in @($Rows)) {
+    if ($null -eq $r) { continue }
+    $id = [int]$r.IDProcess
+    if ($Ids -contains $id) { $read[$id] = [double]$r.WorkingSetPrivate }
+  }
+  $missing = @($Ids | Where-Object { -not $read.ContainsKey($_) }).Count
+  $mb = $null
+  if ($Ids.Count -gt 0 -and $missing -eq 0) { $mb = [Math]::Round((($read.Values | Measure-Object -Sum).Sum) / 1MB, 1) }
+  return [pscustomobject]@{ Mb = $mb; Missing = $missing }
+}
+
+# DEC14's coverage rule (as Get-PrivateCoverage in Test-CameraSoak.ps1): complete readings
+# in at least 80% of the samples, in time order, and never more than 2 in a row missing.
+function Get-PrivateCoverage([object[]]$Values) {
+  $have = 0; $run = 0; $longest = 0
+  foreach ($v in $Values) {
+    if ($null -ne $v) { $have++; $run = 0 } else { $run++; if ($run -gt $longest) { $longest = $run } }
+  }
+  $n = $Values.Count
+  $share = if ($n -gt 0) { $have / $n } else { 0 }
+  return [pscustomobject]@{
+    Ok = ($n -gt 0 -and $share -ge 0.8 -and $longest -le 2)
+    Detail = ('complete private readings in {0} of {1} samples ({2:N0}%, at least 80%), at most {3} in a row without one (at most 2)' -f $have, $n, (100 * $share), $longest)
+  }
+}
+
+# The V2-1 memory budget, reconciled to DEC14: the app's own memory (private working set
+# over the process tree, companion and inference together) at every sample with the camera
+# on, at most 350 MB; the highest sample counts and the median is reported. A reading over
+# the cap fails; otherwise the readings must cover the samples or it is INCONCLUSIVE. The
+# whole-tree working set the camera adds (on minus off, the measure this check used before
+# DEC14) is reported beside it, labelled as information only.
+function Get-MemoryBudgetResult([object[]]$PrivateWs, [double]$OnWsMax, [double]$OffWsMax, [double]$CapMb = 350) {
+  $cov = Get-PrivateCoverage $PrivateWs
+  $vals = [double[]]@($PrivateWs | Where-Object { $null -ne $_ })
+  $added = [Math]::Round($OnWsMax - $OffWsMax, 1)
+  $info = "added whole-tree working set (on minus off) $added MB, informational vs DEC14"
+  if ($vals.Count -eq 0) {
+    return [pscustomobject]@{ Outcome = 'INCONCLUSIVE'; Note = "app's own memory (private working set, DEC14): no complete reading with the camera on; $($cov.Detail); $info" }
+  }
+  $sorted = @($vals | Sort-Object)
+  $mid = [int][Math]::Floor($sorted.Count / 2)
+  $median = if ($sorted.Count % 2) { $sorted[$mid] } else { ($sorted[$mid - 1] + $sorted[$mid]) / 2 }
+  $max = ($vals | Measure-Object -Maximum).Maximum
+  $outcome = if ($max -gt $CapMb) { 'FAIL' } elseif (-not $cov.Ok) { 'INCONCLUSIVE' } else { 'PASS' }
+  [pscustomobject]@{
+    Outcome = $outcome
+    Note = ("app's own memory (private working set over the process tree, DEC14) highest {0:N1} MB, median {1:N1} MB (budget {2} MB, companion and inference together); {3}; {4}" -f $max, $median, $CapMb, $cov.Detail, $info)
+  }
+}
+
 function Invoke-DeskSelfTest {
   $fails = 0
   function Check([string]$Name, [bool]$Ok) { if ($Ok) { Write-Host "[PASS] $Name" } else { Write-Host "[FAIL] $Name"; $script:deskFails++ } }
@@ -136,6 +199,30 @@ function Invoke-DeskSelfTest {
   Check "a label line is seconds,seconds,word ($line)" ($line -eq '12.345,102.345,drift_forward')
   $text = (@(Get-DeskSteps 1) | ForEach-Object { $_[2] }) -join ' '
   foreach ($w in 'bad posture', 'poor', 'wrong', 'health') { Check "no judgement in the instructions: $w" (-not $text.ToLower().Contains($w)) }
+  # The V2-1 memory budget (DEC14): private working set over the tree, coverage rule, and the
+  # whole-tree working set the camera adds shown as information only.
+  $s = Get-PrivateWsSum @(10, 11) @([pscustomobject]@{ IDProcess = 10; WorkingSetPrivate = 100MB }, [pscustomobject]@{ IDProcess = 11; WorkingSetPrivate = 50MB }, [pscustomobject]@{ IDProcess = 99; WorkingSetPrivate = 900MB })
+  Check 'private working set: summed over the tree only (other processes ignored)' ($s.Mb -eq 150 -and $s.Missing -eq 0)
+  $s = Get-PrivateWsSum @(10, 11) @([pscustomobject]@{ IDProcess = 10; WorkingSetPrivate = 100MB })
+  Check 'private working set: a process without a reading leaves the sample without a value' ($null -eq $s.Mb -and $s.Missing -eq 1)
+  $ok = @(1..36 | ForEach-Object { 200 + ($_ % 5) })
+  $m = Get-MemoryBudgetResult $ok 520 120
+  Check "budget: private working set under 350 MB passes though the whole tree adds 400 MB ($($m.Outcome))" ($m.Outcome -eq 'PASS')
+  Check 'budget: the report names the measure (private working set, DEC14) and the cap' ($m.Note -like "*app's own memory (private working set over the process tree, DEC14) highest 204*" -and $m.Note -like '*budget 350 MB*')
+  Check 'budget: the added whole-tree working set is labelled informational vs DEC14' ($m.Note -like '*added whole-tree working set (on minus off) 400 MB, informational vs DEC14*')
+  $spike = @($ok); $spike[20] = 380
+  Check 'budget: one sample over 350 MB fails though the median is far below' ((Get-MemoryBudgetResult $spike 400 120).Outcome -eq 'FAIL')
+  $sparse = New-Object System.Collections.Generic.List[object]
+  foreach ($i in 1..36) { if ($i % 3 -eq 0) { $sparse.Add(210) } else { $sparse.Add($null) } }
+  Check 'budget: readings in a third of the samples are INCONCLUSIVE' ((Get-MemoryBudgetResult $sparse.ToArray() 300 120).Outcome -eq 'INCONCLUSIVE')
+  $hole = New-Object System.Collections.Generic.List[object]
+  foreach ($i in 1..36) { if ($i -ge 10 -and $i -le 12) { $hole.Add($null) } else { $hole.Add(210) } }
+  Check 'budget: three samples in a row without a reading are INCONCLUSIVE (92% covered)' ((Get-MemoryBudgetResult $hole.ToArray() 300 120).Outcome -eq 'INCONCLUSIVE')
+  $blip = New-Object System.Collections.Generic.List[object]
+  foreach ($i in 1..36) { if ($i -eq 10 -or $i -eq 20) { $blip.Add($null) } else { $blip.Add(210) } }
+  Check 'budget: an isolated missing reading still passes' ((Get-MemoryBudgetResult $blip.ToArray() 300 120).Outcome -eq 'PASS')
+  $none = Get-MemoryBudgetResult @($null, $null, $null) 300 120
+  Check 'budget: no reading at all is INCONCLUSIVE and still shows the added working set as informational' ($none.Outcome -eq 'INCONCLUSIVE' -and $none.Note -like '*informational vs DEC14*')
   # A report in a folder that does not exist yet: the folder is made, and files beside the
   # report can be written.
   $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("hy-camera-selftest-" + [guid]::NewGuid().ToString('N'))
@@ -201,16 +288,26 @@ function Get-Tree {
 }
 function Get-Usage {
   $tree = @(Get-Tree)
+  # The app's own memory (DEC14): private working set over the tree, $null unless every
+  # process of the tree has a reading.
+  $pws = $null
+  try {
+    $ids = [int[]]@($tree | ForEach-Object { [int]$_.ProcessId })
+    $pws = (Get-PrivateWsSum $ids @(Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -Property IDProcess, WorkingSetPrivate)).Mb
+  }
+  catch { }
   [pscustomobject]@{
     processes = $tree.Count
+    # Whole-tree working set: shared pages included (information only, DEC14).
     ws_mb     = [math]::Round((($tree | Measure-Object WorkingSetSize -Sum).Sum) / 1MB, 1)
+    priv_ws_mb = $pws
     priv_mb   = [math]::Round((($tree | Measure-Object PrivatePageCount -Sum).Sum) / 1MB, 1)
     # Kernel plus user time, 100 ns units.
     cpu_100ns = [double](($tree | ForEach-Object { [double]$_.KernelModeTime + [double]$_.UserModeTime } | Measure-Object -Sum).Sum)
   }
 }
 $csv = [System.IO.Path]::ChangeExtension($Report, '.csv')
-'time,label,processes,working_set_mb,private_mb,cpu_pct' | Set-Content $csv
+'time,label,processes,working_set_mb,private_ws_mb,private_mb,cpu_pct' | Set-Content $csv
 $script:prev = $null
 function Sample([string]$Label) {
   $u = Get-Usage
@@ -221,20 +318,27 @@ function Sample([string]$Label) {
     if ($wall -gt 0) { $cpu = [math]::Round((($u.cpu_100ns - $script:prev.u.cpu_100ns) / 1e7) / ($wall * $cores) * 100, 2) }
   }
   $script:prev = @{ t = $now; u = $u }
-  "{0},{1},{2},{3},{4},{5}" -f $now.ToString('HH:mm:ss'), $Label, $u.processes, $u.ws_mb, $u.priv_mb, $cpu | Add-Content $csv
+  "{0},{1},{2},{3},{4},{5},{6}" -f $now.ToString('HH:mm:ss'), $Label, $u.processes, $u.ws_mb, $u.priv_ws_mb, $u.priv_mb, $cpu | Add-Content $csv
   $u | Add-Member -NotePropertyName cpu_pct -NotePropertyValue $cpu -PassThru
 }
 function Measure-For([string]$Label, [int]$Seconds) {
   $null = Sample $Label
   $rows = @()
+  # Every sample's private working set in time order, $null kept in place (DEC14 coverage).
+  $pws = New-Object System.Collections.Generic.List[object]
   $end = (Get-Date).AddSeconds($Seconds)
   while ((Get-Date) -lt $end) {
     Start-Sleep -Seconds $SampleSeconds
-    $rows += Sample $Label
+    $u = Sample $Label
+    $rows += $u
+    $pws.Add($u.priv_ws_mb)
   }
   $rows = @($rows | Where-Object { $_.cpu_pct -ne '' })
+  $pv = [double[]]@($pws | Where-Object { $null -ne $_ })
   [pscustomobject]@{
     ws_mb   = ($rows | Measure-Object ws_mb -Maximum).Maximum
+    priv_ws = $pws.ToArray()
+    priv_ws_max = $(if ($pv.Count) { ($pv | Measure-Object -Maximum).Maximum } else { $null })
     cpu_pct = [math]::Round(($rows | Measure-Object cpu_pct -Average).Average, 2)
   }
 }
@@ -263,15 +367,18 @@ if (-not (Get-Process hy-companion -ErrorAction SilentlyContinue)) {
 if ($Phase -eq 'Session') {
   Do-Step 'Make sure the posture check is OFF (pet menu shows "Posture check"). Sit at the desk as usual.'
   $off = Measure-For 'camera-off' 60
-  Add-Line "Camera off: working set peak $($off.ws_mb) MB, CPU $($off.cpu_pct)% of the PC"
+  Add-Line "Camera off: app's own memory (private working set) peak $($off.priv_ws_max) MB; whole-tree working set peak $($off.ws_mb) MB (information); CPU $($off.cpu_pct)% of the PC"
 
   Do-Step 'Pet menu > Posture check. Read the consent text, then choose "Turn on camera".'
   Ask 'consent-text' 'Did the consent text say: not medical, frames never saved or sent, CAM badge while on, everything else works without it?'
   Ask 'windows-camera-light' 'Did the webcam light come on (if it has one) and the pet show "CAM" with a dot at its top left?'
   $on = Measure-For 'camera-on-desk' 180
-  Add-Line "Camera on (3 min at the desk): working set peak $($on.ws_mb) MB, CPU $($on.cpu_pct)% of the PC"
-  $addMb = [math]::Round($on.ws_mb - $off.ws_mb, 1); $addCpu = [math]::Round($on.cpu_pct - $off.cpu_pct, 2)
-  Result 'budget-memory' $(if ($addMb -le 350) { 'PASS' } else { 'FAIL' }) "camera adds $addMb MB (budget 350 MB)"
+  Add-Line "Camera on (3 min at the desk): app's own memory (private working set) peak $($on.priv_ws_max) MB; whole-tree working set peak $($on.ws_mb) MB (information); CPU $($on.cpu_pct)% of the PC"
+  $addCpu = [math]::Round($on.cpu_pct - $off.cpu_pct, 2)
+  # DEC14: the 350 MB budget is the app's own memory with the camera on (not the added
+  # whole-tree working set, which is shown in the note as information only).
+  $mem = Get-MemoryBudgetResult $on.priv_ws $on.ws_mb $off.ws_mb
+  Result 'budget-memory' $mem.Outcome $mem.Note
   Result 'budget-cpu' $(if ($addCpu -le 10) { 'PASS' } else { 'FAIL' }) "camera adds $addCpu% of the PC (budget 10%)"
   Ask 'reading-at-desk' 'Settings > Posture check: does the status say "Camera on" while you sit normally in view?'
 
@@ -301,7 +408,13 @@ if ($Phase -eq 'Session') {
   Ask 'off-2s' 'Did the light go off and the CAM badge disappear within about 2 seconds, with "Camera off. Capture stopped." beside the pet?'
   Start-Sleep -Seconds 10
   $after = Measure-For 'camera-off-after' 30
-  Result 'memory-returned' $(if ($after.ws_mb -le $off.ws_mb + 60) { 'PASS' } else { 'FAIL' }) "working set $($after.ws_mb) MB after off (was $($off.ws_mb) MB)"
+  # Memory returned after off: the app's own memory (DEC14) when both phases have readings,
+  # else the whole-tree working set (named as such).
+  if ($null -ne $after.priv_ws_max -and $null -ne $off.priv_ws_max) {
+    Result 'memory-returned' $(if ($after.priv_ws_max -le $off.priv_ws_max + 60) { 'PASS' } else { 'FAIL' }) "app's own memory (private working set) $($after.priv_ws_max) MB after off (was $($off.priv_ws_max) MB; within 60 MB)"
+  } else {
+    Result 'memory-returned' $(if ($after.ws_mb -le $off.ws_mb + 60) { 'PASS' } else { 'FAIL' }) "whole-tree working set $($after.ws_mb) MB after off (was $($off.ws_mb) MB; no complete private working set reading)"
+  }
 } elseif ($Phase -eq 'Calibration') {
   Do-Step 'Turn the posture check ON. Open the camera page (pet menu > Posture check). Sit as you normally do and choose Calibrate; keep still until it finishes.'
   Ask 'calibration-usable' 'Did it say "Calibrated" within about 30 seconds?'
@@ -370,12 +483,12 @@ if ($Phase -eq 'Session') {
   Write-Host 'For the V2-5 soak use Test-CameraSoak.ps1 (it adds the app''s camera log, holds, releases and verdicts); this phase is the V2-1 quick look.' -ForegroundColor Yellow
   Do-Step 'Turn the posture check ON (pet menu > Posture check). Then work normally; keep this window open.'
   $res = Measure-For 'soak' ($Minutes * 60)
-  Add-Line "Soak ($Minutes min): working set peak $($res.ws_mb) MB, mean CPU $($res.cpu_pct)% of the PC"
+  Add-Line "Soak ($Minutes min): app's own memory (private working set) peak $($res.priv_ws_max) MB; whole-tree working set peak $($res.ws_mb) MB (information); mean CPU $($res.cpu_pct)% of the PC"
   $rows = Import-Csv $csv | Where-Object { $_.label -eq 'soak' }
   $first = [double]($rows | Select-Object -First 12 | Measure-Object working_set_mb -Average).Average
   $last = [double]($rows | Select-Object -Last 12 | Measure-Object working_set_mb -Average).Average
   $growth = [math]::Round($last - $first, 1)
-  Result 'soak-memory-growth' $(if ($growth -le 50) { 'PASS' } else { 'FAIL' }) "working set grew $growth MB from the first to the last minute"
+  Result 'soak-memory-growth' $(if ($growth -le 50) { 'PASS' } else { 'FAIL' }) "whole-tree working set grew $growth MB from the first to the last minute (quick look; the V2-5 budget and trends are Test-CameraSoak.ps1's)"
   Ask 'soak-stops' 'Settings > Posture check: is it still on (not stopped for "not responding")?'
   Ask 'soak-holds' 'During the soak, did meetings, lock and lunch pause it and did it come back by itself?'
   Ask 'soak-feel' 'Did the PC feel as responsive as without the camera?'
