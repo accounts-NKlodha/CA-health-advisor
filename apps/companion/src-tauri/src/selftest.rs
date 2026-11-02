@@ -40,6 +40,11 @@
 //! With `HY_SELFTEST_CAMERA_SOAK_S` set it then runs the accelerated camera soak
 //! ([`camera_soak`], slice V2-5) on the same synthetic camera.
 //!
+//! Last of all, the observability of tracked work W2, in [`observe`]: the log is written,
+//! a resource summary of the real process tree reaches it, the diagnostics zip is saved
+//! exactly as previewed with none of the PC's names in it, and a pet whose webview
+//! reports a lost page is made again.
+//!
 //! A CI runner is not an office PC: focus checks that depend on an interactive desktop
 //! are recorded as informational, and real Windows acceptance of focus and DPI remains a
 //! UAT item (architecture 11; A6, A8).
@@ -65,6 +70,7 @@ use crate::shell::{Shell, current_monitors};
 
 mod camera;
 pub mod camera_soak;
+mod observe;
 pub mod soak;
 
 /// Where the simulated clock starts: Monday 26 Oct 2026, 10:00 in Kolkata, inside the
@@ -219,6 +225,7 @@ pub fn spawn(
                     );
                 }
             }
+            observe::observability_end_to_end(&mut report, &shell);
             report.ok = report.checks.iter().all(|c| c.ok || !c.required);
             std::thread::sleep(idle_after);
             let code = i32::from(!report.ok);

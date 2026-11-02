@@ -19,8 +19,8 @@
   Every -SampleSeconds (60) it records, for the program's whole process tree (the
   companion and its bundled WebView2 processes): working set, private working set,
   private bytes, handle and thread counts, and CPU as a share of the whole machine; the
-  database and write-ahead log sizes; log sizes (and on the server, backups, mirror and
-  request counts from its log); whether the session was locked; and gaps in sampling
+  database and write-ahead log sizes; log sizes (the companion's own log, W2, and its
+  update log; on the server, backups, mirror and request counts from its log); whether the session was locked; and gaps in sampling
   (sleep). Every 15 minutes the companion's own store statistics are read with
   `hy-companion.exe --hy-soak-stats` (read-only; counts and times only).
 
@@ -34,7 +34,10 @@
       working set, which counts shared pages, is reported for information), CPU at most 2%
       of the machine averaged over every 30 minutes, no spike over 5% lasting 3 samples;
     - the database's write-ahead log at most 16 MiB and the database growing at most
-      4 MiB, logs within their rotation;
+      4 MiB, logs within their rotation (the companion's log folder at most 52 MB: five
+      files of 10 MB plus slack);
+    - companion: no panic in its own log (webview recreations and resource summaries are
+      counted and reported);
     - reminders never closer than the 5-minute calm gap and at most 6 in any hour;
     - server: no panic, no 5xx answers, the service never restarted.
 
@@ -93,6 +96,7 @@ $Budget = @{
   WalMaxBytes   = 16MB
   DbGrowthBytes = 4MB
   LogGrowthBytes = 12MB  # one 10 MB rotation plus slack
+  CompanionLogMaxBytes = 52MB  # the current file and 4 rotated ones of 10 MB, plus slack (W2)
   MinOfferGapMin = 5.0  # the engine's calm gap
   MaxOffersPerHour = 6
 }
@@ -113,6 +117,27 @@ function Read-SharedLines([string]$Path) {
     $sr = [IO.StreamReader]::new($fs)
     while ($null -ne ($line = $sr.ReadLine())) { $line }
   } finally { $fs.Dispose() }
+}
+
+# The companion's own log (W2): JSON lines in the server's format, in companion.log and
+# its rotated companion.log.<stamp> files. Counts the lines since $Since by event.
+function Get-CompanionLogSummary([string]$Folder, [datetime]$Since) {
+  $r = [ordered]@{ lines = 0; panics = 0; resources = 0; recreated = 0; gave_up = 0 }
+  if (-not $Folder -or -not (Test-Path -LiteralPath $Folder)) { return $r }
+  foreach ($f in @(Get-ChildItem -LiteralPath $Folder -File -Filter 'companion.log*' -ErrorAction SilentlyContinue)) {
+    foreach ($line in (Read-SharedLines $f.FullName)) {
+      try { $o = $line | ConvertFrom-Json } catch { continue }
+      if (-not $o.timestamp -or [datetime]::Parse($o.timestamp).ToUniversalTime() -lt $Since.ToUniversalTime()) { continue }
+      $r['lines'] += 1
+      switch ($o.fields.event) {
+        'panic' { $r['panics'] += 1 }
+        'resources' { $r['resources'] += 1 }
+        'webview_recreated' { $r['recreated'] += 1 }
+        'webview_recreate_gave_up' { $r['gave_up'] += 1 }
+      }
+    }
+  }
+  return $r
 }
 
 function Get-Median([double[]]$v) {
@@ -460,6 +485,20 @@ function Invoke-SelfTest {
   $new = @($Checks | Select-Object -Skip $before)
   Expect 'collected samples analyse; an exit mid-run is a crash' ($w.Count -eq 10 -and $new.Count -eq 5 -and -not $new[0].Pass -and -not ($new | Select-Object -Skip 1 | Where-Object { -not $_.Pass })) $true
   while ($Checks.Count -gt $before) { $Checks.RemoveAt($Checks.Count - 1) }
+  # The companion's log (W2): lines since the start counted by event, rotated files too,
+  # older and unreadable lines skipped.
+  $logDir = Join-Path ([IO.Path]::GetTempPath()) "hy-soak-selftest-log-$PID"
+  New-Item -ItemType Directory -Force $logDir | Out-Null
+  $t0 = [datetime]::UtcNow
+  $old = $t0.AddHours(-1).ToString('o'); $new = $t0.AddMinutes(1).ToString('o')
+  function L([string]$ts, [string]$ev) { '{"timestamp":"' + $ts + '","level":"INFO","fields":{"event":"' + $ev + '","detail":"{}"}}' }
+  Set-Content -LiteralPath (Join-Path $logDir 'companion.log.1793000000') -Value @((L $old 'panic'), (L $new 'resources'), (L $new 'webview_recreated'))
+  Set-Content -LiteralPath (Join-Path $logDir 'companion.log') -Value @('not json', (L $new 'resources'), (L $new 'panic'), (L $new 'start'))
+  Set-Content -LiteralPath (Join-Path $logDir 'other.txt') -Value (L $new 'panic')
+  $cl = Get-CompanionLogSummary $logDir $t0
+  Expect 'companion log: events since the start counted across rotated files' ($cl.lines -eq 5 -and $cl.panics -eq 1 -and $cl.resources -eq 2 -and $cl.recreated -eq 1) $true
+  Expect 'companion log: a missing folder counts nothing' ((Get-CompanionLogSummary (Join-Path $logDir 'none') $t0).lines -eq 0) $true
+  Remove-Item -Recurse -Force $logDir
   if ($script:selfBad) { throw "Soak analysis self-test: $($script:selfBad) case(s) wrong" }
   Write-Host 'Soak analysis self-test: all cases right.'
 }
@@ -582,6 +621,9 @@ if ($Role -eq 'Companion') {
   $mainId = [int]$main[0].ProcessId
   $updateLog = Join-Path $root 'updates\update.log'
   $firstLog = Get-Size $updateLog
+  # The companion's own log (W2), rotated at 10 MB or 7 days.
+  $companionLogs = Join-Path $root 'logs'
+  $firstCompanionLog = Get-FolderSize $companionLogs 'companion.log*'
   # The store statistics (counts, sizes and times only), read by the app itself. A build
   # older than V1-7 has no such command and would start the app instead: give it 60 s.
   function Get-StoreStats {
@@ -604,6 +646,7 @@ if ($Role -eq 'Companion') {
     $x['db_bytes'] = Get-Size $db
     $x['wal_bytes'] = Get-Size ($db + '-wal')
     $x['update_log_bytes'] = Get-Size $updateLog
+    $x['companion_log_bytes'] = Get-FolderSize $companionLogs 'companion.log*'
     if (-not $firstFiles) { $firstFiles = $x }
     $samples.Add($x)
     if ($x.t_s -ge $nextStats) {
@@ -630,7 +673,14 @@ if ($Role -eq 'Companion') {
   $growth = ($last.db_bytes + $last.wal_bytes) - ($firstFiles.db_bytes + $firstFiles.wal_bytes)
   Add-Check 'store: write-ahead log and database growth bounded' ($walMax -le $Budget.WalMaxBytes -and $growth -le $Budget.DbGrowthBytes) ('write-ahead log at most {0:N0} bytes (bound {1:N0}); database and log grew {2:N0} bytes (bound {3:N0})' -f $walMax, $Budget.WalMaxBytes, $growth, $Budget.DbGrowthBytes)
   $logGrowth = $last.update_log_bytes - $firstLog
-  Add-Check 'log size bounded' ($logGrowth -le $Budget.LogGrowthBytes) ("update log grew $logGrowth bytes. The companion keeps no other log yet (architecture 10's JSON-line log is tracked work in docs/V1_Acceptance.md)")
+  $companionGrowth = $last.companion_log_bytes - $firstCompanionLog
+  $companionMax = ($samples | ForEach-Object { $_.companion_log_bytes } | Measure-Object -Maximum).Maximum
+  $logOk = $logGrowth -le $Budget.LogGrowthBytes -and $companionGrowth -le $Budget.LogGrowthBytes -and $companionMax -le $Budget.CompanionLogMaxBytes
+  Add-Check 'log size bounded' $logOk ('update log grew {0:N0} bytes; companion log folder grew {1:N0} bytes (bound {2:N0} each), at most {3:N0} bytes (bound {4:N0})' -f $logGrowth, $companionGrowth, $Budget.LogGrowthBytes, $companionMax, $Budget.CompanionLogMaxBytes)
+  $cl = Get-CompanionLogSummary $companionLogs $start
+  $clDetail = "$($cl.lines) lines since the start; $($cl.resources) hourly resource summaries; $($cl.recreated) pet webview recreations$(if ($cl.gave_up) { " ($($cl.gave_up) gave up)" }); $($cl.panics) panics"
+  if ($cl.lines -eq 0) { $clDetail += ' (a build from before W2 keeps no log)' }
+  Add-Check 'companion log: no panic' ($cl.panics -eq 0 -and $cl.gave_up -eq 0) $clDetail
   if ($final) {
     $gap = $final.min_offer_gap_min
     $ok = ($null -eq $gap -or $gap -ge $Budget.MinOfferGapMin) -and $final.max_offers_in_an_hour -le $Budget.MaxOffersPerHour

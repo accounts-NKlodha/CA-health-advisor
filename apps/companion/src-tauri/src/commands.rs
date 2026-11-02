@@ -2,13 +2,14 @@
 //! (`capabilities/*.json`). The commands are synchronous, so Tauri runs them on the main
 //! thread, which the shell requires; the exceptions are the server-link commands that
 //! wait on the network, which are async and touch only the store, and the update-file
-//! dialog, which waits on the user.
+//! and diagnostics dialogs, which wait on the user.
 
 use std::sync::Arc;
 
 use chrono::NaiveDate;
 use hy_core::camera::FrameReport;
 use hy_core::coach::RecoveryPlan;
+use hy_core::diag::bundle::Preview;
 use hy_core::prefs::Accessibility;
 use hy_core::review::suggest::SuggestionKind;
 use hy_core::review::{MonthReview, WeekReview};
@@ -19,6 +20,7 @@ use hy_pet::profile::PetEdit;
 use tauri::State;
 use uuid::Uuid;
 
+use crate::diag::Diagnostics;
 use crate::server_link::{self, LinkView};
 use crate::shell::{BackupDone, ImportOutcome, PageReport, Shell, SuggestionAnswer};
 use crate::update::{AppPage, UpdateCheck, Updater};
@@ -551,6 +553,73 @@ pub fn update_install(app: tauri::AppHandle, updater: UpdaterState<'_>) -> Resul
 pub fn set_autostart(updater: UpdaterState<'_>, enabled: bool) -> Result<AppPage, String> {
     crate::update::set_autostart(updater.dirs(), enabled)?;
     Ok(updater.page())
+}
+
+// ------------------------------------------------------------------ diagnostics (W2)
+
+/// "Prepare diagnostics...": build the redacted zip in memory and show every file in it.
+/// Async: reading and redacting up to the whole log folder must not hold the main thread.
+///
+/// # Errors
+/// The log is not open, worded for the page.
+#[tauri::command]
+pub async fn diagnostics_prepare(
+    app: tauri::AppHandle,
+    diag: State<'_, Arc<Diagnostics>>,
+) -> Result<Preview, String> {
+    let version = app.package_info().version.to_string();
+    let diag = Arc::clone(&diag);
+    tauri::async_runtime::spawn_blocking(move || diag.prepare(&version))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// "Save zip...": the Save As dialog, then the previewed zip written there. `None` if the
+/// user cancelled (the zip stays ready). The path is shown to the user only, never
+/// logged.
+///
+/// # Errors
+/// Nothing prepared, or the file could not be written, worded for the page.
+#[tauri::command]
+pub async fn diagnostics_save(
+    app: tauri::AppHandle,
+    diag: State<'_, Arc<Diagnostics>>,
+) -> Result<Option<String>, String> {
+    use tauri::Manager;
+    let owner = app
+        .get_webview_window(crate::shell::SCREENS)
+        .as_ref()
+        .and_then(crate::shell::hwnd_of)
+        .unwrap_or(0);
+    let diag = Arc::clone(&diag);
+    tauri::async_runtime::spawn_blocking(move || {
+        let name = diag
+            .suggested_name()
+            .ok_or_else(|| "Prepare the diagnostics first.".to_owned())?;
+        let Some(path) = choose_save_zip(owner, &name) else {
+            return Ok(None);
+        };
+        diag.save_to(&path)?;
+        Ok(Some(path.display().to_string()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// "Cancel": drop the prepared zip.
+#[tauri::command]
+pub fn diagnostics_discard(diag: State<'_, Arc<Diagnostics>>) {
+    diag.discard();
+}
+
+#[cfg(windows)]
+fn choose_save_zip(owner: isize, name: &str) -> Option<std::path::PathBuf> {
+    crate::win32::choose_save_zip(owner, "Save HealthierYou diagnostics", name)
+}
+
+#[cfg(not(windows))]
+fn choose_save_zip(_owner: isize, _name: &str) -> Option<std::path::PathBuf> {
+    None
 }
 
 // ------------------------------------------------------------------ posture check (V2-1)

@@ -575,6 +575,27 @@ export interface AppPage {
   autostart: { enabled: boolean; switched_off_in_windows: boolean } | null;
 }
 
+// Settings > App & updates > Diagnostics (W2; hy_core::diag::bundle::Preview).
+
+export interface DiagnosticsEntry {
+  name: string;
+  bytes: number;
+  lines: number;
+  /** The file's full text, exactly as it goes into the zip. */
+  text: string;
+}
+
+export interface DiagnosticsPreview {
+  entries: DiagnosticsEntry[];
+  kept_lines: number;
+  dropped_lines: number;
+  older_lines_left_out: number;
+  scrubbed: number;
+  events: Record<string, number>;
+  suggested_name: string;
+  zip_bytes: number;
+}
+
 // ------------------------------------------------------------------ posture check (V2-1)
 
 export type CameraHold = 'away' | 'paused' | 'off_hours' | 'presentation' | 'meeting';

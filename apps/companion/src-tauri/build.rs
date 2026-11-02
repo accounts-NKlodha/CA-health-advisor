@@ -65,6 +65,9 @@ const COMMANDS: &[&str] = &[
     "camera_report",
     "camera_frame",
     "camera_calibrate",
+    "diagnostics_prepare",
+    "diagnostics_save",
+    "diagnostics_discard",
 ];
 
 /// The update public keys this build trusts (slice V1-6), passed to the program as

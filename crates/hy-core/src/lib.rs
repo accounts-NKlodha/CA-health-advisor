@@ -36,11 +36,16 @@
 //! landmarks never reach it; the camera page sends one derived report per frame.
 //! Slice V2-2 adds [`posture`]: calibration quality, scale floors, sustained drift, the
 //! viewpoint check and the cue, on the few numbers each usable frame gives.
+//!
+//! Tracked work W2 adds [`diag`]: the companion's rotating JSON-line log, its hourly
+//! resource summary, the panic and webview-failure rules, and the user-reviewed
+//! diagnostics zip (architecture 10).
 
 pub mod backup;
 pub mod camera;
 pub mod clock;
 pub mod coach;
+pub mod diag;
 pub mod error;
 pub mod ids;
 #[cfg(feature = "link")]

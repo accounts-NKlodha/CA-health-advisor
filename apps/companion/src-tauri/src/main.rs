@@ -33,12 +33,19 @@
 //! The V2 posture check (slice V2-1) runs in its own camera page while the user has it
 //! on: `hy_core::camera` holds its rules, `shell::camera` carries them out, and only the
 //! camera page may use the camera (see [`windows`]).
+//!
+//! Observability (tracked work W2, architecture 10) is in [`diag`]: the JSON-line log in
+//! `%LOCALAPPDATA%\HealthierYou\logs`, rotated at 10 MB or 7 days, the hourly resource
+//! summary, the panic hook (a release build starts again after a panic, at most once in
+//! 10 minutes) and the user-reviewed diagnostics zip in Settings > App & updates. A pet
+//! page whose webview died is made again (`shell::recover`).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod camera_log;
 mod coach;
 mod commands;
+mod diag;
 mod selftest;
 mod server_link;
 mod shell;
@@ -120,6 +127,7 @@ fn posture_report(args: &[std::ffi::OsString]) -> Option<i32> {
 fn setup(
     app: &mut tauri::App,
     version: hy_core::update::Version,
+    after_panic: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let selftest = selftest_report();
     // The self-test never touches the user's data: it uses a fresh store in the temp
@@ -129,6 +137,22 @@ fn setup(
     } else {
         app.path().local_data_dir()?
     };
+    // The log first, so a later failure is recorded (W2). The self-test's log is in its
+    // temp folder, and it never restarts itself after a panic.
+    diag::init(&diag::logs_dir(&data_root));
+    diag::install_panic_hook(selftest.is_none());
+    diag::log(
+        hy_core::diag::Level::Info,
+        "start",
+        &[
+            ("major", hy_core::diag::V::N(u64::from(version.major))),
+            ("minor", hy_core::diag::V::N(u64::from(version.minor))),
+            ("patch", hy_core::diag::V::N(u64::from(version.patch))),
+            ("after_panic", hy_core::diag::V::Bool(after_panic)),
+            ("selftest", hy_core::diag::V::Bool(selftest.is_some())),
+        ],
+    );
+    app.manage(Arc::new(diag::Diagnostics::default()));
     #[cfg(windows)]
     win32::mark_running();
     let dirs = Dirs::under(&data_root);
@@ -189,6 +213,7 @@ fn setup(
         Err(e) => {
             // The pet still runs; reminders are off until the problem is fixed.
             eprintln!("HealthierYou: coaching could not start: {e}");
+            diag::log(hy_core::diag::Level::Error, "coach_start_failed", &[]);
             None
         }
     };
@@ -208,6 +233,8 @@ fn setup(
     shell::start_camera_clock(&shell);
     // The camera soak's log (V2-5), only when its script asked for it.
     camera_log::start_from_env(&shell);
+    // The hourly resource summary (W2).
+    diag::start_resource_summary();
 
     // A new store opens the setup wizard (W1). The self-test opens it itself.
     if selftest.is_none() && shell.setup_needed() {
@@ -251,6 +278,8 @@ fn main() {
     if let Some(code) = update::command_line(version) {
         std::process::exit(code);
     }
+    // A restart after a panic (W2) waits for the old process to end, then starts as usual.
+    let after_panic = diag::after_panic(&args);
     let app = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             commands::pet_bootstrap,
@@ -316,6 +345,9 @@ fn main() {
             commands::camera_withdraw,
             commands::camera_report,
             commands::camera_frame,
+            commands::diagnostics_prepare,
+            commands::diagnostics_save,
+            commands::diagnostics_discard,
         ])
         // The camera permission (architecture 4.5): only the camera page, only while the
         // posture check wants capture; everything else is refused. On Windows the guard in
@@ -332,7 +364,7 @@ fn main() {
                 PermissionResponse::Deny
             }
         })
-        .setup(move |app| setup(app, version))
+        .setup(move |app| setup(app, version, after_panic))
         .build(context);
     match app {
         Ok(app) => app.run(|app, event| match event {
@@ -346,6 +378,7 @@ fn main() {
                 if let Some(r) = app.try_state::<Arc<CoachRunner>>() {
                     r.shutdown(SHUTDOWN_WAIT);
                 }
+                diag::log(hy_core::diag::Level::Info, "exit", &[]);
             }
             _ => {}
         }),

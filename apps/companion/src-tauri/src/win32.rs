@@ -26,6 +26,9 @@
 //!   waiting for a process to end, the per-user Run value for start at sign-in, a named
 //!   mutex that says the app is running, a yes/no message box, and the process's DPI
 //!   awareness for the self-test.
+//! - Observability (W2): the process tree's memory, handles, threads and CPU for the
+//!   hourly summary, the Save As dialog for the diagnostics zip, and a watch for WebView2
+//!   process failures so a dead pet page is made again.
 //!
 //! Window handles cross this module as `isize` so callers need no unsafe code.
 
@@ -209,17 +212,20 @@ unsafe extern "system" fn subclass_proc(
 /// the pet window to `sink`, and ask Windows to send the session and power ones. Must be
 /// called on the thread that owns the window (Tauri's main thread). The sink must not
 /// block for long: it runs inside the window procedure.
+///
+/// A pet window made again after its webview failed (W2) calls this again with its new
+/// handle: the first sink stays (it reaches the shell, not the window) and the new window
+/// is subclassed and registered the same way.
 pub fn install_signals(h: isize, sink: SignalSink) -> bool {
-    if SINK.set(sink).is_err() {
-        return false;
-    }
+    // The second call's sink is the same routing as the first; keep the first.
+    let _ = SINK.set(sink);
     // SAFETY: `subclass_proc` matches SUBCLASSPROC and stays valid for the program's
-    // life; the handle belongs to this thread's window. The subclass is never removed
-    // because the pet window lives until the process exits.
+    // life; the handle belongs to this thread's window. The subclass is never removed:
+    // it goes with the window (comctl32 removes it on WM_NCDESTROY).
     let subclassed = unsafe { SetWindowSubclass(hwnd(h), Some(subclass_proc), SUBCLASS_ID, 0) };
     // SAFETY: a valid top-level window handle owned by this thread; plain integer flags.
-    // Both registrations last for the window's (the process's) life, so the returned
-    // registration is never unregistered. A failure leaves the plain broadcasts, which
+    // Both registrations last for the window's life (Windows drops them with it), so the
+    // returned registration is never unregistered. A failure leaves the plain broadcasts, which
     // top-level windows receive anyway on most PCs.
     unsafe {
         WTSRegisterSessionNotification(hwnd(h), NOTIFY_FOR_THIS_SESSION);
@@ -459,8 +465,8 @@ use windows_sys::Win32::System::Threading::{
     SYNCHRONIZATION_SYNCHRONIZE, WaitForSingleObject,
 };
 use windows_sys::Win32::UI::Controls::Dialogs::{
-    GetOpenFileNameW, OFN_DONTADDTORECENT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
-    OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    GetOpenFileNameW, GetSaveFileNameW, OFN_DONTADDTORECENT, OFN_EXPLORER, OFN_FILEMUSTEXIST,
+    OFN_HIDEREADONLY, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
 use windows_sys::Win32::UI::HiDpi::{
     GetAwarenessFromDpiAwarenessContext, GetThreadDpiAwarenessContext,
@@ -515,6 +521,53 @@ pub fn choose_installer(owner: isize, title: &str) -> Option<PathBuf> {
             | OFN_DONTADDTORECENT
             | OFN_HIDEREADONLY;
         let ok = GetOpenFileNameW(&raw mut ofn) != 0;
+        if co >= 0 {
+            CoUninitialize();
+        }
+        if !ok {
+            return None;
+        }
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(PathBuf::from(OsString::from_wide(&buf[..len])))
+}
+
+/// Ask where to save the diagnostics zip (W2) with the standard Save As dialog, owned by
+/// `owner` (0 for none), starting with `name`. Runs on the calling thread, which must not
+/// be the UI thread. The dialog asks before replacing a file. `None` if the user
+/// cancelled.
+pub fn choose_save_zip(owner: isize, title: &str, name: &str) -> Option<PathBuf> {
+    let filter: Vec<u16> = "Zip file (*.zip)\0*.zip\0\0".encode_utf16().collect();
+    let title = wide(title);
+    let ext = wide("zip");
+    let mut buf = vec![0u16; 32_768];
+    for (slot, c) in buf.iter_mut().zip(name.encode_utf16().take(250)) {
+        *slot = c;
+    }
+    // SAFETY: as `choose_installer`: COM for this thread only, a zeroed then filled
+    // OPENFILENAMEW whose pointers (filter, title, default extension, file buffer with its
+    // length) all point to live locals for the duration of the call; the dialog writes at
+    // most `nMaxFile` UTF-16 units into `buf`.
+    unsafe {
+        let co = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED.cast_unsigned());
+        let mut ofn: OPENFILENAMEW = std::mem::zeroed();
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+            ofn.nMaxFile = buf.len() as u32;
+        }
+        ofn.hwndOwner = hwnd(owner);
+        ofn.lpstrFilter = filter.as_ptr();
+        ofn.lpstrFile = buf.as_mut_ptr();
+        ofn.lpstrTitle = title.as_ptr();
+        ofn.lpstrDefExt = ext.as_ptr();
+        ofn.Flags = OFN_OVERWRITEPROMPT
+            | OFN_PATHMUSTEXIST
+            | OFN_EXPLORER
+            | OFN_NOCHANGEDIR
+            | OFN_DONTADDTORECENT
+            | OFN_HIDEREADONLY;
+        let ok = GetSaveFileNameW(&raw mut ofn) != 0;
         if co >= 0 {
             CoUninitialize();
         }
@@ -779,21 +832,14 @@ pub fn dpi_awareness() -> i32 {
 // ------------------------------------------------------------------ camera (slice V2-1)
 
 /// The process tree's use: this process and every process it started (the WebView2
-/// processes), summed.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct TreeUsage {
-    /// Processes counted.
-    pub processes: u32,
-    /// Working set, bytes.
-    pub working_set: u64,
-    /// Private bytes (commit charge).
-    pub private_bytes: u64,
-    /// Kernel plus user CPU time since each process started.
-    pub cpu: Duration,
-}
+/// processes), summed (W2 adds the private working set, handles and threads for the
+/// hourly resource summary).
+pub use hy_core::diag::resources::TreeSample as TreeUsage;
 
-/// The process tree's memory and CPU time (architecture 4.5's camera budget is checked
-/// from two samples). Processes that cannot be opened are skipped.
+/// The process tree's memory, handles, threads and CPU time (architecture 4.5's camera
+/// budget is checked from two samples; architecture 10's hourly summary logs one).
+/// Processes that cannot be opened are skipped. The private working set is `None` unless
+/// every process counted reported it (Windows 10 1809 and later).
 pub fn process_tree_usage() -> TreeUsage {
     use windows_sys::Win32::Foundation::{FILETIME, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -802,12 +848,14 @@ pub fn process_tree_usage() -> TreeUsage {
     };
     use windows_sys::Win32::System::ProcessStatus::{
         GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+        PROCESS_MEMORY_COUNTERS_EX2,
     };
     use windows_sys::Win32::System::Threading::{
-        GetProcessTimes, PROCESS_QUERY_LIMITED_INFORMATION,
+        GetProcessHandleCount, GetProcessTimes, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
-    let mut pairs: Vec<(u32, u32)> = Vec::new();
+    // (process, parent, threads)
+    let mut entries: Vec<(u32, u32, u32)> = Vec::new();
     // SAFETY: the snapshot handle is checked and closed once; the entry's size field is
     // set before the first call as the API requires.
     unsafe {
@@ -819,7 +867,7 @@ pub fn process_tree_usage() -> TreeUsage {
         e.dwSize = u32::try_from(std::mem::size_of::<PROCESSENTRY32W>()).unwrap_or(0);
         if Process32FirstW(snap, &raw mut e) != 0 {
             loop {
-                pairs.push((e.th32ProcessID, e.th32ParentProcessID));
+                entries.push((e.th32ProcessID, e.th32ParentProcessID, e.cntThreads));
                 if Process32NextW(snap, &raw mut e) == 0 {
                     break;
                 }
@@ -827,24 +875,44 @@ pub fn process_tree_usage() -> TreeUsage {
         }
         CloseHandle(snap);
     }
+    let pairs: Vec<(u32, u32)> = entries.iter().map(|&(p, pp, _)| (p, pp)).collect();
     // SAFETY: no arguments.
     let me = unsafe { GetCurrentProcessId() };
     let tree = tree_of(me, &pairs);
     let mut usage = TreeUsage::default();
+    let mut private_ws: Option<u64> = Some(0);
     let ft = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
     for pid in tree {
-        // SAFETY: OpenProcess has no pointer arguments; the counters and times are written
-        // into live locals of the stated sizes; the handle is closed once.
+        // SAFETY: OpenProcess has no pointer arguments; the counters, handle count and
+        // times are written into live locals of the stated sizes; the handle is closed
+        // once.
         unsafe {
             let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if h.is_null() {
                 continue;
             }
-            let mut m: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
-            let cb = u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>()).unwrap_or(0);
-            if GetProcessMemoryInfo(h, (&raw mut m).cast::<PROCESS_MEMORY_COUNTERS>(), cb) != 0 {
-                usage.working_set += m.WorkingSetSize as u64;
-                usage.private_bytes += m.PrivateUsage as u64;
+            let mut m2: PROCESS_MEMORY_COUNTERS_EX2 = std::mem::zeroed();
+            let cb2 =
+                u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX2>()).unwrap_or(0);
+            if GetProcessMemoryInfo(h, (&raw mut m2).cast::<PROCESS_MEMORY_COUNTERS>(), cb2) != 0 {
+                usage.working_set += m2.WorkingSetSize as u64;
+                usage.private_bytes += m2.PrivateUsage as u64;
+                private_ws = private_ws.map(|p| p + m2.PrivateWorkingSetSize as u64);
+            } else {
+                // Windows before 10 1809 knows only the shorter structure.
+                private_ws = None;
+                let mut m: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
+                let cb =
+                    u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>()).unwrap_or(0);
+                if GetProcessMemoryInfo(h, (&raw mut m).cast::<PROCESS_MEMORY_COUNTERS>(), cb) != 0
+                {
+                    usage.working_set += m.WorkingSetSize as u64;
+                    usage.private_bytes += m.PrivateUsage as u64;
+                }
+            }
+            let mut handles = 0u32;
+            if GetProcessHandleCount(h, &raw mut handles) != 0 {
+                usage.handles += u64::from(handles);
             }
             let zero = FILETIME {
                 dwLowDateTime: 0,
@@ -855,10 +923,16 @@ pub fn process_tree_usage() -> TreeUsage {
                 // FILETIME counts 100 ns units.
                 usage.cpu += Duration::from_nanos((ft(k) + ft(u)).saturating_mul(100));
             }
+            usage.threads += entries
+                .iter()
+                .find(|e| e.0 == pid)
+                .map_or(0, |e| u64::from(e.2));
             usage.processes += 1;
             CloseHandle(h);
         }
     }
+    let counted = usage.processes > 0;
+    usage.private_working_set = private_ws.filter(|_| counted);
     usage
 }
 
@@ -931,6 +1005,36 @@ pub fn guard_permissions(
         };
         core.add_PermissionRequested(&handler, &raw mut token)
             .is_ok()
+    }
+}
+
+/// Watch a webview for WebView2 process failures (W2, architecture 10): `on_failed` runs
+/// on the UI thread with the `COREWEBVIEW2_PROCESS_FAILED_KIND` value. Returns false if
+/// the handler could not be added.
+pub fn watch_process_failed(
+    controller: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller,
+    on_failed: Box<dyn Fn(i32)>,
+) -> bool {
+    use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND;
+    use webview2_com::ProcessFailedEventHandler;
+
+    let handler = ProcessFailedEventHandler::create(Box::new(move |_, args| {
+        let Some(args) = args else { return Ok(()) };
+        let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+        // SAFETY: a COM call on the live event arguments, on the UI thread that raised the
+        // event; `kind` is a live local.
+        unsafe { args.ProcessFailedKind(&raw mut kind)? };
+        on_failed(kind.0);
+        Ok(())
+    }));
+    let mut token = 0i64;
+    // SAFETY: COM calls on the webview's own controller, on the UI thread (`with_webview`
+    // runs there); the handler lives as long as the webview holds it.
+    unsafe {
+        let Ok(core) = controller.CoreWebView2() else {
+            return false;
+        };
+        core.add_ProcessFailed(&handler, &raw mut token).is_ok()
     }
 }
 

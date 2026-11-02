@@ -8,6 +8,7 @@ import type {
   AppPage,
   BackupDone,
   CameraPage,
+  DiagnosticsPreview,
   FrameReport,
   PageCommand,
   PageReport,
@@ -93,6 +94,11 @@ interface Commands {
   update_choose: { args: undefined; result: UpdateCheck | null };
   update_install: { args: undefined; result: void };
   set_autostart: { args: { enabled: boolean }; result: AppPage };
+  // The diagnostics zip (W2): built and shown, then saved only where the user chooses.
+  diagnostics_prepare: { args: undefined; result: DiagnosticsPreview };
+  /** Opens the Save As dialog; the saved path, or null if the user cancelled it. */
+  diagnostics_save: { args: undefined; result: string | null };
+  diagnostics_discard: { args: undefined; result: void };
   // The posture check (V2-1).
   camera_open: { args: undefined; result: void };
   camera_off: { args: undefined; result: CameraPage };
