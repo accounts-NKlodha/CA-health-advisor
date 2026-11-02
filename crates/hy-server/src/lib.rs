@@ -21,7 +21,9 @@
 //!   receipt echoes and regression, receipts as recovery evidence;
 //! - [`recovery`]: the startup comparison, recovery hold, release and discard;
 //! - [`backup`]: encrypted daily backups and restore;
-//! - [`acl`]: checking that the data folder is closed to other accounts (V1-6b).
+//! - [`acl`]: checking that the data folder is closed to other accounts (V1-6b);
+//! - [`updates`]: the companion update file the administrator places in the drop folder,
+//!   served to confirmed PCs only (W1).
 
 pub mod acl;
 pub mod admin;
@@ -40,5 +42,6 @@ pub mod serve;
 pub mod server;
 pub mod sync;
 pub mod tls;
+pub mod updates;
 
 pub use server::{Config, Server};

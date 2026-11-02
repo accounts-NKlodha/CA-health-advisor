@@ -10,8 +10,11 @@
 //! ([`Server::check_echo`]): an older receipt than before answers `device_regressed`.
 //! `POST /v1/receipt` counts as evidence only for the device whose token presents it; a
 //! receipt sent without a usable token is refused, and is only checked for a history
-//! beyond the server's (contract 9). The update manifest is V1-6 and answers
-//! `protocol_unsupported` after the gate.
+//! beyond the server's (contract 9).
+//!
+//! The update endpoints (W1, [`crate::updates`]) are confirmed-only too: the manifest,
+//! the `.sig` and the installer in pieces. They hand over the administrator's two files
+//! as they are; each PC verifies them itself before anything runs.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -25,12 +28,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use hy_core::protocol::unb64_exact;
 use hy_core::protocol::wire::{
-    ControlRequest, ErrorBody, PairRequest, RECEIPT_HEADER, ReceiptRequest, UploadRequest,
-    WireError,
+    ControlRequest, ErrorBody, PairRequest, RECEIPT_HEADER, ReceiptRequest, UpdateManifest,
+    UpdateOffer, UpdateSignature, UploadRequest, WireError,
 };
 
 use crate::logging::{self, V};
 use crate::server::{AuthedDevice, DeviceState, Refusal, Server};
+use crate::updates;
 
 /// The connecting peer's address, attached to each connection by the accept loop.
 #[derive(Debug, Clone, Copy)]
@@ -148,6 +152,8 @@ pub fn router(server: Arc<Server>) -> Router {
         .route("/v1/upload", post(upload))
         .route("/v1/receipt", post(receipt))
         .route("/v1/update/manifest", get(manifest))
+        .route("/v1/update/signature", get(update_signature))
+        .route("/v1/update/installer", get(update_installer))
         .fallback(not_found)
         .with_state(server)
 }
@@ -466,21 +472,100 @@ async fn receipt(State(server): State<Arc<Server>>, headers: HeaderMap, body: Bo
     finish("receipt", start, &dev, result)
 }
 
+/// The offer in the drop folder, read on a blocking thread (nothing is cached: a file the
+/// administrator adds or removes counts at the next request).
+async fn offer(server: &Arc<Server>) -> Result<Option<updates::Offer>, WireError> {
+    let dir = server.config.updates_dir.clone();
+    blocking(server, move || dir.as_deref().and_then(updates::current)).await
+}
+
+/// The offer `file` names; `protocol_unsupported` if none is offered or it is another
+/// file (the administrator changed the offer, or the name was never offered).
+async fn named_offer(server: &Arc<Server>, uri: &Uri) -> Result<updates::Offer, WireError> {
+    let file = query_param(uri, "file").ok_or(WireError::SchemaInvalid)?;
+    match offer(server).await? {
+        Some(o) if o.file_name == file => Ok(o),
+        _ => Err(WireError::ProtocolUnsupported),
+    }
+}
+
+/// `GET /v1/update/manifest` (W1): the companion update file offered, if any. Confirmed
+/// PCs only; the server vouches for nothing (see [`crate::updates`]).
 async fn manifest(State(server): State<Arc<Server>>, headers: HeaderMap) -> Response {
     let start = Instant::now();
     let dev = match confirmed_only("manifest", &server, &headers, start).await {
         Ok(d) => d,
         Err(r) => return r,
     };
-    // The update manifest arrives in V1-6.
-    log_request(
-        "manifest",
-        start,
-        StatusCode::NOT_FOUND,
-        Some(WireError::ProtocolUnsupported),
-        Some(&dev),
-    );
-    error_response(WireError::ProtocolUnsupported)
+    let result = offer(&server).await.map(|o| UpdateManifest {
+        offer: o.map(|o| UpdateOffer {
+            file_name: o.file_name,
+            size: o.size,
+        }),
+    });
+    finish("manifest", start, &dev, result)
+}
+
+/// `GET /v1/update/signature?file=`: the offered installer's `.sig` text.
+async fn update_signature(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let start = Instant::now();
+    let dev = match confirmed_only("update_signature", &server, &headers, start).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let result = match named_offer(&server, &uri).await {
+        Ok(o) => blocking(&server, move || updates::signature(&o))
+            .await
+            .and_then(|s| s.ok_or(WireError::ProtocolUnsupported))
+            .map(|signature| UpdateSignature { signature }),
+        Err(e) => Err(e),
+    };
+    finish("update_signature", start, &dev, result)
+}
+
+/// `GET /v1/update/installer?file=&offset=`: at most
+/// [`UPDATE_CHUNK`](hy_core::protocol::wire::UPDATE_CHUNK) bytes of the offered installer
+/// from `offset`.
+async fn update_installer(
+    State(server): State<Arc<Server>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let start = Instant::now();
+    let dev = match confirmed_only("update_installer", &server, &headers, start).await {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    let offset = query_param(&uri, "offset").and_then(|v| v.parse::<u64>().ok());
+    let result = match (offset, named_offer(&server, &uri).await) {
+        (_, Err(e)) => Err(e),
+        (None, Ok(_)) => Err(WireError::SchemaInvalid),
+        (Some(at), Ok(o)) if at >= o.size => Err(WireError::SchemaInvalid),
+        (Some(at), Ok(o)) => blocking(&server, move || updates::chunk(&o, at))
+            .await
+            .and_then(|r| r.map_err(|_| WireError::ProtocolUnsupported)),
+    };
+    match result {
+        Ok(bytes) => {
+            log_request("update_installer", start, StatusCode::OK, None, Some(&dev));
+            let mut r = Response::new(Body::from(bytes));
+            let h = r.headers_mut();
+            h.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+            h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            r
+        }
+        Err(e) => {
+            log_request("update_installer", start, status_of(e), Some(e), Some(&dev));
+            error_response(e)
+        }
+    }
 }
 
 #[cfg(test)]

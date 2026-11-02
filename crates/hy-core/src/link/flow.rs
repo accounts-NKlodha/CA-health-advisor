@@ -17,8 +17,12 @@
 //! and sends control operations (disables and deletions are taken, enables wait), but
 //! uploads nothing. On `device_regressed` it runs [`Store::regression_reset`] and pulls
 //! again; on `device_revoked` it unpairs locally.
+//!
+//! [`fetch_update`] downloads the companion update the office server offers (W1); the
+//! caller then gives the two files the file route's whole check.
 
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use chrono::NaiveDate;
@@ -34,6 +38,7 @@ use crate::protocol::words::{device_check_code, fingerprint_words};
 use crate::protocol::{PROTOCOL, ct_eq32, unb64_exact};
 use crate::secret::{Secret, TokenVault};
 use crate::store::{NewLink, ServerLink, StateOutcome, Store};
+use crate::update::{self, Product, TrustedKeys, UpdateError, Version};
 
 /// Why pairing or a status check failed, in the terms the companion shows (contract 12).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -657,6 +662,146 @@ pub async fn restore_from_server(
         .map_err(store_err)
 }
 
+/// What asking the office server for an update found (architecture 8, W1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateFetch {
+    /// The administrator has placed no update file on the server.
+    NoneOffered,
+    /// The server offers the version this PC already runs.
+    UpToDate(Version),
+    /// Both files are in the download folder: the installer's path, with its `.sig`
+    /// beside it. Nothing about them is trusted yet: the caller runs the file route's
+    /// whole check ([`update::check_update_file`]) on them before anything can run.
+    Downloaded(PathBuf),
+}
+
+/// Why asking the office server for an update failed.
+#[derive(Debug)]
+pub enum UpdateFetchError {
+    /// The server could not be reached, or refused (the link's own messages).
+    Link(FlowError),
+    /// The offered file is refused, with the same message the file route gives.
+    File(UpdateError),
+}
+
+impl std::fmt::Display for UpdateFetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Link(e) => write!(f, "{e}"),
+            Self::File(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for UpdateFetchError {}
+
+impl From<FlowError> for UpdateFetchError {
+    fn from(e: FlowError) -> Self {
+        Self::Link(e)
+    }
+}
+
+impl From<LinkError> for UpdateFetchError {
+    fn from(e: LinkError) -> Self {
+        Self::Link(e.into())
+    }
+}
+
+impl From<UpdateError> for UpdateFetchError {
+    fn from(e: UpdateError) -> Self {
+        Self::File(e)
+    }
+}
+
+/// Ask the office server for the companion update it offers and download its two files
+/// into `dest` (emptied first), over the paired, pinned channel with this PC's token.
+///
+/// The server is never trusted for authenticity. Before the installer is downloaded, the
+/// offered name must be an installer's, its version must pass the same rule as the file
+/// route ([`update::plan_version`]: newer, or exactly the version this PC came from),
+/// and the `.sig` must pass every check that does not need the installer
+/// ([`update::precheck_signature`]), each with the file route's message. A missing
+/// signature is refused as the file route refuses one. The installer then comes in
+/// pieces of at most [`UPDATE_CHUNK`](crate::protocol::wire::UPDATE_CHUNK) and must be
+/// exactly the offered size. Passing all this proves nothing: the caller runs
+/// [`update::check_update_file`] on the result.
+///
+/// # Errors
+/// [`UpdateFetchError::Link`] for the network, the token (`RepairNeeded`), a PC not yet
+/// confirmed (`device_unconfirmed`) or a malformed answer; [`UpdateFetchError::File`]
+/// for a refused file.
+pub async fn fetch_update(
+    link: &ServerLink,
+    vault: &dyn TokenVault,
+    opts: LinkOptions,
+    keys: &TrustedKeys,
+    current: Version,
+    previous: Option<Version>,
+    dest: &Path,
+) -> Result<UpdateFetch, UpdateFetchError> {
+    let token = vault
+        .open(&link.token_blob)
+        .map_err(|_| FlowError::RepairNeeded)?;
+    let (manifest, addr) = try_addresses(link, opts, |addr| {
+        let token = &token;
+        async move {
+            let client = LinkClient::new(link.pin, addr, opts)?;
+            client.update_manifest(token).await.map_err(FlowError::from)
+        }
+    })
+    .await?;
+    let Some(offer) = manifest.offer else {
+        return Ok(UpdateFetch::NoneOffered);
+    };
+    // A name that is not an installer's never reaches the disk or a URL.
+    let name = offer.file_name;
+    let (product, version) =
+        update::parse_installer_name(&name).ok_or_else(|| UpdateError::BadName(name.clone()))?;
+    match update::plan_version(Product::Companion, current, previous, product, version) {
+        Ok(_) => {}
+        Err(UpdateError::AlreadyInstalled(v)) => return Ok(UpdateFetch::UpToDate(v)),
+        Err(e) => return Err(e.into()),
+    }
+    if offer.size > update::MAX_INSTALLER_BYTES {
+        return Err(UpdateError::TooLarge.into());
+    }
+    let io = |e: std::io::Error| UpdateError::Io(e.to_string());
+    if dest.exists() {
+        std::fs::remove_dir_all(dest).map_err(io)?;
+    }
+    std::fs::create_dir_all(dest).map_err(io)?;
+    let installer = dest.join(&name);
+    let sig_path = update::sig_path_for(&installer);
+    let client = LinkClient::new(link.pin, addr, opts)?;
+    // The signature first: a missing or refused one costs no installer download.
+    match client.update_signature(&token, &name).await {
+        Ok(sig) => std::fs::write(&sig_path, sig.signature.as_bytes()).map_err(io)?,
+        Err(LinkError::Server {
+            error: WireError::ProtocolUnsupported,
+            ..
+        }) => {}
+        Err(e) => return Err(e.into()),
+    }
+    let sig = update::read_signature_file(&sig_path)?;
+    update::precheck_signature(keys, &name, &sig)?;
+    let part = dest.join(format!("{name}.part"));
+    let mut file = std::fs::File::create(&part).map_err(io)?;
+    let mut offset: u64 = 0;
+    while offset < offer.size {
+        let chunk = client.update_chunk(&token, &name, offset).await?;
+        let len = chunk.len() as u64;
+        if len == 0 || offset + len > offer.size {
+            return Err(FlowError::Protocol.into());
+        }
+        std::io::Write::write_all(&mut file, &chunk).map_err(io)?;
+        offset += len;
+    }
+    file.sync_all().map_err(io)?;
+    drop(file);
+    std::fs::rename(&part, &installer).map_err(io)?;
+    Ok(UpdateFetch::Downloaded(installer))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,6 +839,16 @@ mod tests {
         };
         send(&fetch_state(&link, 0, &vault, LinkOptions::default()));
         send(&unpair_remote(&link, &vault, LinkOptions::default()));
+        let keys = TrustedKeys::default();
+        send(&fetch_update(
+            &link,
+            &vault,
+            LinkOptions::default(),
+            &keys,
+            Version::new(0, 1, 0),
+            None,
+            Path::new("downloaded"),
+        ));
     }
 
     #[tokio::test]

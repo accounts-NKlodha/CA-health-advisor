@@ -1,0 +1,66 @@
+# T-S25 fuzz targets (tracked work W4, V1-5 contract 14.2), run with cargo-fuzz on a pinned
+# nightly toolchain by the CI job "Fuzz (T-S25)". Its own workspace, so the product
+# workspace never needs nightly or libFuzzer. The seed corpora in corpus/<target>/seed-*
+# come from the protocol's test vectors (crates/hy-core/tests/fuzz_seeds.rs writes and
+# checks them).
+[package]
+name = "hy-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "UNLICENSED"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+aws-lc-rs = { version = "1.18.1", default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+hy-core = { path = "../crates/hy-core" }
+libfuzzer-sys = "0.4.13"
+serde_json = "1.0.154"
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "slip"
+path = "fuzz_targets/slip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "control_entry"
+path = "fuzz_targets/control_entry.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chain_verify"
+path = "fuzz_targets/chain_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "head_receipt"
+path = "fuzz_targets/head_receipt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "state_json"
+path = "fuzz_targets/state_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upload_json"
+path = "fuzz_targets/upload_json.rs"
+test = false
+doc = false
+bench = false

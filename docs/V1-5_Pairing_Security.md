@@ -205,7 +205,7 @@ All in one `BEGIN IMMEDIATE` transaction, in WAL mode with `synchronous=FULL`. A
 
 | Rule | Detail | Label |
 | --- | --- | --- |
-| Pending (unconfirmed) device | Can call only `GET /v1/state` and `POST /v1/unpair`. `GET /v1/state` returns only `{status: "pending", alias}`: no policy, `share_from`, tombstones, device list, chain entries or head. `GET /v1/history`, `POST /v1/control`, `POST /v1/upload`, `POST /v1/receipt` and `GET /v1/update/manifest` are refused with `device_unconfirmed`, checked before any other processing. A pending device holds no receipt and so can never supply recovery evidence (9) | New |
+| Pending (unconfirmed) device | Can call only `GET /v1/state` and `POST /v1/unpair`. `GET /v1/state` returns only `{status: "pending", alias}`: no policy, `share_from`, tombstones, device list, chain entries or head. `GET /v1/history`, `POST /v1/control`, `POST /v1/upload`, `POST /v1/receipt` and the three `GET /v1/update/...` endpoints are refused with `device_unconfirmed`, checked before any other processing. A pending device holds no receipt and so can never supply recovery evidence (9) | New |
 | Confirmation | **Mandatory in V1** (owner decided O1). There is no setting, build flag or fallback that makes a device active without it. A `device_confirmed` entry in U's chain, written only by the admin page after 4.2 step 9. Shown on the admin page with the confirmation time | New |
 | Expiry | A pending device is revoked automatically after 7 days (a `revocation` entry with reason `unconfirmed_expired`) | New |
 | New-device notice | U's other confirmed devices show once: "A new PC '`<label>`' was paired to your HealthierYou on `<date>`. Not you? Tell your administrator." The same applies to revocations | New |
@@ -350,7 +350,9 @@ A restore done through the admin tool also sets the hold explicitly, and voids a
 | `GET /v1/history?from=&to=` | Token, confirmed | "Restore from server": U's opted-in daily summaries, keyed by origin, read-only. Writes a `history_access` entry |
 | `POST /v1/receipt` | Token of the presenting device, confirmed and not revoked; no other form of authentication | Presents that device's stored receipt as **that device's** evidence (architecture 5.3, section 9). A request with no token, an unknown or wrong token, or a revoked or pending device's token is refused before the receipt is parsed for evidence |
 | `POST /v1/unpair` | Token | Self-revocation |
-| `GET /v1/update/manifest` | Token, confirmed | V1-6 |
+| `GET /v1/update/manifest` | Token, confirmed | The companion update file the office server offers: `{offer: {file_name, size} \| null}` (W1, V1-6 section 2a). The server vouches for nothing; the PC verifies the signature with its built-in release key |
+| `GET /v1/update/signature?file=` | Token, confirmed | The offered installer's `.sig` text; `protocol_unsupported` when it is not the offered file or has no `.sig` |
+| `GET /v1/update/installer?file=&offset=` | Token, confirmed | At most 4 MiB of the offered installer from `offset` (`application/octet-stream`), so each request fits the connection cap and the client's response limit |
 
 **Common rules for every endpoint:**
 

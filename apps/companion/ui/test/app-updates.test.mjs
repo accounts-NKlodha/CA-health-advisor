@@ -1,7 +1,7 @@
 // node --test: the text of Settings > App & updates (slice V1-6).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { autostartLine, checkSummary, markNote, outcomeLine, rollbackLine } from '../src/screens/app.ts';
+import { autostartLine, checkSummary, markNote, outcomeLine, rollbackLine, serverLine } from '../src/screens/app.ts';
 
 const check = (over) => ({
   current: '0.1.0',
@@ -46,4 +46,14 @@ test('going back names the only version it can be', () => {
   const page = { previous_version: null };
   assert.match(rollbackLine(page), /there is none yet/);
   assert.match(rollbackLine({ previous_version: '0.1.0' }), /install version 0\.1\.0/);
+});
+
+test('the office server check says why there is nothing to install', () => {
+  assert.match(serverLine({ kind: 'none_offered' }), /has no update/);
+  assert.equal(
+    serverLine({ kind: 'up_to_date', version: '0.2.0' }),
+    'This PC already has version 0.2.0, the version the office server offers.',
+  );
+  // A ready update is shown exactly as a checked file.
+  assert.equal(serverLine({ kind: 'ready', check: check() }), null);
 });

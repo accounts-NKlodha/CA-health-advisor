@@ -1,7 +1,10 @@
 //! Signed update files, rollback and the update record (architecture 8; slice V1-6).
 //!
-//! Every V1 update arrives as a file: the NSIS installer of a release and its `.sig`,
-//! copied from a LAN share or a USB stick. Nothing runs before the signature is checked.
+//! Every V1 update arrives as two files: the NSIS installer of a release and its `.sig`,
+//! copied from a LAN share or a USB stick, or downloaded from the office server over the
+//! paired channel (W1). Either way they get the same check ([`check_update_file`]); the
+//! server is never trusted for authenticity. Nothing runs before the signature is
+//! checked.
 //!
 //! - **Signature.** The `.sig` is a minisign signature, written by the Tauri CLI's
 //!   `signer sign --app-version <version>` on the owner's PC (the secret key never leaves
@@ -349,29 +352,28 @@ pub fn read_signature_file(path: &Path) -> Result<String, UpdateError> {
     std::fs::read_to_string(path).map_err(|e| UpdateError::BadSignatureFile(e.to_string()))
 }
 
-/// Check an installer against its signature and the built-in keys.
-///
-/// The order matters: the name is checked first (so an unrelated file is refused without
-/// being read), then the signature's key and trusted comment, then the whole file is
-/// hashed and the signature verified.
-///
-/// # Errors
-/// Any [`UpdateError`] up to [`UpdateError::TooLarge`]; nothing is changed.
-pub fn verify_release(
+/// What the signature says, checked before the installer is read.
+struct Prechecked {
+    product: Product,
+    version: Version,
+    sig: Signature,
+    /// The index of the built-in key that made it.
+    key: usize,
+}
+
+/// Every check that does not need the installer's bytes: a key is built in, the name is
+/// an installer's, the signature decodes (not legacy), its trusted comment names this
+/// file and version, and it was made by a built-in key.
+fn precheck(
     keys: &TrustedKeys,
-    installer: &Path,
+    file_name: &str,
     sig_text: &str,
-) -> Result<VerifiedRelease, UpdateError> {
+) -> Result<Prechecked, UpdateError> {
     if keys.is_empty() {
         return Err(UpdateError::NoKey);
     }
-    let file_name = installer
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default()
-        .to_owned();
-    let (product, version) =
-        parse_installer_name(&file_name).ok_or_else(|| UpdateError::BadName(file_name.clone()))?;
+    let (product, version) = parse_installer_name(file_name)
+        .ok_or_else(|| UpdateError::BadName(file_name.to_owned()))?;
     let sig = decode_signature(sig_text)?;
     let comment = sig.trusted_comment();
     match comment_field(comment, "file") {
@@ -398,11 +400,11 @@ pub fn verify_release(
         }
     }
     // Find the key the signature names (minisign carries an 8-byte key id).
-    let mut verifier = None;
-    for key in &keys.keys {
+    let mut found = None;
+    for (i, key) in keys.keys.iter().enumerate() {
         match key.verify_stream(&sig) {
-            Ok(v) => {
-                verifier = Some(v);
+            Ok(_) => {
+                found = Some(i);
                 break;
             }
             Err(minisign_verify::Error::UnexpectedKeyId) => {}
@@ -412,7 +414,61 @@ pub fn verify_release(
             Err(e) => return Err(UpdateError::BadSignatureFile(e.to_string())),
         }
     }
-    let mut verifier = verifier.ok_or(UpdateError::UnknownKey)?;
+    let key = found.ok_or(UpdateError::UnknownKey)?;
+    Ok(Prechecked {
+        product,
+        version,
+        sig,
+        key,
+    })
+}
+
+/// The checks of [`verify_release`] that do not read the installer, for a file not yet
+/// on this PC (the office-server route checks the signature before it downloads the
+/// installer). Passing them proves nothing about the installer: [`verify_release`] must
+/// still pass on the file itself before anything runs.
+///
+/// # Errors
+/// [`UpdateError::NoKey`], [`UpdateError::BadName`], a signature-file, legacy, key, name
+/// or version error, exactly as [`verify_release`] gives them.
+pub fn precheck_signature(
+    keys: &TrustedKeys,
+    file_name: &str,
+    sig_text: &str,
+) -> Result<(Product, Version), UpdateError> {
+    precheck(keys, file_name, sig_text).map(|p| (p.product, p.version))
+}
+
+/// Check an installer against its signature and the built-in keys.
+///
+/// The order matters: the name is checked first (so an unrelated file is refused without
+/// being read), then the signature's key and trusted comment ([`precheck_signature`]),
+/// then the whole file is hashed and the signature verified.
+///
+/// # Errors
+/// Any [`UpdateError`] up to [`UpdateError::TooLarge`]; nothing is changed.
+pub fn verify_release(
+    keys: &TrustedKeys,
+    installer: &Path,
+    sig_text: &str,
+) -> Result<VerifiedRelease, UpdateError> {
+    let file_name = installer
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_owned();
+    let Prechecked {
+        product,
+        version,
+        sig,
+        key,
+    } = precheck(keys, &file_name, sig_text)?;
+    let mut verifier = keys
+        .keys
+        .get(key)
+        .ok_or(UpdateError::UnknownKey)?
+        .verify_stream(&sig)
+        .map_err(|e| UpdateError::BadSignatureFile(e.to_string()))?;
     let mut file = std::fs::File::open(installer).map_err(|e| UpdateError::Io(e.to_string()))?;
     let size = file
         .metadata()
@@ -469,13 +525,28 @@ pub fn plan(
     previous: Option<Version>,
     release: &VerifiedRelease,
 ) -> Result<Plan, UpdateError> {
-    if release.product != product {
-        return Err(UpdateError::WrongProduct(match release.product {
+    plan_version(product, current, previous, release.product, release.version)
+}
+
+/// [`plan`] for a product and version named by an installer's file name, before the
+/// file is on this PC (the office-server route asks before it downloads anything). The
+/// same rule and the same messages; [`plan`] still decides once the file is verified.
+///
+/// # Errors
+/// As [`plan`].
+pub fn plan_version(
+    product: Product,
+    current: Version,
+    previous: Option<Version>,
+    offered_product: Product,
+    offered: Version,
+) -> Result<Plan, UpdateError> {
+    if offered_product != product {
+        return Err(UpdateError::WrongProduct(match offered_product {
             Product::Companion => "desktop companion",
             Product::Server => "office server",
         }));
     }
-    let offered = release.version;
     if offered > current {
         Ok(Plan::Upgrade)
     } else if offered == current {
@@ -489,6 +560,26 @@ pub fn plan(
             previous: previous.map_or_else(String::new, |p| format!(", version {p}")),
         })
     }
+}
+
+/// The whole check of an update file, whichever way it reached this PC (chosen from a
+/// share or USB stick, or downloaded from the office server): its `.sig` must sit next
+/// to it ([`read_signature_file`]), the signature must verify with a built-in key
+/// ([`verify_release`]), and the version must be allowed ([`plan`]).
+///
+/// # Errors
+/// The first [`UpdateError`] found; nothing is changed.
+pub fn check_update_file(
+    keys: &TrustedKeys,
+    product: Product,
+    current: Version,
+    previous: Option<Version>,
+    installer: &Path,
+) -> Result<(VerifiedRelease, Plan), UpdateError> {
+    let sig = read_signature_file(&sig_path_for(installer))?;
+    let release = verify_release(keys, installer, &sig)?;
+    let plan = plan(product, current, previous, &release)?;
+    Ok((release, plan))
 }
 
 // ------------------------------------------------------------------ update record
@@ -1495,6 +1586,120 @@ mod tests {
         assert!(matches!(
             read_signature_file(&big),
             Err(UpdateError::BadSignatureFile(_))
+        ));
+    }
+
+    #[test]
+    fn the_signature_is_prechecked_without_the_installer() {
+        // The office-server route checks the .sig before it downloads the installer: the
+        // same refusals, and no file is needed for them.
+        let sig = fixture(&format!("{V011}.sig"));
+        assert_eq!(
+            precheck_signature(&keys(), V011, &sig).unwrap(),
+            (Product::Companion, Version::new(0, 1, 1))
+        );
+        assert!(matches!(
+            precheck_signature(&TrustedKeys::default(), V011, &sig),
+            Err(UpdateError::NoKey)
+        ));
+        let other = TrustedKeys::parse(&fixture("other.pub")).unwrap();
+        assert!(matches!(
+            precheck_signature(&other, V011, &sig),
+            Err(UpdateError::UnknownKey)
+        ));
+        assert!(matches!(
+            precheck_signature(&keys(), "HealthierYou_0.1.3_x64-setup.exe", &sig),
+            Err(UpdateError::NameMismatch { .. })
+        ));
+        assert!(matches!(
+            precheck_signature(&keys(), "setup.exe", &sig),
+            Err(UpdateError::BadName(_))
+        ));
+        assert!(matches!(
+            precheck_signature(&keys(), V011, "garbage"),
+            Err(UpdateError::BadSignatureFile(_))
+        ));
+        let n = "HealthierYou_0.1.2_x64-setup.exe";
+        assert!(matches!(
+            precheck_signature(&keys(), n, &fixture(&format!("{n}.sig"))),
+            Err(UpdateError::MissingVersion)
+        ));
+    }
+
+    /// What the file route says about `installer`: the full check.
+    fn check_as_file(
+        current: Version,
+        previous: Option<Version>,
+        installer: &Path,
+    ) -> Result<(VerifiedRelease, Plan), UpdateError> {
+        check_update_file(&keys(), Product::Companion, current, previous, installer)
+    }
+
+    #[test]
+    fn the_whole_check_refuses_a_tampered_file_an_older_version_and_a_missing_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, sig) = staged(dir.path(), V011, V011);
+        std::fs::write(sig_path_for(&path), &sig).unwrap();
+        let (r, p) = check_as_file(Version::new(0, 1, 0), None, &path).unwrap();
+        assert_eq!((r.version, p), (Version::new(0, 1, 1), Plan::Upgrade));
+        // Rollback to exactly the version this PC came from.
+        let (_, p) =
+            check_as_file(Version::new(0, 2, 0), Some(Version::new(0, 1, 1)), &path).unwrap();
+        assert_eq!(p, Plan::Rollback);
+        // An older version that is not the previous one.
+        let e = check_as_file(Version::new(0, 2, 0), None, &path).unwrap_err();
+        assert!(
+            matches!(e, UpdateError::NotRollbackCompatible { .. }),
+            "{e}"
+        );
+        // A changed byte.
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[0] ^= 0x01;
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(matches!(
+            check_as_file(Version::new(0, 1, 0), None, &path),
+            Err(UpdateError::Tampered)
+        ));
+        // No signature next to it.
+        bytes[0] ^= 0x01;
+        std::fs::write(&path, &bytes).unwrap();
+        std::fs::remove_file(sig_path_for(&path)).unwrap();
+        assert!(matches!(
+            check_as_file(Version::new(0, 1, 0), None, &path),
+            Err(UpdateError::BadSignatureFile(_))
+        ));
+    }
+
+    #[test]
+    fn a_version_is_planned_by_its_name_with_the_same_rule() {
+        let cur = Version::new(0, 2, 0);
+        let prev = Some(Version::new(0, 1, 0));
+        for v in [
+            Version::new(0, 3, 0),
+            Version::new(0, 2, 0),
+            Version::new(0, 1, 0),
+            Version::new(0, 0, 9),
+        ] {
+            let by_name = plan_version(Product::Companion, cur, prev, Product::Companion, v)
+                .map_err(|e| e.to_string());
+            let by_release = plan(
+                Product::Companion,
+                cur,
+                prev,
+                &release(Product::Companion, v),
+            )
+            .map_err(|e| e.to_string());
+            assert_eq!(by_name, by_release, "{v}");
+        }
+        assert!(matches!(
+            plan_version(
+                Product::Companion,
+                cur,
+                prev,
+                Product::Server,
+                Version::new(9, 0, 0)
+            ),
+            Err(UpdateError::WrongProduct("office server"))
         ));
     }
 
