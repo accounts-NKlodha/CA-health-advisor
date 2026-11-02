@@ -182,6 +182,38 @@ function Get-MemoryBudgetResult([object[]]$PrivateWs, [double]$OnWsMax, [double]
   }
 }
 
+# One measuring window: a sample now, then one every $SampleSeconds until $Seconds have
+# passed. Every sample's memory counts, the opening one included, in time order with $null
+# kept in place (DEC14 coverage), so a reading over the cap in any of them is seen. The
+# opening sample's CPU figure covers the time before the window (a prompt or a step), so it
+# is left out of the CPU mean only. $Sampler, $Wait and $Now are replaced in the self-test.
+function Measure-For([string]$Label, [int]$Seconds,
+  [scriptblock]$Sampler = { param($l) Sample $l },
+  [scriptblock]$Wait = { Start-Sleep -Seconds $SampleSeconds },
+  [scriptblock]$Now = { Get-Date }) {
+  $first = & $Sampler $Label
+  $all = New-Object System.Collections.Generic.List[object]
+  $all.Add($first)
+  $rows = @()
+  $end = (& $Now).AddSeconds($Seconds)
+  while ((& $Now) -lt $end) {
+    & $Wait
+    $u = & $Sampler $Label
+    $all.Add($u)
+    $rows += $u
+  }
+  $pws = New-Object System.Collections.Generic.List[object]
+  foreach ($u in $all) { $pws.Add($u.priv_ws_mb) }
+  $cpuRows = @($rows | Where-Object { $_.cpu_pct -ne '' })
+  $pv = [double[]]@($pws | Where-Object { $null -ne $_ })
+  [pscustomobject]@{
+    ws_mb   = ($all | Measure-Object ws_mb -Maximum).Maximum
+    priv_ws = $pws.ToArray()
+    priv_ws_max = $(if ($pv.Count) { ($pv | Measure-Object -Maximum).Maximum } else { $null })
+    cpu_pct = [math]::Round(($cpuRows | Measure-Object cpu_pct -Average).Average, 2)
+  }
+}
+
 function Invoke-DeskSelfTest {
   $fails = 0
   function Check([string]$Name, [bool]$Ok) { if ($Ok) { Write-Host "[PASS] $Name" } else { Write-Host "[FAIL] $Name"; $script:deskFails++ } }
@@ -223,6 +255,24 @@ function Invoke-DeskSelfTest {
   Check 'budget: an isolated missing reading still passes' ((Get-MemoryBudgetResult $blip.ToArray() 300 120).Outcome -eq 'PASS')
   $none = Get-MemoryBudgetResult @($null, $null, $null) 300 120
   Check 'budget: no reading at all is INCONCLUSIVE and still shows the added working set as informational' ($none.Outcome -eq 'INCONCLUSIVE' -and $none.Note -like '*informational vs DEC14*')
+  # Measure-For's collection path with a stubbed sampler and clock (5 s steps, 180 s): the
+  # opening sample's memory counts like the rest; only its CPU figure is left out.
+  function Reset-FakeSampler([object[]]$Priv) { $script:fakeSeq = $Priv; $script:fakeI = 0; $script:fakeT = [datetime]'2026-01-01' }
+  $sampler = { param($l) $v = $script:fakeSeq[[Math]::Min($script:fakeI, $script:fakeSeq.Count - 1)]; $cpu = $(if ($script:fakeI -eq 0) { 90 } else { 10 }); $script:fakeI++; [pscustomobject]@{ ws_mb = 300; priv_ws_mb = $v; cpu_pct = $cpu } }
+  $wait = { $script:fakeT = $script:fakeT.AddSeconds(5) }
+  $now = { $script:fakeT }
+  Reset-FakeSampler (@(400) + @(1..36 | ForEach-Object { 200 }))
+  $mf = Measure-For 'camera-on-desk' 180 $sampler $wait $now
+  $mr = Get-MemoryBudgetResult $mf.priv_ws $mf.ws_mb 120
+  Check "Measure-For: an opening sample over 350 MB then 200 MB samples fails the budget ($($mr.Outcome), $($mf.priv_ws.Count) samples, highest $($mf.priv_ws_max))" ($mr.Outcome -eq 'FAIL' -and $mf.priv_ws.Count -eq 37 -and $mf.priv_ws[0] -eq 400 -and $mf.priv_ws_max -eq 400)
+  Check "Measure-For: the opening sample is left out of the CPU mean only ($($mf.cpu_pct))" ($mf.cpu_pct -eq 10)
+  Reset-FakeSampler (@($null) + @(1..36 | ForEach-Object { 200 }))
+  $mf = Measure-For 'camera-on-desk' 180 $sampler $wait $now
+  $mr = Get-MemoryBudgetResult $mf.priv_ws $mf.ws_mb 120
+  Check "Measure-For: an opening sample without a reading is kept in place and counted in coverage ($($mr.Outcome))" ($mf.priv_ws.Count -eq 37 -and $null -eq $mf.priv_ws[0] -and $mr.Note -like '*complete private readings in 36 of 37 samples*' -and $mr.Outcome -eq 'PASS')
+  Reset-FakeSampler (@($null, $null, $null) + @(1..34 | ForEach-Object { 200 }))
+  $mf = Measure-For 'camera-on-desk' 180 $sampler $wait $now
+  Check 'Measure-For: three missing readings in a row starting with the opening sample are INCONCLUSIVE' ((Get-MemoryBudgetResult $mf.priv_ws $mf.ws_mb 120).Outcome -eq 'INCONCLUSIVE')
   # A report in a folder that does not exist yet: the folder is made, and files beside the
   # report can be written.
   $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("hy-camera-selftest-" + [guid]::NewGuid().ToString('N'))
@@ -320,27 +370,6 @@ function Sample([string]$Label) {
   $script:prev = @{ t = $now; u = $u }
   "{0},{1},{2},{3},{4},{5},{6}" -f $now.ToString('HH:mm:ss'), $Label, $u.processes, $u.ws_mb, $u.priv_ws_mb, $u.priv_mb, $cpu | Add-Content $csv
   $u | Add-Member -NotePropertyName cpu_pct -NotePropertyValue $cpu -PassThru
-}
-function Measure-For([string]$Label, [int]$Seconds) {
-  $null = Sample $Label
-  $rows = @()
-  # Every sample's private working set in time order, $null kept in place (DEC14 coverage).
-  $pws = New-Object System.Collections.Generic.List[object]
-  $end = (Get-Date).AddSeconds($Seconds)
-  while ((Get-Date) -lt $end) {
-    Start-Sleep -Seconds $SampleSeconds
-    $u = Sample $Label
-    $rows += $u
-    $pws.Add($u.priv_ws_mb)
-  }
-  $rows = @($rows | Where-Object { $_.cpu_pct -ne '' })
-  $pv = [double[]]@($pws | Where-Object { $null -ne $_ })
-  [pscustomobject]@{
-    ws_mb   = ($rows | Measure-Object ws_mb -Maximum).Maximum
-    priv_ws = $pws.ToArray()
-    priv_ws_max = $(if ($pv.Count) { ($pv | Measure-Object -Maximum).Maximum } else { $null })
-    cpu_pct = [math]::Round(($rows | Measure-Object cpu_pct -Average).Average, 2)
-  }
 }
 
 Add-Line "HealthierYou camera checks, phase $Phase, $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
