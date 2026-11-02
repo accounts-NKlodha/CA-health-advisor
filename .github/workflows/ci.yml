@@ -33,6 +33,9 @@
 # PowerShell 5.1 (Windows), the versions office PCs have.
 # Office test kit (scripts/windows/kit): its self-test runs on both jobs, and the Windows
 # job packs the tested installers with the kit as the artifact office-test-kit.
+# Tracked work W3 and W4 (docs/V1_Acceptance.md section 7) add two Linux jobs: the supply
+# chain (cargo-deny, npm audit, licences, SBOM artifact; docs/Licence_Register.md) and the
+# T-S25 fuzz targets (fuzz/, 60 seconds each on a pinned nightly used by that job only).
 name: ci
 
 on:
@@ -120,6 +123,131 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  # W3 (architecture 9, V1-5 contract C18): cargo-deny over deny.toml (advisories,
+  # licences, bans, sources), npm audit of the companion UI (high and critical fail), the
+  # UI's licences against the register, and CycloneDX SBOMs of the Rust workspace
+  # (Windows target, as shipped) and of the UI's shipped packages, kept as the artifact
+  # sbom. The tool versions are pinned; docs/Licence_Register.md says what is allowed.
+  supply-chain:
+    name: Supply chain - cargo-deny, npm audit, licences, SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_DENY_VERSION: 0.20.2
+      CARGO_CYCLONEDX_VERSION: 0.5.9
+      CYCLONEDX_NPM_VERSION: 6.0.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+
+      - name: Install cargo-deny and cargo-cyclonedx (pinned)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-cyclonedx@${{ env.CARGO_CYCLONEDX_VERSION }}
+
+      - name: cargo-deny (advisories, licences, bans, sources)
+        run: |
+          cargo deny --version
+          cargo deny --locked check
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/companion/ui/package-lock.json
+
+      - name: npm audit of the companion UI (high and critical fail)
+        working-directory: apps/companion/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm audit --audit-level=high
+
+      - name: SBOMs (CycloneDX 1.5) and the UI's licences
+        run: |
+          out="$RUNNER_TEMP/sbom"
+          mkdir -p "$out"
+          cargo cyclonedx --format json --spec-version 1.5 --target x86_64-pc-windows-msvc --target-in-filename --license-accept-named UNLICENSED
+          for f in $(git ls-files --others --exclude-standard -- '*.cdx.json'); do mv "$f" "$out/"; done
+          ls "$out"/*.cdx.json
+          cd apps/companion/ui
+          # The shipped UI (runtime packages) as the artifact; the whole tree, build tools
+          # included, for the licence check.
+          npx --yes "@cyclonedx/cyclonedx-npm@$CYCLONEDX_NPM_VERSION" --omit dev --spec-version 1.5 --output-format JSON --output-file "$out/hy-companion-ui.cdx.json"
+          npx --yes "@cyclonedx/cyclonedx-npm@$CYCLONEDX_NPM_VERSION" --spec-version 1.5 --output-format JSON --output-file "$RUNNER_TEMP/ui-all.cdx.json"
+          node ../../../scripts/ci/check-sbom-licences.mjs "$RUNNER_TEMP/ui-all.cdx.json" Apache-2.0 MIT ISC BSD-3-Clause
+
+      - name: Keep the SBOMs
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          retention-days: 90
+          if-no-files-found: error
+          path: ${{ runner.temp }}/sbom/
+
+  # W4, T-S25 (V1-5 contract 14.2): cargo-fuzz targets in fuzz/ (slip parser, control-entry
+  # decoder, chain verifier, head and receipt decoder, state and upload JSON), each run for
+  # 60 seconds from the seed corpora. libFuzzer needs a nightly compiler: this job alone
+  # uses one, pinned by date; every other job builds with the pinned stable toolchain. A
+  # crash fails the job and its input is kept as the artifact fuzz-crashes.
+  fuzz:
+    name: Fuzz (T-S25) - 60 s per target
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      FUZZ_TOOLCHAIN: nightly-2026-10-15
+      CARGO_FUZZ_VERSION: 0.13.2
+      FUZZ_SECONDS: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned nightly toolchain (this job only)
+        run: |
+          rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+          rustc "+$FUZZ_TOOLCHAIN" --version
+
+      - name: Install cargo-fuzz (pinned)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz@${{ env.CARGO_FUZZ_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - name: Format and clippy of the fuzz crate (pinned stable, lockfile checked)
+        run: |
+          cargo fmt --check --manifest-path fuzz/Cargo.toml
+          cargo clippy --manifest-path fuzz/Cargo.toml --locked --all-targets -- -D warnings
+
+      - name: Build the fuzz targets
+        run: cargo "+$FUZZ_TOOLCHAIN" fuzz build --fuzz-dir fuzz
+
+      - name: Run each target from its seeds
+        run: |
+          failed=""
+          for t in $(cargo "+$FUZZ_TOOLCHAIN" fuzz list --fuzz-dir fuzz); do
+            echo "::group::$t"
+            if ! cargo "+$FUZZ_TOOLCHAIN" fuzz run --fuzz-dir fuzz "$t" -- -max_total_time="$FUZZ_SECONDS" -rss_limit_mb=2048 -timeout=10; then
+              failed="$failed $t"
+              echo "::error title=Fuzz (T-S25)::$t found a crash; the input is in the artifact fuzz-crashes"
+            fi
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then echo "failed:$failed"; exit 1; fi
+
+      - name: Keep crash inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          retention-days: 30
+          if-no-files-found: ignore
+          path: fuzz/artifacts/
 
   windows:
     name: Windows - clippy, tests, companion build
