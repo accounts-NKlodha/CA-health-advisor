@@ -465,9 +465,10 @@ fn t_s8_another_users_ids_anywhere_in_a_request_change_nothing() {
                     prop_assert_eq!(&devs, &x_before.1);
                     prop_assert!(!resp.contains(&y_ids[0]) && !resp.contains(&y_ids[1]));
                 } else if path == "/v1/update/manifest" {
-                    // The update manifest arrives in V1-6.
-                    prop_assert_eq!(status, 404);
-                    prop_assert!(resp.contains("protocol_unsupported"));
+                    // The manifest reads nothing from the request: no update is offered
+                    // here, and nothing of Y is in the answer.
+                    prop_assert_eq!(status, 200);
+                    prop_assert_eq!(resp.as_str(), r#"{"offer":null}"#);
                 } else {
                     // Strict schemas: a request naming another user's ids is refused as a
                     // whole, before anything is read or written, and says nothing of Y.
