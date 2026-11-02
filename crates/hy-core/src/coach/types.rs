@@ -840,6 +840,10 @@ pub struct CoachView {
     /// ([`Self::guide`]) and can also be answered with [`Input::RoutineFinished`].
     #[serde(default)]
     pub active_routine: Option<ActiveRoutine>,
+    /// A combined 5-minute break is running (not on its last screen, DEC15). The Pomodoro
+    /// cannot be resumed meanwhile: one exercise at a time.
+    #[serde(default)]
+    pub in_break: bool,
     /// The movement guide, open or waiting behind the pet. It exists exactly while a
     /// movement routine is active, and briefly after it to show the result.
     pub guide: Option<GuideView>,

@@ -25,6 +25,14 @@
 //!   for a finished break). None done (an immediate Stop, or every step skipped) is
 //!   "none": the next break comes a full interval later and the movement timer is not
 //!   restarted (wireframe 10.1).
+//! - **Water logged elsewhere** (the menu's quick log or the water panel) never ends the
+//!   break: on the water step it completes that step (one entry, the shell's) and the
+//!   break goes on to the eyes; on a later step it is recorded and the break goes on. No
+//!   confirmation card covers the break. The water panel or a phone note the user opens
+//!   shows over the break, whose step waits until that card closes (Cancel, close, its own
+//!   time); closing it returns to the break.
+//! - **One exercise at a time:** a paused Pomodoro cannot be resumed (and no Pomodoro
+//!   round or break can begin) while a break runs; starting a Pomodoro ends the break.
 //! - **Ending early:** Stop, the close button, any hold that starts (a lock, sleep, pause,
 //!   focus, presentation, meeting, the end of work hours), the pet being hidden, a
 //!   Pomodoro started, the app closing, or 30 minutes in all end it as stopped, with the
@@ -79,6 +87,10 @@ struct Session {
     /// Engine time the last screen appeared, and the result it shows.
     done_at: Option<u64>,
     outcome: RoutineOutcome,
+    /// Engine time a card the user opened over the break (the water panel, a phone
+    /// note) appeared: the step on screen waits until it closes.
+    #[serde(default)]
+    waiting_since: Option<u64>,
 }
 
 const fn bit(step: BreakStep) -> u8 {
@@ -304,6 +316,7 @@ impl Engine {
             opened_under: self.holds_above_pomodoro(ctx),
             done_at: None,
             outcome: RoutineOutcome::None,
+            waiting_since: None,
         };
         self.s.breaks.session = Some(session);
         // One bubble: an open Pomodoro card closes (its phase stays for the menu).
@@ -326,6 +339,8 @@ impl Engine {
         let now = self.s.now;
         b.step = Some(step);
         b.step_started = now;
+        // Behind a card the user opened, the new step waits too.
+        b.waiting_since = self.s.note.is_some().then_some(now);
         b.step_ms = ms(match step {
             BreakStep::Water => WATER_HOLD,
             BreakStep::Eyes => EYES_HOLD,
@@ -404,6 +419,43 @@ impl Engine {
             BreakAction::Stop | BreakAction::Close => {}
         }
         Applied
+    }
+
+    /// A card the user opened over a running break (the water panel, a phone note): the
+    /// step on screen waits while it is open and goes on, with the time it had left, once
+    /// it closes.
+    pub(super) fn sync_break_wait(&mut self) {
+        let now = self.s.now;
+        let note = self.s.note.is_some();
+        let Some(b) = self.s.breaks.session.as_mut().filter(|b| b.running()) else {
+            return;
+        };
+        match (note, b.waiting_since) {
+            (true, None) => b.waiting_since = Some(now),
+            (false, Some(w)) => {
+                b.step_started = b.step_started.saturating_add(now.saturating_sub(w));
+                b.waiting_since = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Water logged outside the break's own button while it runs (the menu's quick log,
+    /// the water panel; the shell has recorded the entry). On the water step it completes
+    /// that step and the break goes on to the next; on a later step it is just recorded.
+    /// The break is never stopped by it, and no confirmation card covers it.
+    pub(super) fn break_water_logged(&mut self, ctx: &Context, ml: u32, out: &mut Out) {
+        let Some(mut b) = self.s.breaks.session.filter(Session::running) else {
+            return;
+        };
+        out.significant = true;
+        if b.step != Some(BreakStep::Water) {
+            return;
+        }
+        b.water_ml = Some(b.water_ml.unwrap_or(0).saturating_add(ml));
+        b.done |= bit(BreakStep::Water);
+        self.s.breaks.session = Some(b);
+        self.break_step_answered(ctx, true, out);
     }
 
     /// Record the break's result and apply it to the timers and its reminder. A stopped
@@ -514,6 +566,7 @@ impl Engine {
     /// A timed step moves on when its time on screen is up (counted as done); the break
     /// ends after 30 minutes in all; the last screen closes after a minute.
     pub(super) fn run_break_timers(&mut self, ctx: &Context, out: &mut Out) {
+        self.sync_break_wait();
         let Some(b) = self.s.breaks.session else {
             return;
         };
@@ -527,7 +580,10 @@ impl Engine {
         }
         if now.saturating_sub(b.started) >= ms(ROUTINE_TIMEOUT) {
             self.interrupt_break(ctx, out);
-        } else if b.step_ms > 0 && now.saturating_sub(b.step_started) >= b.step_ms {
+        } else if b.waiting_since.is_none()
+            && b.step_ms > 0
+            && now.saturating_sub(b.step_started) >= b.step_ms
+        {
             self.break_step_answered(ctx, true, out);
         }
     }
@@ -547,9 +603,11 @@ impl Engine {
                 index: (b.steps & (bit(step) - 1)).count_ones(),
                 total: b.steps.count_ones(),
                 length: dur(b.step_ms),
-                left: dur(b
-                    .step_ms
-                    .saturating_sub(self.s.now.saturating_sub(b.step_started))),
+                left: dur(b.step_ms.saturating_sub(
+                    b.waiting_since
+                        .unwrap_or(self.s.now)
+                        .saturating_sub(b.step_started),
+                )),
                 water_ml: b.water_ml,
             },
         };
@@ -595,6 +653,7 @@ mod tests {
             opened_under: HoldSet::EMPTY,
             done_at: None,
             outcome: RoutineOutcome::None,
+            waiting_since: None,
         };
         assert_eq!(s.next_step(None), Some(BreakStep::Water));
         assert_eq!(

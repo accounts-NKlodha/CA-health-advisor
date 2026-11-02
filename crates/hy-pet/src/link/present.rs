@@ -1578,7 +1578,11 @@ pub fn menu_actions(view: &CoachView) -> Vec<MenuAction> {
     match view.pomodoro {
         Some(p) => {
             if p.paused.is_some() {
-                m.push(menu(a::POMODORO_RESUME, "Resume Pomodoro", false));
+                // Not beside a combined break: one exercise at a time (the engine
+                // refuses it too).
+                if !view.in_break {
+                    m.push(menu(a::POMODORO_RESUME, "Resume Pomodoro", false));
+                }
             } else if matches!(p.phase, PomodoroPhase::Work | PomodoroPhase::Break) {
                 m.push(menu(a::POMODORO_PAUSE, "Pause Pomodoro", false));
             }

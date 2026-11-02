@@ -88,7 +88,7 @@ pub(super) struct Guide {
     opened_under: HoldSet,
     /// The movement step of a combined break (DEC15).
     #[serde(default)]
-    brk: bool,
+    pub(super) brk: bool,
 }
 
 impl Guide {

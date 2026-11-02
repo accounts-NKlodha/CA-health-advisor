@@ -12,7 +12,7 @@ use std::time::Duration;
 use chrono::{DateTime, NaiveDate, Utc};
 use hy_core::clock::ManualClock;
 use hy_core::coach::break_routine::{BREATHE_MAX, BREATHE_MIN, EYES_HOLD, WATER_HOLD};
-use hy_core::coach::config::{CONFIG_KEY, SNOOZE};
+use hy_core::coach::config::{CALM_GAP, CONFIG_KEY, SNOOZE};
 use hy_core::coach::*;
 use hy_core::schema::{
     Activity, BreakStep, EventPayload, NewEvent, ReminderOutcome, RoutineOutcome, RoutineVariant,
@@ -723,4 +723,216 @@ fn settings_saved_before_the_combined_break_get_it_on_upgrade() {
             (Activity::Movement, Some(ReminderOutcome::Skipped))
         ]
     );
+}
+
+// ------------------------------------------- review follow-ups: exclusivity, water, style
+
+/// Water the shell has recorded (the menu's quick log or the water panel), told to the
+/// engine as the shell does.
+fn shell_logged(h: &mut H, ml: u32) -> StepOutput {
+    h.water.logged_ml += ml;
+    h.input(Input::Water(WaterInput::Logged {
+        entry: uuid::Uuid::from_u128(u128::from(ml)),
+        ml,
+    }))
+}
+
+fn engine_water_entries(h: &H) -> usize {
+    h.events
+        .iter()
+        .filter(|e| matches!(e.payload, EventPayload::WaterLogged { .. }))
+        .count()
+}
+
+#[test]
+fn a_paused_pomodoro_cannot_resume_beside_a_running_break() {
+    let mut h = H::new();
+    let out = h.input(Input::StartPomodoro {
+        preset: PomodoroPreset::Classic,
+        replace_focus: false,
+        resume_coaching: false,
+    });
+    assert_eq!(out.outcome, InputOutcome::Applied);
+    h.work(mins(1));
+    assert_eq!(h.input(Input::PausePomodoro).outcome, InputOutcome::Applied);
+    // Still at the PC: the break reminder comes on its own timer.
+    h.work_until(mins(31), |v| v.bubble.is_some());
+    h.respond(Response::Start);
+    assert!(h.view().in_break);
+    let left = h.view().pomodoro.unwrap().left;
+    // Resume is refused while the break runs: the work timer stays put.
+    let out = h.input(Input::ResumePomodoro);
+    assert_eq!(out.outcome, InputOutcome::Ignored("a break is running"));
+    h.work(secs(10));
+    let p = h.view().pomodoro.unwrap();
+    assert!(p.paused.is_some());
+    assert_eq!(p.left, left);
+    assert_eq!(h.break_step().map(|s| s.0), Some(BreakStep::Eyes));
+    // No other Pomodoro transition starts a timer beside it either.
+    for i in [
+        Input::NextPomodoroRound,
+        Input::StartPomodoroBreak,
+        Input::SkipPomodoroBreak,
+    ] {
+        assert_eq!(
+            h.input(i).outcome,
+            InputOutcome::Ignored("a break is running")
+        );
+    }
+    // Once the break has ended, the Pomodoro resumes as usual.
+    h.act(BreakAction::Stop);
+    assert!(!h.view().in_break);
+    assert_eq!(h.sessions().len(), 1);
+    assert_eq!(
+        h.input(Input::ResumePomodoro).outcome,
+        InputOutcome::Applied
+    );
+    h.work(secs(10));
+    assert!(h.view().pomodoro.unwrap().left < left);
+    assert_eq!(h.sessions().len(), 1, "no second break result");
+}
+
+#[test]
+fn water_logged_from_the_menu_completes_the_water_step_and_the_break_goes_on() {
+    let mut h = H::new();
+    h.work_until(mins(31), |v| v.bubble.is_some());
+    h.respond(Response::Start);
+    assert_eq!(h.break_step().map(|s| s.0), Some(BreakStep::Water));
+    // A preset or custom amount from the menu: the shell records it; the break takes it.
+    let out = shell_logged(&mut h, 300);
+    assert_eq!(out.outcome, InputOutcome::Applied);
+    assert_eq!(h.break_step().map(|s| s.0), Some(BreakStep::Eyes));
+    assert_eq!(
+        engine_water_entries(&h),
+        0,
+        "the shell's entry is the only one"
+    );
+    assert!(h.sessions().is_empty(), "the break was not stopped");
+    // On a later step it is just recorded; the break goes on, with no card over it.
+    shell_logged(&mut h, 150);
+    assert_eq!(h.break_step().map(|s| s.0), Some(BreakStep::Eyes));
+    assert!(h.sessions().is_empty());
+    h.act(BreakAction::Next);
+    assert!(h.in_break_guide());
+    shell_logged(&mut h, 200);
+    assert!(h.in_break_guide());
+    h.guide(GuideAction::Later);
+    assert_eq!(h.break_step().map(|s| s.0), Some(BreakStep::Breathe));
+    h.act(BreakAction::Next);
+    let s = h.sessions();
+    assert_eq!(s.len(), 1);
+    assert_eq!(
+        s[0].1,
+        [BreakStep::Water, BreakStep::Eyes, BreakStep::Breathe]
+    );
+    assert!(!s[0].3);
+    assert_eq!(engine_water_entries(&h), 0);
+}
+
+#[test]
+fn the_water_panel_opens_over_a_break_which_waits_and_comes_back() {
+    let mut h = H::new();
+    h.work_until(mins(31), |v| v.bubble.is_some());
+    h.respond(Response::Start);
+    h.work(secs(5));
+    assert_eq!(
+        h.input(Input::Water(WaterInput::OpenPanel)).outcome,
+        InputOutcome::Applied
+    );
+    assert!(matches!(h.view().bubble, Some(Bubble::WaterPanel { .. })));
+    assert!(h.view().in_break);
+    // The water step waits behind the panel.
+    h.work(secs(30));
+    assert!(matches!(h.view().bubble, Some(Bubble::WaterPanel { .. })));
+    // Cancel (the close button) returns to the break where it was.
+    assert_eq!(h.input(Input::CloseBubble).outcome, InputOutcome::Applied);
+    let left = match h.view().bubble {
+        Some(Bubble::Break(BreakView {
+            stage:
+                BreakStage::Step {
+                    step: BreakStep::Water,
+                    left,
+                    ..
+                },
+        })) => left,
+        b => panic!("the break's water step, not {b:?}"),
+    };
+    assert_eq!(left, WATER_HOLD - secs(5));
+    assert!(h.sessions().is_empty(), "cancelling the panel is not Stop");
+    // The panel's own time closing it returns to the break too.
+    h.input(Input::Water(WaterInput::OpenPanel));
+    h.work(hy_core::coach::config::WATER_PANEL_SHOWN_FOR);
+    assert_eq!(h.break_step().map(|s| s.0), Some(BreakStep::Water));
+    assert!(h.sessions().is_empty());
+    // A different amount logged in the panel completes the water step: one entry, the
+    // panel closes and the break goes on to the eyes.
+    h.input(Input::Water(WaterInput::OpenPanel));
+    shell_logged(&mut h, 400);
+    assert_eq!(h.break_step().map(|s| s.0), Some(BreakStep::Eyes));
+    assert_eq!(engine_water_entries(&h), 0);
+    // On the eye step the panel opens and closes again without ending the break.
+    h.input(Input::Water(WaterInput::OpenPanel));
+    h.input(Input::CloseBubble);
+    assert_eq!(h.break_step().map(|s| s.0), Some(BreakStep::Eyes));
+    h.act(BreakAction::Stop);
+    let s = h.sessions();
+    assert_eq!(s.len(), 1, "exactly one break result");
+    assert_eq!(s[0].1, [BreakStep::Water]);
+    assert!(s[0].3);
+}
+
+#[test]
+fn the_break_log_button_and_a_menu_log_record_one_entry_each() {
+    let mut h = H::new();
+    h.work_until(mins(31), |v| v.bubble.is_some());
+    h.respond(Response::Start);
+    h.act(BreakAction::LogWater);
+    assert_eq!(engine_water_entries(&h), 1);
+    // A second drink from the menu on the same step: the shell's entry, the step done.
+    shell_logged(&mut h, 250);
+    assert_eq!(engine_water_entries(&h), 1);
+    assert_eq!(h.break_step().map(|s| s.0), Some(BreakStep::Eyes));
+    assert!(h.sessions().is_empty());
+}
+
+/// Switching explicitly to separate reminders keeps the movement and eye-rest timers
+/// accrued while the combined break was on (DEC15): long-overdue reminders come one at a
+/// time, with the calm gap between them, never as a burst.
+#[test]
+fn switching_to_separate_reminders_brings_no_catch_up_burst() {
+    let mut h = H::new();
+    // Two hours with every break skipped: movement and eye rest are long overdue.
+    for _ in 0..4 {
+        h.work_until(mins(31), |v| v.bubble.is_some());
+        h.respond(Response::Skip);
+    }
+    h.work(mins(6));
+    assert!(h.accum(Activity::Movement) >= mins(120));
+    let before = h.offers().len();
+    h.config.reminder_style = ReminderStyle::Separate;
+    h.input(Input::Refresh);
+    h.work(secs(5));
+    // One reminder at once.
+    assert_eq!(h.offers().len(), before + 1);
+    let first = match h.view().bubble {
+        Some(Bubble::Reminder {
+            offer, activity, ..
+        }) => (offer, activity),
+        b => panic!("a separate reminder, not {b:?}"),
+    };
+    h.input(Input::Respond {
+        offer: first.0,
+        response: Response::Done,
+    });
+    // Nothing else during the calm gap.
+    h.work(CALM_GAP - secs(5));
+    assert_eq!(h.offers().len(), before + 1);
+    assert!(h.view().bubble.is_none(), "{:?}", h.view().bubble);
+    // Then at most the other overdue reminder, again one.
+    h.work(secs(10));
+    assert_eq!(h.offers().len(), before + 2);
+    assert!(matches!(
+        h.view().bubble,
+        Some(Bubble::Reminder { activity, .. }) if activity != first.1
+    ));
 }

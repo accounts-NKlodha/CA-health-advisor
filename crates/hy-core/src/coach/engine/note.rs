@@ -19,6 +19,9 @@
 //! - It closes by itself [`NOTE_SHOWN_FOR`] after the last answer on it (the panel after
 //!   [`WATER_PANEL_SHOWN_FOR`]). Its close counts as an answer: the 5-minute calm gap
 //!   follows before a reminder (D). A restart closes it.
+//! - Over a running combined break (DEC15) the card opens without ending it: the break
+//!   waits behind and comes back when the card closes. Water logged then goes to the
+//!   break (see `breaks.rs`) instead of opening the quick log's confirmation.
 //! - "Already did it" on a water reminder opens the panel (wireframe B2), where the user
 //!   can log what they drank.
 
@@ -87,12 +90,18 @@ impl Engine {
         if !self.visible(ctx) {
             return false;
         }
-        self.close_open_card(ctx, out);
+        if self.break_running() {
+            // Over a running break: it waits behind the card instead of stopping (DEC15).
+            self.clear_note(out);
+        } else {
+            self.close_open_card(ctx, out);
+        }
         self.s.note = Some(NoteCard {
             note,
             since: self.s.now,
             opened_under: self.holds_above_pomodoro(ctx),
         });
+        self.sync_break_wait();
         out.significant = true;
         true
     }
@@ -102,6 +111,7 @@ impl Engine {
         if self.s.note.take().is_none() {
             return false;
         }
+        self.sync_break_wait();
         self.s.gap_until = self.s.gap_until.max(self.s.now + ms(CALM_GAP));
         out.significant = true;
         true
@@ -147,7 +157,14 @@ impl Engine {
                     return InputOutcome::Invalid("water amount must be 1 to 2000 ml");
                 }
                 Self::celebrate_goal(ctx, ml, out);
-                if panel_open {
+                if self.break_running() {
+                    // The break takes the entry and goes on (it is never a Stop): the
+                    // panel closes back to it, and no confirmation card covers it.
+                    if panel_open {
+                        self.clear_note(out);
+                    }
+                    self.break_water_logged(ctx, ml, out);
+                } else if panel_open {
                     // Logged in the panel: it stays and lists the entry.
                     self.answered_note();
                 } else {
@@ -279,7 +296,8 @@ impl Engine {
             .s
             .offer
             .is_some_and(|o| matches!(o.phase, OfferPhase::Showing { .. }))
-            || self.s.guide.is_some_and(|g| g.open)
+            // The break's own movement guide waits behind a card opened over the break.
+            || self.s.guide.is_some_and(|g| g.open && !g.brk)
             || self.s.prompt.is_some();
         let holds = self.holds_above_pomodoro(ctx);
         let expired = self.s.now.saturating_sub(card.since) >= ms(card.shown_for());

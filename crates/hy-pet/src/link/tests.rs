@@ -69,6 +69,7 @@ fn view(pet: PetMode) -> CoachView {
         focus_left: None,
         meeting: false,
         active_routine: None,
+        in_break: false,
         guide: None,
         recovery: RecoveryView {
             today: oct(20),
@@ -3506,4 +3507,128 @@ fn break_cards_route_only_their_own_actions() {
         ..Bubble::default()
     };
     assert!(b.validate().is_err());
+}
+
+fn water_entries(h: &H) -> Vec<u32> {
+    h.events()
+        .into_iter()
+        .filter_map(|p| match p {
+            EventPayload::WaterLogged { amount_ml } => Some(amount_ml),
+            _ => None,
+        })
+        .collect()
+}
+
+fn break_results(h: &H) -> usize {
+    h.events()
+        .iter()
+        .filter(|p| matches!(p, EventPayload::BreakSession { .. }))
+        .count()
+}
+
+/// Paused Pomodoro, then a combined break started, then "Resume Pomodoro": the menu no
+/// longer offers it, and the routed command is refused, so only the break's timers run.
+#[test]
+fn a_paused_pomodoro_cannot_resume_beside_a_combined_break_from_the_menu() {
+    let mut h = H::with_store(combined);
+    h.menu(&format!("{}25", action::POMODORO_PREFIX));
+    h.work(60);
+    h.menu(action::POMODORO_PAUSE);
+    assert!(
+        h.shell
+            .menu_ids()
+            .contains(&action::POMODORO_RESUME.to_owned())
+    );
+    h.work_until_reminder(31);
+    h.press(action::START);
+    let menu = h.shell.menu_ids();
+    assert!(
+        !menu.contains(&action::POMODORO_RESUME.to_owned())
+            && !menu.contains(&action::POMODORO_PAUSE.to_owned()),
+        "{menu:?}"
+    );
+    assert!(menu.contains(&action::POMODORO_END.to_owned()));
+    let left = h.link.view().pomodoro.unwrap().left;
+    // The menu item, were it still clicked (a stale menu), changes nothing.
+    h.menu(action::POMODORO_RESUME);
+    let out = h
+        .link
+        .command(menu_command(action::POMODORO_RESUME).unwrap())
+        .unwrap();
+    assert_eq!(
+        out.outcome,
+        hy_core::coach::InputOutcome::Ignored("a break is running")
+    );
+    h.work(10);
+    let p = h.link.view().pomodoro.unwrap();
+    assert!(p.paused.is_some());
+    assert_eq!(p.left, left);
+    assert_eq!(
+        h.shell.open_bubble().unwrap().title,
+        "Step 2 of 4: Rest your eyes"
+    );
+    // Once the break has stopped, Resume is back and works.
+    h.press(action::BREAK_STOP);
+    assert_eq!(break_results(&h), 1);
+    assert!(
+        h.shell
+            .menu_ids()
+            .contains(&action::POMODORO_RESUME.to_owned())
+    );
+    h.menu(action::POMODORO_RESUME);
+    h.work(10);
+    assert!(h.link.view().pomodoro.unwrap().left < left);
+}
+
+/// The menu's water buttons and the water panel never stop a running break: a preset
+/// from the menu completes the water step (one entry), the panel opens over the break and
+/// Cancel returns to it, and its "Other amount" on a later step is recorded while the
+/// break goes on. One break result at the end.
+#[test]
+fn water_from_the_menu_or_panel_keeps_the_combined_break_running() {
+    let mut h = H::with_store(combined);
+    h.work_until_reminder(31);
+    h.press(action::START);
+    assert_eq!(
+        h.shell.open_bubble().unwrap().title,
+        "Step 1 of 4: Drink some water"
+    );
+    // A preset from the menu.
+    h.menu(&format!("{}500", action::WATER_PREFIX));
+    assert_eq!(water_entries(&h), [500]);
+    assert_eq!(
+        h.shell.open_bubble().unwrap().title,
+        "Step 2 of 4: Rest your eyes"
+    );
+    assert_eq!(break_results(&h), 0);
+    // The panel opens over the break; Cancel (its close button) returns to it.
+    h.menu(action::WATER_PANEL);
+    assert_eq!(h.shell.open_bubble().unwrap().title, "Water today");
+    h.close_button();
+    assert_eq!(
+        h.shell.open_bubble().unwrap().title,
+        "Step 2 of 4: Rest your eyes"
+    );
+    assert_eq!(break_results(&h), 0);
+    // A custom amount in the panel on the eye step: recorded, back to the break.
+    h.menu(action::WATER_PANEL);
+    h.press(action::OTHER_MORE);
+    h.press(action::OTHER_ADD);
+    assert_eq!(water_entries(&h), [500, 300]);
+    assert_eq!(
+        h.shell.open_bubble().unwrap().title,
+        "Step 2 of 4: Rest your eyes"
+    );
+    assert_eq!(break_results(&h), 0);
+    h.press(action::BREAK_STOP);
+    assert_eq!(break_results(&h), 1);
+    assert_eq!(water_entries(&h), [500, 300], "exactly the two entries");
+    assert!(h.events().iter().any(|p| matches!(
+        p,
+        EventPayload::BreakSession {
+            outcome: RoutineOutcome::Partial,
+            stopped: true,
+            ..
+        }
+    )));
 }

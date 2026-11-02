@@ -1644,6 +1644,11 @@ impl Engine {
                 if self.s.pause.is_some() {
                     return Ignored("coaching is paused");
                 }
+                // One exercise at a time: the Pomodoro's work timer does not run beside
+                // a combined break (its menu item is hidden meanwhile).
+                if self.break_running() {
+                    return Ignored("a break is running");
+                }
                 match self.s.pomodoro.as_mut() {
                     Some(p) if p.paused.is_some() => {
                         p.paused = None;
@@ -1661,6 +1666,9 @@ impl Engine {
                 Applied
             }
             Input::StartPomodoroBreak => {
+                if self.break_running() {
+                    return Ignored("a break is running");
+                }
                 let Some(p) = self.s.pomodoro.as_mut() else {
                     return Ignored("no Pomodoro");
                 };
@@ -1676,6 +1684,9 @@ impl Engine {
                 Applied
             }
             Input::SkipPomodoroBreak => {
+                if self.break_running() {
+                    return Ignored("a break is running");
+                }
                 let auto = ctx.config.pomodoro_auto_start;
                 let holds = self.holds_above_pomodoro(ctx);
                 // The movement guide (open or waiting) or an open card keeps the bubble.
@@ -1706,6 +1717,9 @@ impl Engine {
                 Applied
             }
             Input::NextPomodoroRound => {
+                if self.break_running() {
+                    return Ignored("a break is running");
+                }
                 let Some(p) = self.s.pomodoro.as_mut() else {
                     return Ignored("no Pomodoro");
                 };
@@ -1752,6 +1766,9 @@ impl Engine {
             && matches!(o.phase, OfferPhase::Showing { .. })
         {
             self.collapse(out);
+            true
+        } else if self.break_running() && self.clear_note(out) {
+            // A card opened over a running break closes; the break goes on.
             true
         } else if self.close_break_card(ctx, out)
             || self.close_guide_card(out)
@@ -2167,6 +2184,12 @@ impl Engine {
                 reason,
             });
         }
+        // A card the user opened over a running break shows; the break waits behind it.
+        if self.break_running()
+            && let Some(n) = self.s.note
+        {
+            return Some(n.bubble());
+        }
         if let Some(g) = self.guide_view(ctx)
             && g.open
         {
@@ -2238,6 +2261,7 @@ impl Engine {
                 .map(|t| dur(t.saturating_sub(self.s.now))),
             meeting: self.s.meeting.is_some(),
             active_routine: self.active_routine(),
+            in_break: self.break_running(),
             guide: self.guide_view(ctx),
             recovery: self.recovery_view(ctx),
             water_entries: ctx.water_entries.clone(),

@@ -570,7 +570,8 @@ mod suggestions {
     }
 
     /// Two changes sent from the same page before either answered (each built from the
-    /// same loaded copy) both stay; so do Light reminders applied from the review.
+    /// same loaded copy) both stay; so does the longer break interval applied from the
+    /// review.
     #[test]
     fn rapid_successive_changes_from_one_page_all_stay() {
         let mut env = Env::new(ist(10, 12, 9, 0), ist(10, 24, 17, 30));
@@ -599,7 +600,7 @@ mod suggestions {
             env.store.change_coach_config(change).unwrap();
         }
         let c = env.store.coach_config().unwrap();
-        assert_eq!(c.intensity, Intensity::Light);
+        assert_eq!(c.break_minutes, 45);
         assert!(!c.categories.eye_rest && !c.categories.water && c.categories.movement);
         assert!(c.pomodoro_auto_start);
         assert_eq!(c.long_day_check_in.hours, 10);
@@ -658,9 +659,7 @@ mod suggestions {
         );
     }
 
-    #[test]
-    fn many_set_aside_breaks_suggest_one_step_lighter() {
-        let mut env = Env::new(ist(10, 12, 9, 0), ist(10, 24, 17, 30));
+    fn set_aside_week(env: &mut Env) {
         for d in 19..=24 {
             env.track(date(10, d));
             env.reminder(
@@ -674,6 +673,56 @@ mod suggestions {
                 ReminderOutcome::NoResponse,
             );
         }
+    }
+
+    /// With the combined break (the default, DEC15), intensity changes nothing, so
+    /// "lighter" is the next longer break interval, and the line says so; Undo restores it.
+    #[test]
+    fn many_set_aside_combined_breaks_suggest_the_next_longer_interval() {
+        let mut env = Env::new(ist(10, 12, 9, 0), ist(10, 24, 17, 30));
+        set_aside_week(&mut env);
+        let s = env.store.week_review(None).unwrap().suggestions;
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].kind, SuggestionKind::Lighter);
+        assert_eq!(
+            s[0].text,
+            "12 of 12 breaks were set aside. Try one break every 45 minutes instead of 30?"
+        );
+        env.store
+            .apply_suggestion(date(10, 19), SuggestionKind::Lighter)
+            .unwrap();
+        let c = env.store.coach_config().unwrap();
+        assert_eq!(c.break_minutes, 45);
+        assert_eq!(c.intensity, Intensity::Balanced, "intensity is not touched");
+        let s = env.store.week_review(None).unwrap().suggestions;
+        assert_eq!(
+            s[0].state,
+            SuggestionState::Applied {
+                now: "a 5-minute break every 45 minutes".to_owned(),
+                was: "a 5-minute break every 30 minutes".to_owned(),
+            }
+        );
+        env.store
+            .undo_suggestion(date(10, 19), SuggestionKind::Lighter)
+            .unwrap();
+        assert_eq!(env.store.coach_config().unwrap().break_minutes, 30);
+        // At the longest interval there is nothing lighter to offer.
+        env.store
+            .change_coach_config(hy_core::settings::CoachChange::BreakMinutes(60))
+            .unwrap();
+        let s = env.store.week_review(None).unwrap().suggestions;
+        assert!(s.iter().all(|x| x.kind != SuggestionKind::Lighter));
+    }
+
+    #[test]
+    fn many_set_aside_separate_reminders_suggest_one_step_lighter() {
+        let mut env = Env::new(ist(10, 12, 9, 0), ist(10, 24, 17, 30));
+        env.store
+            .change_coach_config(hy_core::settings::CoachChange::ReminderStyle(
+                hy_core::coach::ReminderStyle::Separate,
+            ))
+            .unwrap();
+        set_aside_week(&mut env);
         let s = env.store.week_review(None).unwrap().suggestions;
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].kind, SuggestionKind::Lighter);
