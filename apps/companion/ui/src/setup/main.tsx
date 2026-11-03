@@ -188,7 +188,7 @@ function App() {
               <span>
                 <strong>Pair with the office server</strong>
                 <br />
-                Comes with the office server in a later update. You can pair then from Settings.
+                If your office has a HealthierYou server, pair after setup in Settings, Sharing &amp; server, Pair.
               </span>
             </label>
             <label class="option unavailable">
