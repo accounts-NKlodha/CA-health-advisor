@@ -447,6 +447,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Test-Soak.ps1 -SelfTest failed under Windows PowerShell 5.1' }
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Test-NetworkCapture.ps1 -SelfTest
           if ($LASTEXITCODE -ne 0) { throw 'Test-NetworkCapture.ps1 -SelfTest failed under Windows PowerShell 5.1' }
+          # The analyser on genuine companion traffic, as an office PC runs it (5.1, StrictMode).
+          $pcap = Join-Path $env:RUNNER_TEMP 't-s23-ps51.pcapng'
+          $env:HY_CAPTURE_PCAP = $pcap
+          cargo test -p hy-server --test capture --locked
+          if ($LASTEXITCODE -ne 0) { throw 'the capture test did not write its pcapng' }
+          Remove-Item Env:HY_CAPTURE_PCAP
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Test-NetworkCapture.ps1 -Analyze $pcap -ServerIp 192.168.50.10 -Canary CANARY_LABEL_5b1e,CANARY_ALIAS_7f3a
+          if ($LASTEXITCODE -ne 0) { throw "Test-NetworkCapture.ps1 -Analyze did not PASS under Windows PowerShell 5.1 (exit $LASTEXITCODE)" }
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Test-HealthierYou-Camera.ps1 -SelfTest
           if ($LASTEXITCODE -ne 0) { throw 'Test-HealthierYou-Camera.ps1 -SelfTest failed under Windows PowerShell 5.1' }
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Test-CameraSoak.ps1 -SelfTest

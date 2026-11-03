@@ -880,8 +880,10 @@ if (-not $ips.Count) { throw "The server name $Server does not resolve on this P
 $os = Get-CimInstance Win32_OperatingSystem
 Add-Line "HealthierYou network capture (T-S23) - $((Get-Date).ToString('yyyy-MM-dd HH:mm'))"
 Add-Line ("Windows: {0} build {1}; server resolved to {2} address(es); server port TCP {3}; canary given: {4}" -f $os.Caption, $os.BuildNumber, $ips.Count, $ServerPort, [bool]$Canary.Count)
+# PowerShell unrolls a returned array: one running companion comes back as a bare int, and
+# Windows PowerShell 5.1 under StrictMode has no .Count on it. Every caller wraps it in @().
 function Get-CompanionIds { return @(Get-Process -Name 'hy-companion' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id }) }
-$companion = Get-CompanionIds
+$companion = @(Get-CompanionIds)
 Add-Line "Companion running: $([bool]$companion.Count)"
 if (-not $companion.Count) { Write-Warning 'The companion is not running: start it (every phase needs it running, or the phase is INCONCLUSIVE).' }
 Add-Line ''
@@ -906,7 +908,7 @@ $runPhases = {
     $pcap = Join-Path $Out "phase-$ph.pcapng"
     Remove-Item -Force $etl, $pcap -ErrorAction SilentlyContinue
     pktmon filter remove | Out-Null
-    $idsAtStart = Get-CompanionIds
+    $idsAtStart = @(Get-CompanionIds)
     $start = Get-Date
     pktmon start --capture --comp nics --pkt-size 0 --file-name $etl | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'pktmon could not start' }
@@ -916,7 +918,7 @@ $runPhases = {
     }
     finally { pktmon stop | Out-Null }
     $end = Get-Date
-    $idsAtEnd = Get-CompanionIds
+    $idsAtEnd = @(Get-CompanionIds)
     $running = @($idsAtStart | Where-Object { $idsAtEnd -contains $_ }).Count -gt 0
     pktmon etl2pcap $etl --out $pcap | Out-Null
     if (-not (Test-Path $pcap)) { throw "pktmon could not convert the capture for $ph" }
