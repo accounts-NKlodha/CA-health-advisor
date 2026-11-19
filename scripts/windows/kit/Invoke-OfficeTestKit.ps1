@@ -652,7 +652,7 @@ function Test-AdminParams([string]$Op, [hashtable]$P) {
     'soak-server' { $h = 0.0; if (-not [double]::TryParse([string]$P.hours, [ref]$h) -or $h -le 0 -or $h -gt 24) { return 'hours must be between 0 and 24' } }
     'network-capture' {
       if (-not (Test-ServerName ([string]$P.server))) { return 'the server name may hold only letters, digits, dots, hyphens and underscores' }
-      if ([string]$P.canary -notmatch '^[A-Z0-9_-]{1,40}$') { return 'bad pairing label' }
+      if ([string]$P.canary -notmatch '^([A-Z0-9_-]{4,40})?$') { return 'bad pairing label' }
     }
     'server-pairing-evidence' { $t = [datetime]::MinValue; if (-not [datetime]::TryParse([string]$P.since, [ref]$t)) { return 'bad time' } }
   }
@@ -1507,19 +1507,29 @@ function Get-RemoteServerPeers {
 }
 
 # The pairing evidence counts from when this kit last installed the server (or, without that,
-# from when the step first began), and is kept in the kit's state: a rerun of the step still
-# counts a pairing made before it, so a PC that already paired need not pair again.
-function Get-PairingSince {
-  $d = $script:State.data
-  if ($d['pairing_since']) { return [string]$d['pairing_since'] }
+# from when the step first began), and is kept in the kit's state for that installation: a
+# rerun against the same install still counts a pairing made before it, so a PC that already
+# paired need not pair again. A new installation (the server step ran again) starts a new
+# window and forgets the PC2 connection seen before it, so old logs kept across a reinstall
+# can never pass the step on their own.
+function Get-ServerInstallKey {
   $sid = if ($script:RetestName) { 'R1-02' } else { 'P1-02' }
   $s = $script:State.steps[$sid]
+  if ($s -is [hashtable] -and $s.status -eq 'done' -and $s.ended) { return [string]$s.ended }
+  return ''
+}
+function Get-PairingSince {
+  $d = $script:State.data
+  $key = Get-ServerInstallKey
+  if ($d['pairing_since'] -and [string]$d['pairing_install'] -eq $key) { return [string]$d['pairing_since'] }
   $t = Get-Date
-  if ($s -is [hashtable] -and $s.ended) {
+  if ($key) {
     $p = [datetime]::MinValue
-    if ([datetime]::TryParseExact([string]$s.ended, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal, [ref]$p)) { $t = $p }
+    if ([datetime]::TryParseExact($key, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal, [ref]$p)) { $t = $p }
   }
   $d['pairing_since'] = $t.ToUniversalTime().ToString('o')
+  $d['pairing_install'] = $key
+  $d['pairing_remote_seen'] = $false
   Save-State
   return [string]$d['pairing_since']
 }
@@ -1660,6 +1670,7 @@ function Invoke-CaptureStep([hashtable]$Ctx) {
   # that name is the text the capture must never find unencrypted on the wire.
   $own = ([string]$env:COMPUTERNAME).ToUpperInvariant()
   if ($script:Sim -and -not $own) { $own = 'KITPC2-SIM1' }
+  if ($own.Length -lt 4) { $own = '' }
   if ($d['canary'] -ne $own) { $d['canary'] = $own; Save-State }
   # A retest takes the server name the first run was given, when it is still usable.
   if ($script:RetestName -and -not $d['server_name']) {
@@ -2026,6 +2037,14 @@ function Get-Steps([string]$RoleName) {
 
 # Run the steps in order. Done steps are skipped; a step left "running" (window closed,
 # reboot) runs again. PAUSE keeps the step pending and stops the run.
+# A server installed again makes the pairing result before it stale: that step runs again.
+function Reset-PairingAfterServerInstall([string]$Id) {
+  $pair = @{ 'P1-02' = 'P1-05'; 'R1-02' = 'R1-05' }[$Id]
+  if (-not $pair) { return }
+  $ps = $script:State.steps[$pair]
+  if ($ps -is [hashtable] -and $ps.status -eq 'done') { $ps.status = 'pending'; $ps.detail = 'to do again: the server was installed again' }
+}
+
 # An install step marked done whose program has since been uninstalled (for example by hand
 # between two runs) runs again, instead of later steps waiting on a server or app that is gone.
 function Reset-GoneInstallSteps([object[]]$Steps) {
@@ -2075,6 +2094,7 @@ function Invoke-Steps([object[]]$Steps, [string]$RedoId) {
       return 'paused'
     }
     $s.status = 'done'; $s.verdict = $r.verdict; $s.detail = [string]$r.detail; $s.rows = @($r.rows); $s.sub = @($r.sub); $s.ended = Get-NowText
+    Reset-PairingAfterServerInstall $st.Id
     Save-State
     $color = switch ($r.verdict) { 'PASS' { 'Green' } 'FAIL' { 'Red' } default { 'Yellow' } }
     Write-Log "$($st.Id) $($r.verdict): $($r.detail)" $color
@@ -2723,15 +2743,23 @@ function Invoke-SelfTest {
     $script:AgentInline = $saveInline.a; $script:InlineAdminDone = $saveInline.d; $script:AdminStub = $saveInline.s
     # Pairing evidence (19 Nov field run): a rerun counts a pairing made since the server was
     # installed, and the report names only what is actually missing.
-    $savedSteps = $script:State.steps['R1-02']; $savedSince = $script:State.data['pairing_since']
+    $savedSteps = $script:State.steps['R1-02']; $savedPair = $script:State.steps['R1-05']; $savedSince = $script:State.data['pairing_since']
     $script:State.data['pairing_since'] = $null
     $script:State.steps['R1-02'] = @{ status = 'done'; verdict = 'PASS'; ended = '2026-11-19 21:28:26' }
     $ps = Get-PairingSince
     $want = ([datetime]::ParseExact('2026-11-19 21:28:26', 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal)).ToUniversalTime().ToString('o')
     Check 'pairing evidence: counts from when the kit installed the server' ($ps -eq $want)
+    $script:State.data['pairing_remote_seen'] = $true
+    Check 'pairing evidence: a rerun against the same install keeps the window and the PC2 connection seen' ((Get-PairingSince) -eq $want -and $script:State.data['pairing_remote_seen'] -eq $true)
     $script:State.steps['R1-02'] = @{ status = 'done'; verdict = 'PASS'; ended = '2026-11-20 08:00:00' }
-    Check 'pairing evidence: a rerun keeps the first start, so an earlier pairing still counts' ((Get-PairingSince) -eq $want)
-    $script:State.steps['R1-02'] = $savedSteps; $script:State.data['pairing_since'] = $savedSince
+    $want2 = ([datetime]::ParseExact('2026-11-20 08:00:00', 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal)).ToUniversalTime().ToString('o')
+    Check 'pairing evidence: a reinstall starts a new window and forgets the old PC2 connection (old logs alone cannot pass)' ((Get-PairingSince) -eq $want2 -and $script:State.data['pairing_remote_seen'] -eq $false)
+    $script:State.steps['R1-05'] = @{ status = 'done'; verdict = 'PASS' }
+    Reset-PairingAfterServerInstall 'R1-02'
+    Check 'pairing evidence: a server installed again sends a finished pairing step back to do' ($script:State.steps['R1-05'].status -eq 'pending')
+    Reset-PairingAfterServerInstall 'R1-04'
+    Check 'pairing evidence: other steps leave the pairing step alone' ($script:State.steps['R1-05'].status -eq 'pending')
+    $script:State.steps['R1-02'] = $savedSteps; $script:State.data['pairing_since'] = $savedSince; $script:State.data['pairing_install'] = $null; $script:State.data['pairing_remote_seen'] = $null; $script:State.steps['R1-05'] = $savedPair
     $m0 = @(Get-PairingMissing 1 3 $true $true)
     $m1 = @(Get-PairingMissing 1 0 $false $true)
     $m2 = @(Get-PairingMissing 0 0 $false $false)
@@ -2755,7 +2783,7 @@ function Invoke-SelfTest {
     foreach ($k in 'R1-02', 'R1-04', 'R1-05') { $script:State.steps[$k] = $gsSaved[$k] }
     $script:SimServer = $gsSim.srv; $script:Sim.companion_exe = $gsSim.exe
     # The capture's canary is the PC's own name: HealthierYou never asks for one.
-    Check 'capture: the pairing label check takes a computer name with an underscore' ($null -eq (Test-AdminParams 'network-capture' @{ server = 'ROHIT_LODHA'; canary = 'NK_LAPTOP6' }))
+    Check 'capture: the pairing label check takes a computer name with an underscore, or none, but not a short one' ($null -eq (Test-AdminParams 'network-capture' @{ server = 'ROHIT_LODHA'; canary = 'NK_LAPTOP6' }) -and $null -eq (Test-AdminParams 'network-capture' @{ server = 'ROHIT_LODHA'; canary = '' }) -and $null -ne (Test-AdminParams 'network-capture' @{ server = 'ROHIT_LODHA'; canary = 'PC' }))
     # The elevated entry carries the retest to the agent; a bad value is refused.
     $rtBoot = $bootArgs.Clone(); $rtBoot.retest = 'Pairing'
     Check 'elevation bootstrap: the retest is embedded as a checked literal' ((New-AgentBootstrap $rtBoot).Contains("`$retest = 'Pairing'") -and (New-AgentBootstrap $bootArgs).Contains("`$retest = ''"))

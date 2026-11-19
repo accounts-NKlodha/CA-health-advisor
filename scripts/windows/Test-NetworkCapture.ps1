@@ -336,6 +336,11 @@ function Test-PrivateAddress([string]$ip) {
 # server: protocol text and the user's own values.
 $ProtocolNeedles = @('HTTP/1.1', 'HTTP/2', '/v1/', 'authorization', 'content-type', 'user-agent', '"ml"', 'hydration', '"category"', 'hy1-')
 
+# Name-resolution and discovery traffic that Windows itself sends with the PC's own name in
+# clear (DNS, NetBIOS name and datagram, SSDP, WS-Discovery, mDNS, LLMNR). The canary is the
+# PC's computer name, so a hit here is ordinary Windows behaviour, not HealthierYou's.
+$NameDiscoveryPorts = @(53, 137, 138, 1900, 3702, 5353, 5355)
+
 function Find-Needle([byte[]]$bytes, [string[]]$needles) {
   if ($bytes.Length -eq 0) { return $null }
   $text = $Latin1.GetString($bytes)
@@ -352,7 +357,7 @@ function Invoke-CaptureAnalysis([string]$Path, [string[]]$ServerIps, [int]$Port,
   $frames = Read-CaptureFrames $Path
   $flows = @{}
   $internet = @{}
-  $packets = 0; $serverPackets = 0
+  $packets = 0; $serverPackets = 0; $discoveryHits = 0
   foreach ($f in $frames) {
     $p = Read-Packet $f
     if (-not $p) { continue }
@@ -361,7 +366,12 @@ function Invoke-CaptureAnalysis([string]$Path, [string[]]$ServerIps, [int]$Port,
     $fromServer = $ServerIps -contains $p.Src
     if ($Canaries.Count) {
       $hit = Find-Needle $p.Payload $Canaries
-      if ($hit) { $fails.Add("the canary text appears in clear in a $($p.Proto) packet ($(if ($toServer -or $fromServer) { 'with the server' } else { 'with another address' }))") }
+      if ($hit) {
+        # With the server: always a finding. Elsewhere, only name discovery is set aside (a
+        # note); any other packet carrying the name in clear stays a finding, as before.
+        if (-not ($toServer -or $fromServer) -and ($NameDiscoveryPorts -contains $p.SPort -or $NameDiscoveryPorts -contains $p.DPort)) { $discoveryHits++ }
+        else { $fails.Add("the canary text appears in clear in a $($p.Proto) packet ($(if ($toServer -or $fromServer) { 'with the server' } else { 'with another address' }))") }
+      }
     }
     foreach ($ip in @($p.Src, $p.Dst)) {
       if (-not ($ServerIps -contains $ip) -and (Test-PrivateAddress $ip) -eq 'internet') { $internet["$($p.Proto)"] = 1 + [int]$internet["$($p.Proto)"] }
@@ -394,6 +404,7 @@ function Invoke-CaptureAnalysis([string]$Path, [string[]]$ServerIps, [int]$Port,
     if ($up.Gap -or $down.Gap) { $missing.Add('a connection with the server was captured with missing segments: checked up to the gap, not counted as verified') }
     if (-not $t.Problems.Count -and -not $t.Missing.Count -and -not $up.Gap -and -not $down.Gap) { $tlsOk++ }
   }
+  if ($discoveryHits) { $notes.Add("this PC's name appeared in $discoveryHits name-discovery packet(s) (DNS, NetBIOS, SSDP, WS-Discovery, mDNS or LLMNR): Windows' own name resolution, not HealthierYou traffic") }
   if ($packets -eq 0) { $missing.Add('the capture holds no packets at all') }
   if ($PhaseName -ne 'BeforePairing' -and $tlsOk -eq 0) { $missing.Add('no complete TLS connection with the server in this phase: the sync the phase asks for was not captured') }
   foreach ($proto in $internet.Keys) { $notes.Add("$($internet[$proto]) $proto packets of this PC with internet addresses (any program; the program audit says whether any was HealthierYou)") }
@@ -664,7 +675,15 @@ function Invoke-SelfTest {
     @{ Name = 'early data offered'; Frames = (Conn ([byte[]]((New-Hello $true @(0x0304) @(42)) + $app)) ([byte[]]($sh + $app))); Verdict = 'FAIL'; Want = 'early data' },
     @{ Name = 'plain HTTP to the server port'; Frames = (Conn ($Latin1.GetBytes("POST /v1/upload HTTP/1.1`r`nAuthorization: Bearer x`r`n`r`n")) ([byte[]]@())); Verdict = 'FAIL'; Want = 'readable protocol text' },
     @{ Name = 'server reached on another port'; Frames = (Conn ([byte[]]($ch + $app)) ([byte[]]($sh + $app)) 80); Verdict = 'FAIL'; Want = 'only TCP 8443' },
-    @{ Name = 'canary in clear to an internet address'; Frames = @(, (New-Frame $pc '8.8.8.8' 'UDP' 5353 53 0 0 ($Latin1.GetBytes('xxCAPTURE-PC-7F3Axx')))); Verdict = 'FAIL'; Want = 'canary text' },
+    @{ Name = 'canary in clear to an internet address'; Frames = @(, (New-Frame $pc '8.8.8.8' 'TCP' 50010 443 1 0x18 ($Latin1.GetBytes('xxCAPTURE-PC-7F3Axx')))); Verdict = 'FAIL'; Want = 'canary text' },
+    @{ Name = 'canary in clear to a LAN host outside name discovery'; Frames = @(, (New-Frame $pc '192.168.50.30' 'UDP' 50011 9999 0 0 ($Latin1.GetBytes('xxCAPTURE-PC-7F3Axx')))); Verdict = 'FAIL'; Want = 'canary text' },
+    @{ Name = 'canary in clear inside the server connection'; Frames = (Conn ([byte[]]($ch + $app + $Latin1.GetBytes('CAPTURE-PC-7F3A'))) ([byte[]]($sh + $app))); Verdict = 'FAIL'; Want = 'canary text' },
+    @{ Name = 'the PC name in DNS, mDNS, LLMNR and NetBIOS beside genuine TLS 1.3'; Frames = @(
+        (Conn ([byte[]]($ch + $app)) ([byte[]]($sh + $app))) +
+        @((New-Frame $pc '192.168.50.1' 'UDP' 50012 53 0 0 ($Latin1.GetBytes('q.capture-pc-7f3a.local.'))),
+          (New-Frame $pc '224.0.0.251' 'UDP' 5353 5353 0 0 ($Latin1.GetBytes('m.CAPTURE-PC-7F3A.local.'))),
+          (New-Frame $pc '224.0.0.252' 'UDP' 50013 5355 0 0 ($Latin1.GetBytes('l.CAPTURE-PC-7F3A.'))),
+          (New-Frame $pc '192.168.50.255' 'UDP' 137 137 0 0 ($Latin1.GetBytes('CAPTURE-PC-7F3A'))))); Verdict = 'PASS'; Want = ''; Note = 'name-discovery' },
     @{ Name = 'before pairing, any packet to the server'; Frames = (Conn ([byte[]]($ch + $app)) ([byte[]]($sh + $app))); Verdict = 'FAIL'; Want = 'before pairing'; Phase = 'BeforePairing' }
   )
   # Out of order with a retransmission: the reassembly must still find a clean TLS 1.3 stream.
@@ -701,6 +720,7 @@ function Invoke-SelfTest {
     $v = Get-PhaseVerdict $r $null $true @($srv) 8443
     $said = @($v.Fails) + @($v.Missing)
     $ok = ($v.Verdict -eq $c.Verdict) -and ($c.Verdict -eq 'PASS' -or (($said -join ' | ') -like "*$($c.Want)*"))
+    if ($c.ContainsKey('Note') -and ((@($r.Notes) -join ' | ') -notlike "*$($c.Note)*")) { $ok = $false }
     if ($c.Verdict -ne 'PASS' -and $r.Tls13Connections -gt 0 -and $c.Verdict -eq 'INCONCLUSIVE') { $ok = $false }
     if (-not $ok) { $failed++ }
     Write-Host ("[{0}] {1}: {2} {3}" -f $(if ($ok) { 'ok' } else { 'WRONG' }), $c.Name, $v.Verdict, ($said -join ' | '))
