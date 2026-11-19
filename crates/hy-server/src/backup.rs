@@ -397,11 +397,25 @@ pub fn restore(
             [now_ms.to_string()],
         )?;
     }
+    // The current database is kept whole: after a crash or power loss its latest
+    // committed changes are only in `server.db-wal`, so the log moves with it under the
+    // kept copy's name (SQLite finds a database's log by name; the `-shm` index is
+    // rebuilt). A log left as `server.db-wal` would otherwise be lost, or applied to the
+    // restored database.
+    let wal = data_dir.join("server.db-wal");
     if target.exists() {
-        fs::rename(
-            &target,
-            data_dir.join(format!("server.db.before-restore-{now_ms}")),
-        )?;
+        let kept = data_dir.join(format!("server.db.before-restore-{now_ms}"));
+        fs::rename(&target, &kept)?;
+        if wal.exists() {
+            let mut kept_wal = kept.clone().into_os_string();
+            kept_wal.push("-wal");
+            if let Err(e) = fs::rename(&wal, PathBuf::from(kept_wal)) {
+                // Put the database back beside its log: nothing changed.
+                let _ = fs::rename(&kept, &target);
+                let _ = fs::remove_file(&staging);
+                return Err(e.into());
+            }
+        }
     }
     for ext in ["server.db-wal", "server.db-shm"] {
         let _ = fs::remove_file(data_dir.join(ext));
@@ -416,6 +430,80 @@ mod tests {
 
     fn at(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    /// A backup file of a minimal database recording `snapshot_id`.
+    fn synthetic_backup(dir: &Path, key: &BackupKey, snapshot_id: [u8; 16]) -> PathBuf {
+        let db = dir.join("snapshot.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+                .unwrap();
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('snapshot_id', ?1)",
+                [hex(&snapshot_id)],
+            )
+            .unwrap();
+        }
+        let mut data = fs::read(&db).unwrap();
+        let nonce = [9u8; NONCE_LEN];
+        let head = header(&snapshot_id, 1, &nonce, b"{}");
+        key.aead()
+            .unwrap()
+            .seal_in_place_append_tag(
+                Nonce::assume_unique_for_key(nonce),
+                Aad::from(head.as_slice()),
+                &mut data,
+            )
+            .unwrap();
+        let file = dir.join("synthetic.hysbak");
+        fs::write(&file, [head, data].concat()).unwrap();
+        file
+    }
+
+    #[test]
+    fn restore_keeps_the_current_database_whole_with_its_write_ahead_log() {
+        // The service stopped uncleanly (a crash or power loss), so committed changes are
+        // still only in `server.db-wal`. The copy kept "next to it" must hold them.
+        let live = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let conn = rusqlite::Connection::open(live.path().join("server.db")).unwrap();
+        let _mode: String = conn
+            .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+            .unwrap();
+        conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        conn.execute_batch("CREATE TABLE t (x INTEGER NOT NULL); INSERT INTO t (x) VALUES (42);")
+            .unwrap();
+        // Copy the files as a crash leaves them (the connection is still open).
+        for name in ["server.db", "server.db-wal"] {
+            fs::copy(live.path().join(name), data.path().join(name)).unwrap();
+        }
+        drop(conn);
+        assert!(data.path().join("server.db-wal").exists());
+
+        let key = BackupKey::from_bytes([3u8; 32]);
+        let src = tempfile::tempdir().unwrap();
+        let file = synthetic_backup(src.path(), &key, [5u8; 16]);
+        restore(data.path(), &file, &key, 1234).unwrap();
+
+        let kept = data.path().join("server.db.before-restore-1234");
+        let conn = rusqlite::Connection::open(&kept).unwrap();
+        let x: i64 = conn
+            .query_row("SELECT x FROM t", [], |r| r.get(0))
+            .expect("the kept database holds what was committed before the restore");
+        assert_eq!(x, 42);
+        drop(conn);
+        // The restored database starts with no write-ahead log of another database.
+        assert!(!data.path().join("server.db-wal").exists());
+        let conn = rusqlite::Connection::open(data.path().join("server.db")).unwrap();
+        let id: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'snapshot_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(id, hex(&[5u8; 16]));
     }
 
     #[test]
