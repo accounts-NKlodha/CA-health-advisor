@@ -806,7 +806,7 @@ function New-Frame([string]$src, [string]$dst, [string]$proto, [int]$sport, [int
   if ($proto -eq 'TCP') {
     $f.AddRange([byte[]]((($seq -shr 24) -band 0xFF), (($seq -shr 16) -band 0xFF), (($seq -shr 8) -band 0xFF), ($seq -band 0xFF), 0, 0, 0, 0, 0x50, $flags, 0xFF, 0xFF, 0, 0, 0, 0))
   }
-  else { $f.AddRange([byte[]](0, (8 + $payload.Length), 0, 0)) }
+  else { $udpLen = 8 + $payload.Length; $f.AddRange([byte[]](($udpLen -shr 8), ($udpLen -band 0xFF), 0, 0)) }
   $f.AddRange($payload)
   return , $f.ToArray()
 }
