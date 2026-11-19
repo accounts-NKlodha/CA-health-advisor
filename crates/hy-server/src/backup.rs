@@ -429,7 +429,8 @@ pub fn restore(
         if wal.exists()
             && let Err(e) = fs::rename(&wal, &kept_wal)
         {
-            undo_set_aside(data_dir, &kept);
+            // If the undo fails too, its record stays for the next attempt.
+            let _ = undo_set_aside(data_dir, &kept);
             let _ = fs::remove_file(&staging);
             return Err(e.into());
         }
@@ -439,7 +440,7 @@ pub fn restore(
     let installed = fault("install").and_then(|()| fs::rename(&staging, &target));
     if let Err(e) = installed {
         if set_aside {
-            undo_set_aside(data_dir, &kept);
+            let _ = undo_set_aside(data_dir, &kept);
         }
         let _ = fs::remove_file(&staging);
         return Err(e.into());
@@ -463,27 +464,47 @@ fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
     f.sync_all()
 }
 
-/// Puts a set-aside database and its log back at the live names (only where the live
-/// name is free) and clears the record.
-fn undo_set_aside(data_dir: &Path, kept: &Path) {
+/// Puts a set-aside database and its log back at the live names, then clears the record.
+///
+/// The log goes back first and the database last, so the live database reappears only once
+/// its log is already beside it: a live `server.db` with a record therefore always means the
+/// undo finished (or nothing was moved, or the backup was installed), never an undo half
+/// done. Any error stops here with the record kept, so the next attempt resumes the undo.
+fn undo_set_aside(data_dir: &Path, kept: &Path) -> io::Result<()> {
     let target = data_dir.join("server.db");
     let wal = data_dir.join("server.db-wal");
-    if !target.exists() && kept.exists() {
-        let _ = fs::rename(kept, &target);
-    }
     let kept_wal = with_suffix(kept, "-wal");
-    if !wal.exists() && kept_wal.exists() {
-        let _ = fs::rename(&kept_wal, &wal);
+    if kept_wal.exists() {
+        if wal.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "server.db-wal is present while its set-aside log is waiting to go back",
+            ));
+        }
+        fault("undo-wal")?;
+        fs::rename(&kept_wal, &wal)?;
     }
-    if target.exists() {
-        let _ = fs::remove_file(data_dir.join(RESTORE_STATE));
+    fault("between-undo-moves")?;
+    if kept.exists() {
+        if target.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "server.db is present while the set-aside database is waiting to go back",
+            ));
+        }
+        fs::rename(kept, &target)?;
+    }
+    match fs::remove_file(data_dir.join(RESTORE_STATE)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
     }
 }
 
 /// Finishes the record of an earlier restore that stopped part way. If the live
-/// database is missing, the database and log it set aside go back to the live names;
-/// if the live database is present, that restore either never moved anything or
-/// installed its backup, and the record is simply cleared.
+/// database is missing, the undo is resumed: the set-aside log and database go back to the
+/// live names (see [`undo_set_aside`] for why the order makes this safe). If the live
+/// database is present, that restore either never moved anything, installed its backup or
+/// finished its undo, and the record is simply cleared.
 fn recover_interrupted_restore(data_dir: &Path) -> io::Result<()> {
     let state = data_dir.join(RESTORE_STATE);
     let name = match fs::read(&state) {
@@ -496,10 +517,9 @@ fn recover_interrupted_restore(data_dir: &Path) -> io::Result<()> {
         .filter(|n| n.starts_with("server.db.before-restore-") && !n.contains(['/', '\\']))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "restore record"))?;
     if data_dir.join("server.db").exists() {
-        fs::remove_file(&state)?;
-        return Ok(());
+        return fs::remove_file(&state);
     }
-    undo_set_aside(data_dir, &data_dir.join(name));
+    undo_set_aside(data_dir, &data_dir.join(name))?;
     if data_dir.join("server.db").exists() {
         Ok(())
     } else {
@@ -512,14 +532,14 @@ fn recover_interrupted_restore(data_dir: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 thread_local! {
-    static FAULT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    static FAULT: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Test-only fault injection: a stop at `point` as a crash would (no clean-up).
 #[allow(clippy::unnecessary_wraps)]
 fn fault(point: &'static str) -> io::Result<()> {
     #[cfg(test)]
-    if FAULT.with(std::cell::Cell::get) == Some(point) {
+    if FAULT.with(|f| f.borrow().contains(&point)) {
         return Err(io::Error::other(point));
     }
     let _ = point;
@@ -633,6 +653,19 @@ mod tests {
             .expect("the committed row is still there")
     }
 
+    /// Reads the row from a copy of `db` and its log, leaving the files themselves as they
+    /// are (opening them would fold the log into the database).
+    fn row_in_copy(db: &Path) -> i64 {
+        let tmp = tempfile::tempdir().unwrap();
+        let copy = tmp.path().join("copy.db");
+        fs::copy(db, &copy).unwrap();
+        let wal = with_suffix(db, "-wal");
+        if wal.exists() {
+            fs::copy(&wal, with_suffix(&copy, "-wal")).unwrap();
+        }
+        row_in(&copy)
+    }
+
     fn snapshot_in(db: &Path) -> String {
         let conn = rusqlite::Connection::open(db).unwrap();
         conn.query_row(
@@ -644,10 +677,70 @@ mod tests {
     }
 
     fn with_fault<T>(point: &'static str, f: impl FnOnce() -> T) -> T {
-        FAULT.with(|c| c.set(Some(point)));
+        with_faults(&[point], f)
+    }
+
+    fn with_faults<T>(points: &[&'static str], f: impl FnOnce() -> T) -> T {
+        FAULT.with(|c| *c.borrow_mut() = points.to_vec());
         let out = f();
-        FAULT.with(|c| c.set(None));
+        FAULT.with(|c| c.borrow_mut().clear());
         out
+    }
+
+    #[test]
+    fn an_undo_interrupted_between_its_moves_is_resumed() {
+        let data = crashed_data_dir();
+        let key = BackupKey::from_bytes([3u8; 32]);
+        let src = tempfile::tempdir().unwrap();
+        let file = synthetic_backup(src.path(), &key, [5u8; 16]);
+        // The install fails, and the undo stops (as a power cut would) after putting the
+        // log back but before the database.
+        let r = with_faults(&["install", "between-undo-moves"], || {
+            restore(data.path(), &file, &key, 1000)
+        });
+        assert!(r.is_err());
+        assert!(!data.path().join("server.db").exists());
+        assert!(data.path().join("server.db-wal").exists());
+        assert!(data.path().join(RESTORE_STATE).exists(), "the record stays");
+        // The next attempt resumes the undo and restores, keeping the committed row.
+        restore(data.path(), &file, &key, 2000).unwrap();
+        assert_eq!(
+            row_in(&data.path().join("server.db.before-restore-2000")),
+            42
+        );
+        assert_eq!(snapshot_in(&data.path().join("server.db")), hex(&[5u8; 16]));
+        assert!(!data.path().join(RESTORE_STATE).exists());
+    }
+
+    #[test]
+    fn a_failed_log_move_during_undo_keeps_the_pair_and_the_record() {
+        let data = crashed_data_dir();
+        let key = BackupKey::from_bytes([3u8; 32]);
+        let src = tempfile::tempdir().unwrap();
+        let file = synthetic_backup(src.path(), &key, [5u8; 16]);
+        let r = with_faults(&["install", "undo-wal"], || {
+            restore(data.path(), &file, &key, 1000)
+        });
+        assert!(r.is_err());
+        // The database was not put back without its log: both wait under the kept name.
+        assert!(!data.path().join("server.db").exists());
+        assert!(!data.path().join("server.db-wal").exists());
+        let kept = data.path().join("server.db.before-restore-1000");
+        assert!(with_suffix(&kept, "-wal").exists());
+        assert_eq!(row_in_copy(&kept), 42);
+        assert!(data.path().join(RESTORE_STATE).exists(), "the record stays");
+        // A later attempt that also fails to move the log back changes nothing.
+        let again = with_fault("undo-wal", || restore(data.path(), &file, &key, 1500));
+        assert!(again.is_err());
+        assert!(data.path().join(RESTORE_STATE).exists());
+        assert!(!data.path().join("server.db").exists());
+        // Once the move works, the undo finishes and the restore goes ahead.
+        restore(data.path(), &file, &key, 2000).unwrap();
+        assert_eq!(
+            row_in(&data.path().join("server.db.before-restore-2000")),
+            42
+        );
+        assert_eq!(snapshot_in(&data.path().join("server.db")), hex(&[5u8; 16]));
     }
 
     #[test]
