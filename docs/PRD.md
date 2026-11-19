@@ -1,5 +1,7 @@
 # HealthierYou — Discovery & Product Requirements
 
+> **Superseded.** This is revision 0.1. The approved baseline is [`PRD_0.3.md`](PRD_0.3.md) (approved 18 October 2026).
+
 Version 0.1 • 18 October 2026 • Draft for owner approval
 
 **No product development is authorised by this document.** Rohit approves this PRD and later Claude's wireframes/clickable prototype. Claude owns implementation and fixes; Codex owns planning and independent review. The date target is **5 November 2026 for V1, V2 and V3**. Passing evidence, not a date or a mockup, determines readiness.
