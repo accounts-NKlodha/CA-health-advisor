@@ -30,7 +30,7 @@ getrandom = "0.4.3"
 # V1-6 signed update files: minisign signature checks (the format the Tauri CLI's `signer`
 # writes). Pure Rust, no dependencies; the same verifier Tauri's own updater uses.
 minisign-verify = "0.2.5"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
