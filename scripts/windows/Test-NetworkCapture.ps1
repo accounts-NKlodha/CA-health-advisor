@@ -28,8 +28,10 @@
        version, no early data and no resumption, and asks for ALPN hy/1; the ServerHello
        picks TLS 1.3; after the hellos only encrypted records cross.
     3. Nothing readable crosses: no HTTP request line, /v1/ path, header name or JSON key
-       in any packet to or from the server, and the PC label you paired with (pass it as
-       -Canary) in no packet at all, to any address.
+       in any packet to or from the server; any -Canary text in no packet at all, to any
+       address; and the PC's own name (pass it as -HostnameCanary) in no packet except a
+       complete, well-formed name-discovery message that carries it as a name, never to
+       the server.
     4. Before pairing, nothing at all goes to the server from this PC.
 
   Each phase is PASS, FAIL (a finding) or INCONCLUSIVE (evidence missing): PASS needs the
@@ -56,8 +58,9 @@
   -Out and hold raw traffic of the whole PC: do not share them.
 
 .EXAMPLE
-  # On the companion PC, elevated. -Canary is the PC's own computer name, its label when it pairs.
-  .\Test-NetworkCapture.ps1 -Server hy-server.office.local -Canary CAPTURE-PC-7F3A -Out C:\hy-capture
+  # On the companion PC, elevated. -HostnameCanary is the PC's own computer name, its label
+  # when it pairs (the office test kit passes it this way).
+  .\Test-NetworkCapture.ps1 -Server hy-server.office.local -HostnameCanary CAPTURE-PC-7F3A -Out C:\hy-capture
 
 .EXAMPLE
   # Analyse a capture file again, or one made elsewhere (no administrator needed).
@@ -343,36 +346,167 @@ $ProtocolNeedles = @('HTTP/1.1', 'HTTP/2', '/v1/', 'authorization', 'content-typ
 
 # Name-resolution and discovery traffic that Windows itself sends with the PC's own name in
 # clear: DNS, mDNS and LLMNR (the name as a DNS label), the NetBIOS datagram service (browser
-# announcements), SSDP and WS-Discovery. Only the hostname canary, and only inside a message
-# of that protocol's own shape, is set aside; a port alone proves nothing.
+# announcements), SSDP and WS-Discovery. Only the hostname canary, and only where a complete
+# message of that protocol's own shape carries it in the field that holds a name, is set
+# aside; a port, a prefix or a namespace alone proves nothing, and a truncated or malformed
+# message stays a finding.
 $NameDiscoveryPorts = @(53, 138, 1900, 3702, 5353, 5355)
 
-function Test-DnsLabel([byte[]]$b, [string]$name) {
-  # The name as one whole DNS label: its length byte, the name, then another label or the end.
-  $n = $Latin1.GetBytes($name.ToLowerInvariant())
-  if ($n.Length -lt 1 -or $n.Length -gt 63) { return $false }
-  $low = $Latin1.GetBytes($Latin1.GetString($b).ToLowerInvariant())
-  for ($i = 12; $i + 1 + $n.Length -lt $low.Length; $i++) {
-    if ($low[$i] -ne $n.Length) { continue }
-    $same = $true
-    for ($j = 0; $j -lt $n.Length; $j++) { if ($low[$i + 1 + $j] -ne $n[$j]) { $same = $false; break } }
-    if ($same -and $low[$i + 1 + $n.Length] -lt 64) { return $true }
+# Every offset at which $name occurs in $b, ignoring case.
+function Get-NameOffsets([byte[]]$b, [string]$name) {
+  $text = $Latin1.GetString($b)
+  $at = New-Object System.Collections.Generic.List[int]
+  if (-not $name) { return , $at.ToArray() }
+  $i = $text.IndexOf($name, [StringComparison]::OrdinalIgnoreCase)
+  while ($i -ge 0) { $at.Add($i); $i = $text.IndexOf($name, $i + 1, [StringComparison]::OrdinalIgnoreCase) }
+  return , $at.ToArray()
+}
+
+# Reads one DNS name at $i, recording where each label's text starts. Returns the offset
+# after the name, or -1 if it is malformed or runs past the end. A compression pointer must
+# point back to an earlier offset (no loops).
+function Read-DnsName([byte[]]$b, [int]$i, [System.Collections.Generic.List[int]]$labels) {
+  $total = 0
+  while ($true) {
+    if ($i -ge $b.Length) { return -1 }
+    $len = [int]$b[$i]
+    if ($len -eq 0) { return ($i + 1) }
+    if (($len -band 0xC0) -eq 0xC0) {
+      if ($i + 1 -ge $b.Length) { return -1 }
+      $ptr = (($len -band 0x3F) -shl 8) -bor $b[$i + 1]
+      if ($ptr -lt 12 -or $ptr -ge $i) { return -1 }
+      return ($i + 2)
+    }
+    if ($len -gt 63 -or $i + 1 + $len -gt $b.Length) { return -1 }
+    $labels.Add($i + 1)
+    $total += $len + 1
+    if ($total -gt 255) { return -1 }
+    $i += 1 + $len
   }
-  return $false
+}
+
+# A whole DNS, mDNS or LLMNR message: the header's counts are all consumed, every question
+# has a known type and class IN, every record fits its declared length, nothing trails. The
+# name must occur only as whole labels of names the message declares.
+function Test-DnsMessage([byte[]]$b, [string]$name) {
+  if ($b.Length -lt 17) { return $false }
+  $qd = Get-U16BE $b 4; $an = Get-U16BE $b 6; $ns = Get-U16BE $b 8; $ar = Get-U16BE $b 10
+  if ($qd -gt 16 -or ($an + $ns + $ar) -gt 64 -or ($qd + $an + $ns + $ar) -lt 1) { return $false }
+  $labels = New-Object System.Collections.Generic.List[int]
+  $knownTypes = @(1, 5, 12, 16, 28, 33, 47, 255)
+  $i = 12
+  for ($q = 0; $q -lt $qd; $q++) {
+    $i = Read-DnsName $b $i $labels
+    if ($i -lt 0 -or $i + 4 -gt $b.Length) { return $false }
+    if ($knownTypes -notcontains (Get-U16BE $b $i) -or ((Get-U16BE $b ($i + 2)) -band 0x7FFF) -ne 1) { return $false }
+    $i += 4
+  }
+  for ($r = 0; $r -lt ($an + $ns + $ar); $r++) {
+    $i = Read-DnsName $b $i $labels
+    if ($i -lt 0 -or $i + 10 -gt $b.Length) { return $false }
+    $type = Get-U16BE $b $i
+    $rdlen = Get-U16BE $b ($i + 8)
+    $rd = $i + 10
+    if ($rd + $rdlen -gt $b.Length) { return $false }
+    # Names inside PTR, CNAME, SRV and NSEC data are names too (NSEC's type bitmap follows).
+    $nameAt = switch ($type) { 12 { $rd } 5 { $rd } 33 { $rd + 6 } 47 { $rd } default { -1 } }
+    if ($nameAt -ge 0) {
+      $end = Read-DnsName $b $nameAt $labels
+      if ($end -lt 0 -or $end -gt $rd + $rdlen -or ($type -ne 47 -and $end -ne $rd + $rdlen)) { return $false }
+    }
+    $i = $rd + $rdlen
+  }
+  if ($i -ne $b.Length) { return $false }
+  $n = $name.Length
+  if ($n -lt 1 -or $n -gt 63) { return $false }
+  $offsets = Get-NameOffsets $b $name
+  if ($offsets.Count -lt 1) { return $false }
+  foreach ($o in $offsets) {
+    if (-not ($labels.Contains($o) -and [int]$b[$o - 1] -eq $n)) { return $false }
+  }
+  return $true
+}
+
+# A whole NetBIOS datagram (RFC 1002, direct unique, group or broadcast) carrying an SMB
+# mailslot browser message: the declared length matches, both names are properly encoded,
+# and the PC's name occurs only after the browser mailslot name, as a NUL-padded name field.
+function Test-NetbiosBrowse([byte[]]$b, [string]$name) {
+  if ($b.Length -lt 82 + 32 -or $name.Length -gt 15) { return $false }
+  if ($b[0] -lt 0x10 -or $b[0] -gt 0x12) { return $false }
+  if ((Get-U16BE $b 10) -ne $b.Length - 14 -or (Get-U16BE $b 12) -ne 0) { return $false }
+  foreach ($at in @(14, 48)) {
+    if ($b[$at] -ne 0x20 -or $b[$at + 33] -ne 0) { return $false }
+    for ($k = 1; $k -le 32; $k++) { if ($b[$at + $k] -lt 0x41 -or $b[$at + $k] -gt 0x50) { return $false } }
+  }
+  if ($b[82] -ne 0xFF -or $b[83] -ne 0x53 -or $b[84] -ne 0x4D -or $b[85] -ne 0x42) { return $false }
+  $text = $Latin1.GetString($b)
+  $slot = $text.IndexOf('\MAILSLOT\BROWSE', [StringComparison]::OrdinalIgnoreCase)
+  if ($slot -lt 86) { return $false }
+  $offsets = Get-NameOffsets $b $name
+  if ($offsets.Count -lt 1) { return $false }
+  foreach ($o in $offsets) {
+    $after = $o + $name.Length
+    if ($o -le $slot -or $after -ge $b.Length -or $b[$after] -ne 0) { return $false }
+  }
+  return $true
+}
+
+# A whole SSDP message: a known start line, every line a header, ended by the blank line with
+# nothing after it. The name may occur only in the value of SERVER, USER-AGENT, LOCATION,
+# USN, NT or ST.
+function Test-SsdpMessage([byte[]]$b, [string]$name) {
+  $text = $Latin1.GetString($b)
+  $end = $text.IndexOf("`r`n`r`n")
+  if ($end -lt 0 -or $end + 4 -ne $text.Length) { return $false }
+  $lines = $text.Substring(0, $end).Split(@("`r`n"), [StringSplitOptions]::None)
+  if (@('NOTIFY * HTTP/1.1', 'M-SEARCH * HTTP/1.1', 'HTTP/1.1 200 OK') -notcontains $lines[0]) { return $false }
+  $found = 0
+  for ($k = 1; $k -lt $lines.Count; $k++) {
+    if ($lines[$k] -notmatch '^([A-Za-z0-9-]+):(.*)$') { return $false }
+    $field = $Matches[1].ToUpperInvariant(); $value = $Matches[2]
+    if ($lines[$k].Substring(0, $field.Length + 1).IndexOf($name, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $false }
+    $inValue = (Get-NameOffsets ($Latin1.GetBytes($value)) $name).Count
+    if ($inValue -and @('SERVER', 'USER-AGENT', 'LOCATION', 'USN', 'NT', 'ST') -notcontains $field) { return $false }
+    $found += $inValue
+  }
+  return ($found -ge 1 -and $found -eq (Get-NameOffsets $b $name).Count)
+}
+
+# A whole WS-Discovery SOAP message: well-formed XML, a SOAP 1.2 Envelope whose Body holds
+# one WS-Discovery message, and the name only in the text of XAddrs, Address or Scopes, as
+# often as it occurs in the raw bytes (so nothing hides in a comment or an attribute).
+function Test-WsDiscovery([byte[]]$b, [string]$name) {
+  $text = [Text.Encoding]::UTF8.GetString($b)
+  $settings = New-Object System.Xml.XmlReaderSettings
+  $settings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
+  $settings.XmlResolver = $null
+  $doc = New-Object System.Xml.XmlDocument
+  $doc.XmlResolver = $null
+  try { $doc.Load([System.Xml.XmlReader]::Create((New-Object IO.StringReader($text)), $settings)) } catch { return $false }
+  $envelope = $doc.DocumentElement
+  if ($envelope.LocalName -ne 'Envelope' -or $envelope.NamespaceURI -ne 'http://www.w3.org/2003/05/soap-envelope') { return $false }
+  $body = @($envelope.ChildNodes | Where-Object { $_.NodeType -eq 'Element' -and $_.LocalName -eq 'Body' })
+  if ($body.Count -ne 1) { return $false }
+  $msg = @($body[0].ChildNodes | Where-Object { $_.NodeType -eq 'Element' })
+  if ($msg.Count -ne 1) { return $false }
+  if (@('http://schemas.xmlsoap.org/ws/2005/04/discovery', 'http://docs.oasis-open.org/ws-dd/ns/discovery/2009/01') -notcontains $msg[0].NamespaceURI) { return $false }
+  if (@('Hello', 'Bye', 'Probe', 'ProbeMatches', 'Resolve', 'ResolveMatches') -notcontains $msg[0].LocalName) { return $false }
+  $found = 0
+  foreach ($t in @($doc.SelectNodes('//text()'))) {
+    $c = (Get-NameOffsets ($Latin1.GetBytes($t.Value)) $name).Count
+    if (-not $c) { continue }
+    if (@('XAddrs', 'Address', 'Scopes') -notcontains $t.ParentNode.LocalName) { return $false }
+    $found += $c
+  }
+  return ($found -ge 1 -and $found -eq (Get-NameOffsets $b $name).Count)
 }
 
 function Test-DiscoveryMessage([byte[]]$b, [int]$port, [string]$name) {
-  $text = $Latin1.GetString($b)
   switch ($port) {
-    { @(53, 5353, 5355) -contains $_ } {
-      if ($b.Length -lt 17) { return $false }
-      $records = (Get-U16BE $b 4) + (Get-U16BE $b 6) + (Get-U16BE $b 8) + (Get-U16BE $b 10)
-      if ($records -lt 1 -or (Get-U16BE $b 4) -gt 16) { return $false }
-      return (Test-DnsLabel $b $name)
-    }
-    138 { return ($b.Length -ge 14 -and $b[0] -ge 0x10 -and $b[0] -le 0x16) }
-    1900 { return ($text -match '^(NOTIFY \* HTTP/1\.1|M-SEARCH \* HTTP/1\.1|HTTP/1\.1 200 OK)\r\n') }
-    3702 { return ($text -match '^\s*<' -and $text -match 'schemas\.xmlsoap\.org/ws/2005/04/discovery|docs\.oasis-open\.org/ws-dd/ns/discovery') }
+    { @(53, 5353, 5355) -contains $_ } { return (Test-DnsMessage $b $name) }
+    138 { return (Test-NetbiosBrowse $b $name) }
+    1900 { return (Test-SsdpMessage $b $name) }
+    3702 { return (Test-WsDiscovery $b $name) }
   }
   return $false
 }
@@ -411,7 +545,7 @@ function Invoke-CaptureAnalysis([string]$Path, [string[]]$ServerIps, [int]$Port,
         # or in anything else (an unknown or malformed payload on a discovery port too), it
         # is a finding.
         $dp = if ($NameDiscoveryPorts -contains $p.DPort) { $p.DPort } elseif ($NameDiscoveryPorts -contains $p.SPort) { $p.SPort } else { 0 }
-        $udpOnly = $p.Proto -eq 'UDP' -or $dp -eq 53
+        $udpOnly = $p.Proto -eq 'UDP'
         if (-not ($toServer -or $fromServer) -and $dp -and $udpOnly -and (Test-DiscoveryMessage $p.Payload $dp $hn)) { $discoveryHits++ }
         else { $fails.Add("this PC's name appears in clear in a $($p.Proto) packet ($(if ($toServer -or $fromServer) { 'with the server' } else { 'with another address, not a recognised name-discovery message' }))") }
       }
@@ -685,6 +819,25 @@ function New-DnsMessage([string]$name, [int]$questions = 1) {
   return , $m.ToArray()
 }
 
+function New-NetbiosBrowse([string]$name) {
+  # A NetBIOS broadcast datagram with an SMB mailslot HostAnnouncement naming $name.
+  $enc = { param([string]$n) $p = $n.ToUpperInvariant().PadRight(15).Substring(0, 15) + [char]0; $o = @(0x20); foreach ($ch in $p.ToCharArray()) { $o += 0x41 + ([int]$ch -shr 4); $o += 0x41 + ([int]$ch -band 0xF) }; $o += 0; $o }
+  $data = New-Object System.Collections.Generic.List[byte]
+  $data.AddRange([byte[]](& $enc $name)); $data.AddRange([byte[]](& $enc 'WORKGROUP'))
+  $data.AddRange([byte[]](0xFF, 0x53, 0x4D, 0x42, 0x25)); $data.AddRange((New-Object byte[] 27))
+  $data.AddRange($Latin1.GetBytes('\MAILSLOT\BROWSE')); $data.Add(0)
+  $data.AddRange([byte[]](1, 0, 0x60, 0xEA, 0, 0))
+  $field = New-Object byte[] 16
+  [Array]::Copy($Latin1.GetBytes($name), $field, $name.Length)
+  $data.AddRange($field); $data.AddRange([byte[]](10, 0, 3, 0x10, 0, 0, 0x0F, 1, 0x55, 0xAA, 0))
+  $head = [byte[]](0x11, 0x0A, 0x12, 0x34, 192, 168, 50, 21, 0, 138, ($data.Count -shr 8), ($data.Count -band 0xFF), 0, 0)
+  return , ([byte[]]($head + $data.ToArray()))
+}
+
+function New-WsdHello([string]$name) {
+  return , ([Text.Encoding]::UTF8.GetBytes("<?xml version=`"1.0`" encoding=`"utf-8`"?><soap:Envelope xmlns:soap=`"http://www.w3.org/2003/05/soap-envelope`" xmlns:wsd=`"http://schemas.xmlsoap.org/ws/2005/04/discovery`" xmlns:wsa=`"http://schemas.xmlsoap.org/ws/2004/08/addressing`"><soap:Header><wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Hello</wsa:Action></soap:Header><soap:Body><wsd:Hello><wsa:EndpointReference><wsa:Address>urn:uuid:1</wsa:Address></wsa:EndpointReference><wsd:XAddrs>http://$($name):5357/x</wsd:XAddrs><wsd:MetadataVersion>1</wsd:MetadataVersion></wsd:Hello></soap:Body></soap:Envelope>"))
+}
+
 function New-Record([int]$type, [byte[]]$body) {
   return , ([byte[]](@($type, 3, 3, ($body.Length -shr 8), ($body.Length -band 0xFF)) + $body))
 }
@@ -739,7 +892,18 @@ function Invoke-SelfTest {
         @((New-Frame $pc '192.168.50.1' 'UDP' 50012 53 0 0 (New-DnsMessage 'nkhost-77.office.lan')),
           (New-Frame $pc '224.0.0.251' 'UDP' 5353 5353 0 0 (New-DnsMessage 'NKHOST-77.local')),
           (New-Frame $pc '224.0.0.252' 'UDP' 50013 5355 0 0 (New-DnsMessage 'NKHOST-77')),
-          (New-Frame $pc '239.255.255.250' 'UDP' 50017 1900 0 0 ($Latin1.GetBytes("NOTIFY * HTTP/1.1`r`nHOST: 239.255.255.250:1900`r`nSERVER: Windows NKHOST-77`r`n`r`n"))))); Verdict = 'PASS'; Want = ''; Note = 'name-discovery' },
+          (New-Frame $pc '239.255.255.250' 'UDP' 50017 1900 0 0 ($Latin1.GetBytes("NOTIFY * HTTP/1.1`r`nHOST: 239.255.255.250:1900`r`nSERVER: Windows NKHOST-77`r`n`r`n"))),
+          (New-Frame $pc '192.168.50.255' 'UDP' 138 138 0 0 (New-NetbiosBrowse 'NKHOST-77')),
+          (New-Frame $pc '239.255.255.250' 'UDP' 50018 3702 0 0 (New-WsdHello 'NKHOST-77')))); Verdict = 'PASS'; Want = ''; Note = 'name-discovery' },
+    @{ Name = 'PC name in a DNS query cut off before its type and class'; Frames = @(, (New-Frame $pc '192.168.50.1' 'UDP' 50020 53 0 0 (Get-Slice (New-DnsMessage 'nkhost-77.office.lan') 0 36))); Verdict = 'FAIL'; Want = 'not a recognised name-discovery message' },
+    @{ Name = 'PC name in a DNS label with the question count too high'; Frames = @(, (New-Frame $pc '192.168.50.1' 'UDP' 50021 53 0 0 (New-DnsMessage 'nkhost-77.office.lan' 2))); Verdict = 'FAIL'; Want = 'not a recognised name-discovery message' },
+    @{ Name = 'PC name trailing a complete DNS query'; Frames = @(, (New-Frame $pc '192.168.50.1' 'UDP' 50022 53 0 0 ([byte[]]((New-DnsMessage 'nkhost-77.office.lan') + $Latin1.GetBytes('NKHOST-77'))))); Verdict = 'FAIL'; Want = 'not a recognised name-discovery message' },
+    @{ Name = 'PC name after a NetBIOS-looking first byte only'; Frames = @(, (New-Frame $pc '192.168.50.255' 'UDP' 138 138 0 0 ($Latin1.GetBytes(([string][char]0x11) + 'xxxxxxxxxxxxxNKHOST-77')))); Verdict = 'FAIL'; Want = 'not a recognised name-discovery message' },
+    @{ Name = 'PC name in a NetBIOS datagram cut off'; Frames = @(, (New-Frame $pc '192.168.50.255' 'UDP' 138 138 0 0 (Get-Slice (New-NetbiosBrowse 'NKHOST-77') 0 130))); Verdict = 'FAIL'; Want = 'not a recognised name-discovery message' },
+    @{ Name = 'PC name in an SSDP message with no blank line at the end'; Frames = @(, (New-Frame $pc '239.255.255.250' 'UDP' 50023 1900 0 0 ($Latin1.GetBytes("NOTIFY * HTTP/1.1`r`nSERVER: Windows NKHOST-77`r`n")))); Verdict = 'FAIL'; Want = 'not a recognised name-discovery message' },
+    @{ Name = 'PC name in an SSDP body after the headers'; Frames = @(, (New-Frame $pc '239.255.255.250' 'UDP' 50024 1900 0 0 ($Latin1.GetBytes("NOTIFY * HTTP/1.1`r`nSERVER: Windows`r`n`r`nNKHOST-77")))); Verdict = 'FAIL'; Want = 'not a recognised name-discovery message' },
+    @{ Name = 'PC name in a WS-Discovery message cut off'; Frames = @(, (New-Frame $pc '239.255.255.250' 'UDP' 50025 3702 0 0 (Get-Slice (New-WsdHello 'NKHOST-77') 0 520))); Verdict = 'FAIL'; Want = 'not a recognised name-discovery message' },
+    @{ Name = 'PC name in a WS-Discovery comment'; Frames = @(, (New-Frame $pc '239.255.255.250' 'UDP' 50026 3702 0 0 ([Text.Encoding]::UTF8.GetBytes(([Text.Encoding]::UTF8.GetString((New-WsdHello 'host-1')) -replace '<soap:Body>', '<soap:Body><!-- NKHOST-77 -->'))))); Verdict = 'FAIL'; Want = 'not a recognised name-discovery message' },
     @{ Name = 'before pairing, any packet to the server'; Frames = (Conn ([byte[]]($ch + $app)) ([byte[]]($sh + $app))); Verdict = 'FAIL'; Want = 'before pairing'; Phase = 'BeforePairing' }
   )
   # Out of order with a retransmission: the reassembly must still find a clean TLS 1.3 stream.
