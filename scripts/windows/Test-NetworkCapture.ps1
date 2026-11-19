@@ -56,7 +56,7 @@
   -Out and hold raw traffic of the whole PC: do not share them.
 
 .EXAMPLE
-  # On the companion PC, elevated. -Canary is the PC label typed when pairing.
+  # On the companion PC, elevated. -Canary is the PC's own computer name, its label when it pairs.
   .\Test-NetworkCapture.ps1 -Server hy-server.office.local -Canary CAPTURE-PC-7F3A -Out C:\hy-capture
 
 .EXAMPLE
@@ -890,10 +890,10 @@ Add-Line ''
 
 $guidance = @{
   BeforePairing = 'Install the companion but do not pair it (Settings > Sharing shows "Not paired"). Leave it running.'
-  Pending       = 'Pair now: Settings > Sharing > paste the slip, use the -Canary text as the PC name. Do NOT let the administrator confirm yet. Click "Check again" once.'
+  Pending       = 'Pair now: Settings > Sharing & server > paste the slip > Pair (it pairs under this PC''s own name). Do NOT let the administrator confirm yet. Click "Check again" once.'
   PairedOff     = 'Ask the administrator to confirm this PC. Keep every sharing category off. Click "Check again" twice.'
-  CategoryOn    = 'Switch on Water sharing (Settings > Sharing). Log a glass of water from the pet menu. Click "Check again" twice.'
-  AfterDisable  = 'Switch Water sharing off again. Log another glass of water. Click "Check again" twice.'
+  CategoryOn    = 'Tick "Hydration summary" under Optional sharing (Settings > Sharing & server) and click Yes. Log a glass of water from the pet menu (Water). Click "Check again" twice.'
+  AfterDisable  = 'Untick "Hydration summary" again. Log another glass of water. Click "Check again" twice.'
 }
 $results = New-Object System.Collections.Generic.List[object]
 $runPhases = {
