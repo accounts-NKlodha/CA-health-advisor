@@ -58,7 +58,7 @@ CI run, so a test build can never update a real install, or be updated by one.
 | PC1 | 8-hour soaks | 8 to 16 h | nothing; leave PC1 on with both windows open |
 | PC2 | Check the PC | 1 min | nothing (it finds the Windows version, memory and webcams) |
 | PC2 | Guided install | 20 to 30 min | double-click the installer, answer yes/no questions, change the display scale when asked |
-| PC2 | Network capture and pairing | 30 to 40 min | in the ADMINISTRATOR window: paste the slip, use the PC name it gives you, read the six words to whoever runs PC1 |
+| PC2 | Network capture and pairing | 30 to 40 min | in the ADMINISTRATOR window: paste the slip (the PC pairs under its own name), read the six words to whoever runs PC1, tick and untick "Hydration summary" when asked |
 | PC2 | Start at sign-in | 5 min | sign out, sign in, then put the PC to sleep and wake it |
 | PC2 | 2-hour camera soak | 2 to 2.5 h | quit HealthierYou from the tray when asked, allow the camera, work at the desk, lock the PC once, and turn the camera off at the end |
 | PC2 | USB webcam soak (only if a second webcam is found) | 2 to 2.5 h | the same, with the USB webcam |
@@ -105,6 +105,12 @@ and results stay as they are.
 
 If you have forgotten the admin passphrase, type **R1-03** at the end on PC1 to set a new
 one.
+
+If you run R1-05 again later, a pairing made since the server was installed still counts: you
+do not need to pair again. Click **Check again** on PC2 while PC1 waits, then press Enter on PC1.
+If you uninstalled the server or HealthierYou by hand between runs, the kit notices and installs
+it again. In PowerShell, start a launcher with `.\` in front, for example
+`.\Run-PC1-Pairing-Retest.cmd -Redo R1-05`.
 
 ## 6. Afterwards
 
