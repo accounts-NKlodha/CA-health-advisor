@@ -957,8 +957,8 @@ function Invoke-AdminOp([string]$Op, [hashtable]$P) {
       return $r
     }
     'network-capture' {
-      Show-Banner 'Network capture with the pairing' @('HealthierYou pairs under this PC''s own name (the script below calls it the -Canary text).', 'Follow its five phases; PC1 confirms in phase PairedOff.') 'Cyan'
-      $x = Invoke-StagedReport 'Test-NetworkCapture.ps1' @('-Server', [string]$P.server, '-Canary', [string]$P.canary, '-Out', (Get-AdminDir 'raw')) 'hy-network-capture.txt'
+      Show-Banner 'Network capture with the pairing' @('HealthierYou pairs under this PC''s own name (the script below calls it the -HostnameCanary text).', 'Follow its five phases; PC1 confirms in phase PairedOff.') 'Cyan'
+      $x = Invoke-StagedReport 'Test-NetworkCapture.ps1' @('-Server', [string]$P.server, '-HostnameCanary', [string]$P.canary, '-Out', (Get-AdminDir 'raw')) 'hy-network-capture.txt'
       $v = Limit-Verdict (Get-ExitVerdict $x.run.code ($x.report + '.json') 'Overall') $x.run
       $r = New-Result $v.verdict $v.detail; $r.files = $x.files
       return $r

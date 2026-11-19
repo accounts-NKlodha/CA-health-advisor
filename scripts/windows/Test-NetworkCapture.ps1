@@ -80,12 +80,17 @@ param(
   [int]$ServerPort = 8443,
   # Text that must never appear in clear: the PC label used when pairing, the alias.
   [string[]]$Canary = @(),
+  # This PC's own computer name, which HealthierYou sends as its label when it pairs. Windows
+  # also sends it in clear for name discovery, so a hit is set aside only inside a recognised
+  # discovery message; anywhere else it is a finding like any -Canary.
+  [string[]]$HostnameCanary = @(),
   [string]$Report
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
 # -Canary 'a,b' (as powershell -File passes it) means two canaries.
 $Canary = @($Canary | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+$HostnameCanary = @($HostnameCanary | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 
 # --------------------------------------------------------------------- byte helpers
 
@@ -337,9 +342,40 @@ function Test-PrivateAddress([string]$ip) {
 $ProtocolNeedles = @('HTTP/1.1', 'HTTP/2', '/v1/', 'authorization', 'content-type', 'user-agent', '"ml"', 'hydration', '"category"', 'hy1-')
 
 # Name-resolution and discovery traffic that Windows itself sends with the PC's own name in
-# clear (DNS, NetBIOS name and datagram, SSDP, WS-Discovery, mDNS, LLMNR). The canary is the
-# PC's computer name, so a hit here is ordinary Windows behaviour, not HealthierYou's.
-$NameDiscoveryPorts = @(53, 137, 138, 1900, 3702, 5353, 5355)
+# clear: DNS, mDNS and LLMNR (the name as a DNS label), the NetBIOS datagram service (browser
+# announcements), SSDP and WS-Discovery. Only the hostname canary, and only inside a message
+# of that protocol's own shape, is set aside; a port alone proves nothing.
+$NameDiscoveryPorts = @(53, 138, 1900, 3702, 5353, 5355)
+
+function Test-DnsLabel([byte[]]$b, [string]$name) {
+  # The name as one whole DNS label: its length byte, the name, then another label or the end.
+  $n = $Latin1.GetBytes($name.ToLowerInvariant())
+  if ($n.Length -lt 1 -or $n.Length -gt 63) { return $false }
+  $low = $Latin1.GetBytes($Latin1.GetString($b).ToLowerInvariant())
+  for ($i = 12; $i + 1 + $n.Length -lt $low.Length; $i++) {
+    if ($low[$i] -ne $n.Length) { continue }
+    $same = $true
+    for ($j = 0; $j -lt $n.Length; $j++) { if ($low[$i + 1 + $j] -ne $n[$j]) { $same = $false; break } }
+    if ($same -and $low[$i + 1 + $n.Length] -lt 64) { return $true }
+  }
+  return $false
+}
+
+function Test-DiscoveryMessage([byte[]]$b, [int]$port, [string]$name) {
+  $text = $Latin1.GetString($b)
+  switch ($port) {
+    { @(53, 5353, 5355) -contains $_ } {
+      if ($b.Length -lt 17) { return $false }
+      $records = (Get-U16BE $b 4) + (Get-U16BE $b 6) + (Get-U16BE $b 8) + (Get-U16BE $b 10)
+      if ($records -lt 1 -or (Get-U16BE $b 4) -gt 16) { return $false }
+      return (Test-DnsLabel $b $name)
+    }
+    138 { return ($b.Length -ge 14 -and $b[0] -ge 0x10 -and $b[0] -le 0x16) }
+    1900 { return ($text -match '^(NOTIFY \* HTTP/1\.1|M-SEARCH \* HTTP/1\.1|HTTP/1\.1 200 OK)\r\n') }
+    3702 { return ($text -match '^\s*<' -and $text -match 'schemas\.xmlsoap\.org/ws/2005/04/discovery|docs\.oasis-open\.org/ws-dd/ns/discovery') }
+  }
+  return $false
+}
 
 function Find-Needle([byte[]]$bytes, [string[]]$needles) {
   if ($bytes.Length -eq 0) { return $null }
@@ -350,7 +386,7 @@ function Find-Needle([byte[]]$bytes, [string[]]$needles) {
 
 # Analyse one capture: returns findings (FAIL), missing evidence (INCONCLUSIVE), notes and
 # counts. Addresses are reported by role only.
-function Invoke-CaptureAnalysis([string]$Path, [string[]]$ServerIps, [int]$Port, [string[]]$Canaries, [string]$PhaseName) {
+function Invoke-CaptureAnalysis([string]$Path, [string[]]$ServerIps, [int]$Port, [string[]]$Canaries, [string]$PhaseName, [string[]]$Hostnames = @()) {
   $fails = New-Object System.Collections.Generic.List[string]
   $missing = New-Object System.Collections.Generic.List[string]
   $notes = New-Object System.Collections.Generic.List[string]
@@ -366,11 +402,18 @@ function Invoke-CaptureAnalysis([string]$Path, [string[]]$ServerIps, [int]$Port,
     $fromServer = $ServerIps -contains $p.Src
     if ($Canaries.Count) {
       $hit = Find-Needle $p.Payload $Canaries
-      if ($hit) {
-        # With the server: always a finding. Elsewhere, only name discovery is set aside (a
-        # note); any other packet carrying the name in clear stays a finding, as before.
-        if (-not ($toServer -or $fromServer) -and ($NameDiscoveryPorts -contains $p.SPort -or $NameDiscoveryPorts -contains $p.DPort)) { $discoveryHits++ }
-        else { $fails.Add("the canary text appears in clear in a $($p.Proto) packet ($(if ($toServer -or $fromServer) { 'with the server' } else { 'with another address' }))") }
+      if ($hit) { $fails.Add("the canary text appears in clear in a $($p.Proto) packet ($(if ($toServer -or $fromServer) { 'with the server' } else { 'with another address' }))") }
+    }
+    if ($Hostnames.Count) {
+      $hn = Find-Needle $p.Payload $Hostnames
+      if ($hn) {
+        # Set aside only a recognised discovery message with another address; with the server,
+        # or in anything else (an unknown or malformed payload on a discovery port too), it
+        # is a finding.
+        $dp = if ($NameDiscoveryPorts -contains $p.DPort) { $p.DPort } elseif ($NameDiscoveryPorts -contains $p.SPort) { $p.SPort } else { 0 }
+        $udpOnly = $p.Proto -eq 'UDP' -or $dp -eq 53
+        if (-not ($toServer -or $fromServer) -and $dp -and $udpOnly -and (Test-DiscoveryMessage $p.Payload $dp $hn)) { $discoveryHits++ }
+        else { $fails.Add("this PC's name appears in clear in a $($p.Proto) packet ($(if ($toServer -or $fromServer) { 'with the server' } else { 'with another address, not a recognised name-discovery message' }))") }
       }
     }
     foreach ($ip in @($p.Src, $p.Dst)) {
@@ -404,7 +447,7 @@ function Invoke-CaptureAnalysis([string]$Path, [string[]]$ServerIps, [int]$Port,
     if ($up.Gap -or $down.Gap) { $missing.Add('a connection with the server was captured with missing segments: checked up to the gap, not counted as verified') }
     if (-not $t.Problems.Count -and -not $t.Missing.Count -and -not $up.Gap -and -not $down.Gap) { $tlsOk++ }
   }
-  if ($discoveryHits) { $notes.Add("this PC's name appeared in $discoveryHits name-discovery packet(s) (DNS, NetBIOS, SSDP, WS-Discovery, mDNS or LLMNR): Windows' own name resolution, not HealthierYou traffic") }
+  if ($discoveryHits) { $notes.Add("this PC's name appeared in $discoveryHits recognised name-discovery message(s) (DNS, mDNS, LLMNR, NetBIOS datagram, SSDP or WS-Discovery) with other addresses: Windows' own name resolution, not HealthierYou traffic") }
   if ($packets -eq 0) { $missing.Add('the capture holds no packets at all') }
   if ($PhaseName -ne 'BeforePairing' -and $tlsOk -eq 0) { $missing.Add('no complete TLS connection with the server in this phase: the sync the phase asks for was not captured') }
   foreach ($proto in $internet.Keys) { $notes.Add("$($internet[$proto]) $proto packets of this PC with internet addresses (any program; the program audit says whether any was HealthierYou)") }
@@ -634,6 +677,14 @@ function New-Frame([string]$src, [string]$dst, [string]$proto, [int]$sport, [int
   return , $f.ToArray()
 }
 
+function New-DnsMessage([string]$name, [int]$questions = 1) {
+  $m = New-Object System.Collections.Generic.List[byte]
+  $m.AddRange([byte[]](0x12, 0x34, 1, 0, 0, $questions, 0, 0, 0, 0, 0, 0))
+  foreach ($label in $name.Split('.')) { $m.Add([byte]$label.Length); $m.AddRange($Latin1.GetBytes($label)) }
+  $m.AddRange([byte[]](0, 0, 1, 0, 1))
+  return , $m.ToArray()
+}
+
 function New-Record([int]$type, [byte[]]$body) {
   return , ([byte[]](@($type, 3, 3, ($body.Length -shr 8), ($body.Length -band 0xFF)) + $body))
 }
@@ -675,15 +726,20 @@ function Invoke-SelfTest {
     @{ Name = 'early data offered'; Frames = (Conn ([byte[]]((New-Hello $true @(0x0304) @(42)) + $app)) ([byte[]]($sh + $app))); Verdict = 'FAIL'; Want = 'early data' },
     @{ Name = 'plain HTTP to the server port'; Frames = (Conn ($Latin1.GetBytes("POST /v1/upload HTTP/1.1`r`nAuthorization: Bearer x`r`n`r`n")) ([byte[]]@())); Verdict = 'FAIL'; Want = 'readable protocol text' },
     @{ Name = 'server reached on another port'; Frames = (Conn ([byte[]]($ch + $app)) ([byte[]]($sh + $app)) 80); Verdict = 'FAIL'; Want = 'only TCP 8443' },
-    @{ Name = 'canary in clear to an internet address'; Frames = @(, (New-Frame $pc '8.8.8.8' 'TCP' 50010 443 1 0x18 ($Latin1.GetBytes('xxCAPTURE-PC-7F3Axx')))); Verdict = 'FAIL'; Want = 'canary text' },
+    @{ Name = 'canary in clear to an internet address'; Frames = @(, (New-Frame $pc '8.8.8.8' 'UDP' 5353 53 0 0 ($Latin1.GetBytes('xxCAPTURE-PC-7F3Axx')))); Verdict = 'FAIL'; Want = 'canary text' },
+    @{ Name = 'canary in clear over TCP to an internet address'; Frames = @(, (New-Frame $pc '8.8.8.8' 'TCP' 50010 443 1 0x18 ($Latin1.GetBytes('xxCAPTURE-PC-7F3Axx')))); Verdict = 'FAIL'; Want = 'canary text' },
+    @{ Name = 'canary inside a well-formed DNS query (never set aside)'; Frames = @(, (New-Frame $pc '192.168.50.1' 'UDP' 50014 53 0 0 (New-DnsMessage 'capture-pc-7f3a.local'))); Verdict = 'FAIL'; Want = 'canary text' },
+    @{ Name = 'PC name in a non-DNS payload to port 53'; Frames = @(, (New-Frame $pc '8.8.8.8' 'UDP' 50015 53 0 0 ($Latin1.GetBytes('xxNKHOST-77xx')))); Verdict = 'FAIL'; Want = 'not a recognised name-discovery message' },
+    @{ Name = 'PC name inside a longer DNS label (not the name itself)'; Frames = @(, (New-Frame $pc '192.168.50.1' 'UDP' 50016 53 0 0 (New-DnsMessage 'xnkhost-77x.local'))); Verdict = 'FAIL'; Want = 'not a recognised name-discovery message' },
+    @{ Name = 'PC name in clear inside the server connection'; Frames = (Conn ([byte[]]($ch + $app + $Latin1.GetBytes('NKHOST-77'))) ([byte[]]($sh + $app))); Verdict = 'FAIL'; Want = 'with the server' },
     @{ Name = 'canary in clear to a LAN host outside name discovery'; Frames = @(, (New-Frame $pc '192.168.50.30' 'UDP' 50011 9999 0 0 ($Latin1.GetBytes('xxCAPTURE-PC-7F3Axx')))); Verdict = 'FAIL'; Want = 'canary text' },
     @{ Name = 'canary in clear inside the server connection'; Frames = (Conn ([byte[]]($ch + $app + $Latin1.GetBytes('CAPTURE-PC-7F3A'))) ([byte[]]($sh + $app))); Verdict = 'FAIL'; Want = 'canary text' },
-    @{ Name = 'the PC name in DNS, mDNS, LLMNR and NetBIOS beside genuine TLS 1.3'; Frames = @(
+    @{ Name = 'the PC name in DNS, mDNS, LLMNR and SSDP messages beside genuine TLS 1.3'; Frames = @(
         (Conn ([byte[]]($ch + $app)) ([byte[]]($sh + $app))) +
-        @((New-Frame $pc '192.168.50.1' 'UDP' 50012 53 0 0 ($Latin1.GetBytes('q.capture-pc-7f3a.local.'))),
-          (New-Frame $pc '224.0.0.251' 'UDP' 5353 5353 0 0 ($Latin1.GetBytes('m.CAPTURE-PC-7F3A.local.'))),
-          (New-Frame $pc '224.0.0.252' 'UDP' 50013 5355 0 0 ($Latin1.GetBytes('l.CAPTURE-PC-7F3A.'))),
-          (New-Frame $pc '192.168.50.255' 'UDP' 137 137 0 0 ($Latin1.GetBytes('CAPTURE-PC-7F3A'))))); Verdict = 'PASS'; Want = ''; Note = 'name-discovery' },
+        @((New-Frame $pc '192.168.50.1' 'UDP' 50012 53 0 0 (New-DnsMessage 'nkhost-77.office.lan')),
+          (New-Frame $pc '224.0.0.251' 'UDP' 5353 5353 0 0 (New-DnsMessage 'NKHOST-77.local')),
+          (New-Frame $pc '224.0.0.252' 'UDP' 50013 5355 0 0 (New-DnsMessage 'NKHOST-77')),
+          (New-Frame $pc '239.255.255.250' 'UDP' 50017 1900 0 0 ($Latin1.GetBytes("NOTIFY * HTTP/1.1`r`nHOST: 239.255.255.250:1900`r`nSERVER: Windows NKHOST-77`r`n`r`n"))))); Verdict = 'PASS'; Want = ''; Note = 'name-discovery' },
     @{ Name = 'before pairing, any packet to the server'; Frames = (Conn ([byte[]]($ch + $app)) ([byte[]]($sh + $app))); Verdict = 'FAIL'; Want = 'before pairing'; Phase = 'BeforePairing' }
   )
   # Out of order with a retransmission: the reassembly must still find a clean TLS 1.3 stream.
@@ -716,7 +772,7 @@ function Invoke-SelfTest {
     $file = Join-Path $dir 'case.pcapng'
     [IO.File]::WriteAllBytes($file, (New-PcapNg $c.Frames))
     $phaseName = if ($c.ContainsKey('Phase')) { $c.Phase } else { 'PairedOff' }
-    $r = Invoke-CaptureAnalysis $file @($srv) 8443 @('CAPTURE-PC-7F3A') $phaseName
+    $r = Invoke-CaptureAnalysis $file @($srv) 8443 @('CAPTURE-PC-7F3A') $phaseName @('NKHOST-77')
     $v = Get-PhaseVerdict $r $null $true @($srv) 8443
     $said = @($v.Fails) + @($v.Missing)
     $ok = ($v.Verdict -eq $c.Verdict) -and ($c.Verdict -eq 'PASS' -or (($said -join ' | ') -like "*$($c.Want)*"))
@@ -876,7 +932,7 @@ function Write-PhaseResult($cap, $v) {
 if ($SelfTest) { Invoke-SelfTest; return }
 
 if ($PSCmdlet.ParameterSetName -eq 'Analyze') {
-  $r = Invoke-CaptureAnalysis (Resolve-Path $Analyze).Path $ServerIp $ServerPort $Canary $Phase
+  $r = Invoke-CaptureAnalysis (Resolve-Path $Analyze).Path $ServerIp $ServerPort $Canary $Phase $HostnameCanary
   $v = Get-PhaseVerdict $r $null $true $ServerIp $ServerPort
   $verdict = Write-PhaseResult $r $v
   Add-Line 'This is the wire only: which program made each connection needs the connection audit of a physical run.'
@@ -899,7 +955,7 @@ $ips = @([System.Net.Dns]::GetHostAddresses($Server) | ForEach-Object { $_.ToStr
 if (-not $ips.Count) { throw "The server name $Server does not resolve on this PC." }
 $os = Get-CimInstance Win32_OperatingSystem
 Add-Line "HealthierYou network capture (T-S23) - $((Get-Date).ToString('yyyy-MM-dd HH:mm'))"
-Add-Line ("Windows: {0} build {1}; server resolved to {2} address(es); server port TCP {3}; canary given: {4}" -f $os.Caption, $os.BuildNumber, $ips.Count, $ServerPort, [bool]$Canary.Count)
+Add-Line ("Windows: {0} build {1}; server resolved to {2} address(es); server port TCP {3}; canary given: {4}; PC name checked: {5}" -f $os.Caption, $os.BuildNumber, $ips.Count, $ServerPort, [bool]$Canary.Count, [bool]$HostnameCanary.Count)
 # PowerShell unrolls a returned array: one running companion comes back as a bare int, and
 # Windows PowerShell 5.1 under StrictMode has no .Count on it. Every caller wraps it in @().
 function Get-CompanionIds { return @(Get-Process -Name 'hy-companion' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id }) }
@@ -942,7 +998,7 @@ $runPhases = {
     $running = @($idsAtStart | Where-Object { $idsAtEnd -contains $_ }).Count -gt 0
     pktmon etl2pcap $etl --out $pcap | Out-Null
     if (-not (Test-Path $pcap)) { throw "pktmon could not convert the capture for $ph" }
-    $cap = Invoke-CaptureAnalysis $pcap $ips $ServerPort $Canary $ph
+    $cap = Invoke-CaptureAnalysis $pcap $ips $ServerPort $Canary $ph $HostnameCanary
     $read = Read-AuditEvents $start $end.AddSeconds(2)
     $audit = [pscustomobject]@{ Enabled = $auditEnabled; Error = $read.Error; Events = $read.Events }
     $v = Get-PhaseVerdict $cap $audit $running $ips $ServerPort
