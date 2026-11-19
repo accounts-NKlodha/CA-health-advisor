@@ -20,6 +20,8 @@ yanked = "deny"
 unmaintained = "all"
 ignore = [
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error 1.0.4 (unmaintained, no vulnerability) is a build-time proc macro of glib-macros and gtk3-macros, the GTK stack Tauri uses on Linux only. The companion ships on Windows (WebView2), where it is not in the graph; nothing of it reaches a shipped binary." },
+    { id = "RUSTSEC-2026-0543", reason = "chrono flagged unmaintained (19 Nov 2026; no vulnerability, no safe upgrade). Used for local dates, durations and serde across every crate. Kept until a planned migration to jiff or time, tracked in docs/Decisions.md; a chrono vulnerability advisory would still fail this check." },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz flagged unmaintained with chrono (19 Nov 2026; no vulnerability, no safe upgrade). Same planned migration as RUSTSEC-2026-0543." },
 ]
 
 [licenses]
